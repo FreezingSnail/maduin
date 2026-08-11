@@ -20,6 +20,7 @@
 (require 'super-harness-agent)
 (require 'super-harness-session)
 (require 'super-harness-config)
+(require 'super-harness-workspace)
 
 (defvar super-harness-pipeline-timers nil
   "Alist ((SEAT-NAME . TIMER) ...) of active fleet polling timers.")
@@ -86,6 +87,72 @@ Free means session alive and status not `working'."
 
 ;;; Fleet polling
 
+(defun super-harness-pipeline--git (dir &rest args)
+  "Run `git -C DIR ARGS...' via shell; return exit status.
+Output is discarded.  Uses `call-process-shell-command' so the
+exit status is available programmatically."
+  (let ((default-directory dir)
+        (cmd (format "git -C %s %s"
+                     (shell-quote-argument dir)
+                     (mapconcat #'shell-quote-argument args " "))))
+    (call-process-shell-command cmd nil nil)))
+
+(defun super-harness-pipeline--main-root ()
+  "Return main super-harness repo root.
+Prefer the directory containing super-harness.el, else
+`default-directory'."
+  (or (and (locate-library "super-harness")
+           (file-name-directory (locate-library "super-harness")))
+      (expand-file-name default-directory)))
+
+(defun super-harness-pipeline--git-output (dir &rest args)
+  "Run `git -C DIR ARGS...'; return (STATUS . OUTPUT)."
+  (let* ((default-directory dir)
+         (cmd (format "git -C %s %s"
+                      (shell-quote-argument dir)
+                      (mapconcat #'shell-quote-argument args " ")))
+         (buf (get-buffer-create " *super-harness-pipeline-git*")))
+    (with-current-buffer buf (erase-buffer))
+    (cons (call-process-shell-command cmd nil buf)
+          (with-current-buffer buf (buffer-string)))))
+
+(defun super-harness-pipeline-land-branch (seat-name)
+  "Commit SEAT-NAME worktree changes and merge its branch into main.
+Return t on success, nil on conflict or failure (logged, never forced).
+Steps: add -A in worktree; commit if staged (t if nothing to land);
+then `git merge --no-ff' the seat branch from the main repo."
+  (let* ((wt (super-harness-workspace-path seat-name))
+         (branch (super-harness-workspace-branch seat-name))
+         (main (super-harness-pipeline--main-root)))
+    (if (not (file-directory-p wt))
+        (progn
+          (super-harness-workspace--log-warning
+           (format "land-branch: worktree %s missing for seat %s" wt seat-name))
+          nil)
+      (super-harness-pipeline--git wt "add" "-A")
+      (if (= 0 (super-harness-pipeline--git wt "diff" "--cached" "--quiet"))
+          ;; Nothing staged — nothing to land.
+          t
+        (let ((res (super-harness-pipeline--git-output
+                    wt "commit" "-m"
+                    (format "task complete (%s)" seat-name))))
+          (if (and (/= 0 (car res))
+                   (not (string-match-p "nothing to commit" (cdr res))))
+              (progn
+                (super-harness-workspace--log-warning
+                 (format "land-branch: commit failed (exit %d): %s"
+                         (car res) (cdr res)))
+                nil)
+            (let ((res (super-harness-pipeline--git-output
+                        main "merge" "--no-ff" branch
+                        "-m" (format "land %s" seat-name))))
+              (if (= 0 (car res))
+                  t
+                (super-harness-workspace--log-warning
+                 (format "land-branch: merge of %s into main failed (exit %d): %s"
+                         branch (car res) (cdr res)))
+                 nil))))))))
+
 (defun super-harness-pipeline-start-fleet (seat-name)
   "Start fleet polling timer for SEAT-NAME.  Return the timer.
 Repeats every `fleet.poll-interval' from config (default 30s)."
@@ -116,7 +183,7 @@ Repeats every `fleet.poll-interval' from config (default 30s)."
 (defun super-harness-pipeline--poll (seat-name)
   "Poll for a ready bd task and dispatch to fleet SEAT-NAME.
 Skip when SEAT-NAME is already working.  On agent exit, close the
-task with the agent's output and mark the seat idle."
+task with the agent's output, land its branch, and mark the seat idle."
   (let ((status (super-harness-agent-status seat-name)))
     (unless (and status (eq (plist-get status :status) 'working))
       (let ((task (car (super-harness-bd-ready-tasks))))
@@ -127,29 +194,35 @@ task with the agent's output and mark the seat idle."
                            (or (super-harness-pipeline--config-get 'workspaces 'path)
                                "harness/workspaces")))
                  (proc (super-harness-agent-spawn
-                        seat-name "fleet" model workdir))))
-            (if proc
-                (let ((buf (process-buffer proc)))
-                  (when buf
-                    (with-current-buffer buf
-                      (setq-local super-harness-current-task task)
-                      (setq-local super-harness-status 'working)))
-                  (set-process-sentinel
-                   proc
-                   (lambda (p _event)
-                     (when (eq (process-status p) 'exit)
-                       (let ((pbuf (process-buffer p)))
-                         (super-harness-bd-close
-                          task
-                          (when (buffer-live-p pbuf)
-                            (with-current-buffer pbuf
-                              (super-harness-pipeline--last-output))))
-                         (when (buffer-live-p pbuf)
-                           (with-current-buffer pbuf
-                             (setq-local super-harness-current-task nil)
-                             (setq-local super-harness-status 'idle)))))))
-              (message "super-harness: spawn %s failed for task %s"
-                       seat-name task))))))))
+                        seat-name "fleet" model workdir)))
+            (if (not proc)
+                (message "super-harness: spawn %s failed for task %s"
+                         seat-name task)
+              (let ((buf (process-buffer proc)))
+                (when buf
+                  (with-current-buffer buf
+                    (setq-local super-harness-current-task task)
+                    (setq-local super-harness-status 'working)))
+                (set-process-sentinel
+                 proc
+                 (lambda (p _event)
+                   (when (eq (process-status p) 'exit)
+                     (let ((pbuf (process-buffer p)))
+                       (super-harness-bd-close
+                        task
+                        (when (buffer-live-p pbuf)
+                          (with-current-buffer pbuf
+                            (super-harness-pipeline--last-output))))
+                       (condition-case err
+                           (super-harness-pipeline-land-branch seat-name)
+                         (error
+                          (super-harness-workspace--log-warning
+                           (format "land-branch failed for seat %s: %s"
+                                   seat-name (error-message-string err)))))
+                       (when (buffer-live-p pbuf)
+                         (with-current-buffer pbuf
+                           (setq-local super-harness-current-task nil)
+                           (setq-local super-harness-status 'idle)))))))))))))))
 
 ;;; Crew dispatch
 

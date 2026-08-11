@@ -110,17 +110,32 @@ Requests handoff from each agent, waits up to welfare.handoff-timeout,
 then kills survivors.  Logs shutdown."
   (interactive)
   (let ((inhibit-redisplay t)
-        (mode-line-format nil)           ; suppress modeline evals globally
-        (debug-on-error nil))
-    (condition-case err
-        (progn
-          (super-harness-handoff-stop-all
-           (super-harness--config-get 'handoff-timeout 'welfare))
-          (dolist (pair (super-harness-session-list))
-            (super-harness-session-kill (car pair))))
-      (error
-       (message "super-harness: shutdown error (continuing): %s"
-                (error-message-string err)))))
+        (debug-on-error nil)
+        (saved-modelines nil))
+    ;; Nuke mode-line-format on every visible buffer to prevent
+    ;; doom-modeline :eval segments from firing during buffer kills.
+    ;; let-binding mode-line-format doesn't override buffer-local values.
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (push (cons buf (buffer-local-value 'mode-line-format buf)) saved-modelines)
+        (with-current-buffer buf
+          (setq mode-line-format nil))))
+    (unwind-protect
+        (condition-case err
+            (progn
+              (super-harness-handoff-stop-all
+               (super-harness--config-get 'handoff-timeout 'welfare))
+              (dolist (pair (super-harness-session-list))
+                (super-harness-session-kill (car pair))))
+          (error
+           (message "super-harness: shutdown error (continuing): %s"
+                    (error-message-string err))))
+      ;; Restore modelines on surviving buffers.
+      (dolist (pair saved-modelines)
+        (let ((buf (car pair)))
+          (when (buffer-live-p buf)
+            (with-current-buffer buf
+              (setq mode-line-format (cdr pair))))))))
   (message "super-harness stopped"))
 
 ;;;###autoload

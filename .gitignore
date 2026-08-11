@@ -4,3 +4,13 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+# bd worktree
+ant/
+# bd worktree
+bat/
+# bd worktree
+homer/
+# bd worktree
+plato/
+# bd worktree
+austen/

@@ -21,6 +21,7 @@
 (require 'super-harness-config)
 (require 'super-harness-session)
 (require 'super-harness-brain)
+(require 'super-harness-workspace)
 
 ;; super-harness-bd-bridge.el may not exist yet; guard the require.
 (condition-case nil
@@ -119,12 +120,17 @@ otherwise insert into the agent buffer.  Run
             (insert text))))
       (run-hook-with-args 'super-harness-agent-priming-hook seat-name))))
 
-(defun super-harness-agent-spawn (seat role model workdir)
-  "Spawn agent SEAT with ROLE and MODEL in WORKDIR.
+(defun super-harness-agent-spawn (seat role model _workdir)
+  "Spawn agent SEAT with ROLE and MODEL in its seat worktree.
+The worktree is ensured (created when missing); WORKDIR argument is
+kept for call-site compatibility but the worktree path wins.
 Delegate to super-harness-session-create, prime the new agent, and
 return its process (or nil on failure)."
   (condition-case err
-      (let ((buf (super-harness-session-create seat role model workdir)))
+      (let* ((dir (or (super-harness-workspace-ensure seat)
+                      (super-harness-workspace-path seat)))
+             (default-directory (or dir default-directory))
+             (buf (super-harness-session-create seat role model dir)))
         (when buf
           (super-harness-agent-prime seat role)
           (get-buffer-process buf)))
