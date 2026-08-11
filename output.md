@@ -1,73 +1,41 @@
-# output.md — super-harness-c7d.2 (bd-bridge.el)
+# output.md — super-harness-c7d.6 agent.el
 
-## 介面
+## 改
+- `harness/super-harness-agent.el` — 实现 agent 生命周期（spawn/prime/kill/status/restart）
 
-`harness/super-harness-bd-bridge.el` 提供：
+## 新增接口
 
-```
-(super-harness-bd-ready-tasks)                    ;; → list of task ID strings (epics excluded)
-(super-harness-bd-claim task-id)                  ;; → t | nil
-(super-harness-bd-close task-id output)           ;; → t | nil
-(super-harness-bd-create-epic title desc)         ;; → epic ID string | nil
-(super-harness-bd-create-task title desc parent-id) ;; → task ID string | nil
-(super-harness-bd-dep-add task-id depends-on-id)  ;; → t | nil
-(super-harness-bd-show task-id)                   ;; → plist (:title :desc :status :deps) | nil
-(super-harness-bd-remember fact)                  ;; → t | nil
-(super-harness-bd-prime)                          ;; → string (bd prime output) | nil
-```
+```elisp
+(super-harness-agent-spawn seat role model workdir)   ;; → process | nil
+  ;; session-create 委托；失败返 nil；创建后自动 prime；返进程
 
-## 契約
+(super-harness-agent-prime seat-name &optional role)  ;; → void
+  ;; 模板（crew/fleet-prompt.txt）替换 {name}{seat}{model}
+  ;; 追 brain.prime-files 内容（super-harness-brain-read）
+  ;; 追 handoff 缓存（.agents/handoff/{seat}.md，优先 handoff-read）
+  ;; 追 bd context（super-harness-bd-prime，可用时）
+  ;; 进程活→process-send-string；否则插 buffer（禁只读）
 
-- **ready-tasks**: `bd ready --exclude-type epic --json`；JSON 陣列取 `id` 欄。退出碼非零 → nil + log。
-- **claim**: `bd update <id> --claim`（原子 claim，冪等）。exit 0 → t。
-- **close**: 先以 `output` 寫入 `super-harness-bd-close-file`（預設 `output.md`，`default-directory` 下），再 `bd close <id> --reason-file <file>`。exit 0 → t。
-- **create-epic / create-task**: `bd create <title> --type epic|task --silent --description <desc> [--parent <id>]`；`--silent` 輸出純 ID，`string-trim` 取之。空 → nil。
-- **dep-add**: `bd dep add <task-id> <depends-on-id>`。exit 0 → t。
-- **show**: `bd show <id> --json` 取 `title`/`description`/`status`；`bd dep list <id> --json` 取 `id` 列表為 `:deps`。
-- **remember**: `bd remember <fact>`。exit 0 → t。
-- **prime**: `bd prime` 原樣返回輸出字串；失敗 → nil。
-- **執行**: `super-harness-bd--run` 用 `call-process shell-file-name`（返回 `(exit-code . output)`）；JSON 用 `json-read-from-string`（陣列轉 list）。
-- **錯誤**: 非零退出 → `super-harness-bd--log-error`（`super-harness-log` 若可用，否則 `message`）；返回 nil。
-- **依賴**: `(require 'cl-lib)`、`(require 'json)`、`(require 'super-harness-logging nil t)`（guard）。
-- `(provide 'super-harness-bd-bridge)`。
+(super-harness-agent-kill seat-name)                  ;; → boolean（委托 session-kill）
 
-## 驗證
+(super-harness-agent-status seat-name)                ;; → plist
+  ;; (:status :task :uptime :model :role)；uptime = (- (float-time) started-at)
 
-`emacs -Q --batch -l harness/super-harness-bd-bridge.el -f batch-byte-compile` → exit 0。
-自測: ready 列 task、create-task → ID、dep-add → t、show 之 :deps 含父+依賴、close → t（`/tmp` 輸出檔）、remember → t、prime 長字串、bad-id → nil + log。
-
----
-
-# output.md — super-harness-c7d.5 (session.el)
-
-## 介面
-
-`harness/super-harness-session.el` 提供：
-
-```
-(super-harness-session-create seat-name role model workdir) ;; → buffer
-(super-harness-session-kill seat-name)                     ;; → boolean
-(super-harness-session-list)                               ;; → alist ((seat-name . status) ...)
-(super-harness-session-switch seat-name)                   ;; → void
-(super-harness-session-alive-p seat-name)                  ;; → boolean
+(super-harness-agent-restart seat-name)               ;; → process | nil
+  ;; 从 buffer-local 读 seat/role/model/workdir，kill 后重 spawn
 ```
 
-## 契約
+## 其他
+- `super-harness-agent-priming-hook` — defvar，prime 后运行，收 seat-name
+- requires: cl-lib, super-harness-config, super-harness-session, super-harness-brain；bd-bridge 用 condition-case 守护
+- 文件内自推 load-path（本文件所在目录），支持 `emacs -Q --batch -l` 直载
+- 辅助私有函数：`super-harness-agent--config-get`、`--template`、`--substitute`、`--handoff`、`--priming-text`
 
-- **create**: 建 buffer `*super-harness/{role}-{seat}*`。先 `compilation-mode`（若 fboundp），再設 buffer-local vars：`super-harness-seat`、`super-harness-role`、`super-harness-model`、`super-harness-status`（`'running`）、`super-harness-started-at`（`float-time`）、`super-harness-current-task`（nil）、`super-harness-workdir`、`super-harness-intent`（`(opencode "--model" model)`）。
-- **opencode 缺**（`executable-find` nil）→ 仍回 buffer；status `'dead`；message 警告；`super-harness-intent` 存意圖。
-- **process**: `make-process`，command `(exe "--model" model)`，sentinel `super-harness-session--sentinel`；`set-process-query-on-exit-flag nil`（kill-buffer 不詢問）。
-- **sentinel**: 退出 → buffer 內 status `'dead`、current-task nil、message 記錄；`run-hooks 'super-harness-session-on-exit-hook`（defvar nil，未定義亦安）。
-- **kill**: 殺活 process + 殺 buffer；回 t 若有物可殺，nil 若本無。
-- **list**: 掃 `buffer-list`，凡 `super-harness-seat` 為 buffer-local 者收集 `(seat . status)`。
-- **switch**: 找不到 → `error "super-harness: no session for seat %s"`。
-- **alive-p**: process live 且 status 非 `'dead`。
-- **變數**: `super-harness-opencode-command`（預設 `"opencode"`，測試可改）、`super-harness-session-on-exit-hook`。
-- **依賴**: `(require 'cl-lib)`；`(require 'super-harness-logging)` 以 `condition-case` 守護。
-- `(provide 'super-harness-session)`。
+## 验证
+- `emacs -Q --batch -L harness -f batch-byte-compile harness/super-harness-agent.el` — 无错无警告
+- `emacs -Q --batch -l harness/super-harness-agent.el -f batch-byte-compile` — 无错
+- 功能测试（batch）：prime 插模板+brain+bd 上下文于 buffer，替换正确；spawn 生进程；restart kill+重生，status plist 正确；kill 返 t
 
-## 驗證
-
-`emacs -Q --batch -L harness -l harness/super-harness-session.el -f batch-byte-compile` → exit 0，無警告。
-自測（`super-harness-opencode-command` 指向 `sleep 60` wrapper）: create → buffer 名正確；list `(("ant" . running))`；alive-p t；missing seat nil；switch 切換正確；kill → t 且 list 空；殺 process → sentinel 觸發，status dead、hook 跑；opencode 缺 → buffer 仍建、status dead、intent 存。
-
+## 注意
+- 模板文件目前仅含 {name} {seat}，无 {model} 占位符；替换逻辑已备，模板增占位符即生效
+- session-create 遇 opencode 缺失返 buffer 无进程；spawn 仍返 nil 进程（诚实状态）
