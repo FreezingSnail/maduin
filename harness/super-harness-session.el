@@ -94,9 +94,9 @@ in `super-harness-intent' with status `dead'."
          (had (or (and proc (process-live-p proc))
                   (and buf (buffer-live-p buf)))))
     (when (and proc (process-live-p proc))
-      (kill-process proc))
+      (ignore-errors (kill-process proc)))
     (when (and buf (buffer-live-p buf))
-      (kill-buffer buf))
+      (ignore-errors (kill-buffer buf)))
     (and had t)))
 
 (defun super-harness-session-list ()

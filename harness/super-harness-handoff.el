@@ -122,7 +122,8 @@ config welfare.handoff-timeout, 120 when unset), then kill any agent
 still alive."
   (let ((timeout (or timeout
                      (super-harness-handoff--config-get 'handoff-timeout)
-                     120)))
+                     120))
+        (inhibit-redisplay t))
     (dolist (pair (super-harness-session-list))
       (let ((seat (car pair)))
         (super-harness-handoff-request seat)

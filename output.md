@@ -1,38 +1,30 @@
-# super-harness-c7d.11 — ERT tests for all harness components
+# super-harness-m0b.1 — bd-bridge: worktree wrappers
 
-## 變更
+## 介面
 
-- `harness/super-harness-test.el` — 新建 ERT 測試套件，20 測試，全標 `:tags '(super-harness)`。
+`harness/super-harness-bd-bridge.el` 新增三函數（`provide` 前）：
 
-## 覆蓋
+- `(super-harness-bd-worktree-create name)` → path string 或 nil
+  - 執行 `bd worktree create <name> --branch <name>`
+  - 從輸出 `✓ Created worktree: <path>` 解析；不獲則退 `(super-harness-bd-worktree-list)` 查 name
+- `(super-harness-bd-worktree-list)` → alist `((name . path) ...)`
+  - 主 `bd worktree list --json`（name/path 欄位）；失敗退 `git worktree list --porcelain`（name 取自路徑 basename）
+- `(super-harness-bd-worktree-info dir)` → plist `(:path :branch :name)` 或 nil
+  - 執行 `git -C <dir> worktree list --porcelain`，篩 path 相等之條目
+  - （`git worktree info` 子命令不存在於 git 2.50；用 list --porcelain）
 
-| 組件 | 測試 | 驗證 |
-|---|---|---|
-| config | 5 | 非 nil；crew seats = ant/bat；fleet seats = homer/plato/austen；welfare.handoff-enabled = t；fleet.poll-interval = 30 |
-| brain | 3 | write→file 存在；read 回內容；read 缺失→nil；list 回相對路徑（temp dir 綁定 `super-harness-config` brain.path） |
-| bd-bridge | 2 | 九函數皆 fboundp；bd CLI 可用時 `super-harness-bd-remember` 存無害 fact，再 `bd forget` 清理（`super-harness-test--bd-forget-matching` 解析 `bd memories --json`）；全程 condition-case 守護，無 bd 亦過 |
-| session | 1 | fake CLI（temp shell script `sleep 60`）→ buffer 存在、`alive-p` t、`session-list` 含之、kill→alive-p nil |
-| agent | 2 | `agent-status` 無此 seat→nil；`agent-prime` 於 dead session buffer 不 error（綁不存在 CLI 使無 process，走 insert 路徑） |
-| handoff | 2 | write/read roundtrip（let 綁 `default-directory` 至 temp dir）；read 缺失→nil |
-| pipeline | 2 | `pipeline-status` plist 含六鍵 `:queued :active :completed :blocked :fleet-free :fleet-busy`；`pipeline-fleet-seats` 回 3 |
-| cockpit | 2 | `cockpit-show` 造 `*super-harness-cockpit*` buffer；`cockpit-refresh` 不 error（batch 下 `switch-to-buffer` 以 condition-case 守護） |
-| main | 1 | `super-harness-mode/start/stop/status/restart/attach/crew/bootstrap` 皆 fboundp |
+私助（`--` 前綴）：`super-harness-bd-worktree--entry`、`--porcelain-entries`（容 detached 無 branch）、`--parse-created-path`。
 
-## 環境安全
+## 錯誤處理
 
-- bd 調用（remember/status count）以 condition-case 守護；無 bd 時測試仍過。
-- session/agent 用 temp shell script 或不存在 CLI 路徑，不依賴 opencode 真實安裝。
-- 不啟動真實進程、不觸發真實 bd 寫入（除可清理之 probe fact）。
+沿襲既有：`super-harness-bd--run` + 退出碼檢查；失敗經 `super-harness-bd--log-error`，回 nil。
 
-## 執行
+## 驗證
 
-```bash
-# 形式 1：全跑（測試皆 tag super-harness）
-emacs -Q --batch -l harness/super-harness-test.el -f ert-run-tests-batch-and-exit
-
-# 形式 2：tag selector
-emacs -Q --batch -l harness/super-harness-test.el \
-  --eval "(ert-run-tests-batch-and-exit '(tag super-harness))"
-```
-
-結果：**20 tests, 20 results as expected, 0 unexpected**（兩種形式皆然，約 3 秒）。
+- 編譯：`emacs -Q --batch -l harness/super-harness-bd-bridge.el -f batch-byte-compile` — 淨，exit 0
+- 功能（暫存庫 `~/.wt-test-scratch`，git init + bd init 後）：
+  - list → `(("wt-test-scratch" . "…/.wt-test-scratch") ("x" . "…/x") ("y" . "…/y"))` ✓
+  - create `z` → `"…/.wt-test-scratch/z"` ✓
+  - info `z` → `(:path "…/z" :branch "z" :name "z")` ✓
+  - info 不存在目錄 → nil + error log ✓
+  - 事後 `git worktree remove --force z`，刪暫存庫 ✓

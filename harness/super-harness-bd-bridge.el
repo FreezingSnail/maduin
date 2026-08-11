@@ -173,6 +173,99 @@ Return t on success."
        (format "bd prime failed (exit %d): %s" (car res) (cdr res)))
       nil)))
 
+;;; Worktree wrappers
+
+(defun super-harness-bd-worktree--entry (path branch)
+  "Build (:path :branch :name) plist from PATH and BRANCH (may be nil)."
+  (list :path path
+        :branch branch
+        :name (file-name-nondirectory (directory-file-name path))))
+
+(defun super-harness-bd-worktree--porcelain-entries (output)
+  "Parse git worktree --porcelain OUTPUT into list of (:path :branch :name).
+Handle detached worktrees (no branch line)."
+  (let (entries cur-path cur-branch)
+    (dolist (line (split-string output "\n"))
+      (cond
+       ((string-prefix-p "worktree " line)
+        (when cur-path
+          (push (super-harness-bd-worktree--entry cur-path cur-branch)
+                entries))
+        (setq cur-path (string-trim (substring line 9))
+              cur-branch nil))
+       ((string-prefix-p "branch " line)
+        (setq cur-branch
+              (string-remove-prefix
+               "refs/heads/"
+               (string-trim (substring line 7)))))))
+    (when cur-path
+      (push (super-harness-bd-worktree--entry cur-path cur-branch) entries))
+    (nreverse entries)))
+
+(defun super-harness-bd-worktree--parse-created-path (output)
+  "Extract worktree path from `bd worktree create' OUTPUT, or nil."
+  (when (string-match "Created worktree: \\([^\n]+\\)" output)
+    (string-trim (match-string 1 output))))
+
+(defun super-harness-bd-worktree-create (name)
+  "Create worktree NAME via `bd worktree create NAME --branch NAME'.
+Return worktree path string or nil on failure."
+  (let ((res (super-harness-bd--run
+              (format "bd worktree create %s --branch %s"
+                      (shell-quote-argument name)
+                      (shell-quote-argument name)))))
+    (if (= 0 (car res))
+        (or (super-harness-bd-worktree--parse-created-path (cdr res))
+            (cdr (assoc name (super-harness-bd-worktree-list))))
+      (super-harness-bd--log-error
+       (format "bd worktree create %s failed (exit %d): %s"
+               name (car res) (cdr res)))
+      nil)))
+
+(defun super-harness-bd-worktree-list ()
+  "Return alist ((name . path) ...) from `bd worktree list'.
+Use `bd worktree list --json'; fall back to `git worktree list --porcelain'."
+  (let ((res (super-harness-bd--run "bd worktree list --json")))
+    (if (and (= 0 (car res))
+             (super-harness-bd--json-data (cdr res)))
+        (let ((data (super-harness-bd--json-data (cdr res))))
+          (delq nil
+                (mapcar (lambda (o)
+                          (when (listp o)
+                            (let ((name (alist-get 'name o))
+                                  (path (alist-get 'path o)))
+                              (when (and name path)
+                                (cons name path)))))
+                        data)))
+      (super-harness-bd--log-error
+       (format "bd worktree list failed (exit %d): %s" (car res) (cdr res)))
+      (let ((g (super-harness-bd--run "git worktree list --porcelain")))
+        (if (= 0 (car g))
+            (mapcar (lambda (e)
+                      (cons (plist-get e :name) (plist-get e :path)))
+                    (super-harness-bd-worktree--porcelain-entries (cdr g)))
+          (super-harness-bd--log-error
+           (format "git worktree list failed (exit %d): %s" (car g) (cdr g)))
+          nil)))))
+
+(defun super-harness-bd-worktree-info (dir)
+  "Return plist (:path :branch :name) for worktree at DIR, or nil.
+Runs `git -C DIR worktree list --porcelain'."
+  (let* ((d (directory-file-name (expand-file-name dir)))
+         (res (super-harness-bd--run
+               (format "git -C %s worktree list --porcelain"
+                       (shell-quote-argument d)))))
+    (if (/= 0 (car res))
+        (progn
+          (super-harness-bd--log-error
+           (format "git worktree list %s failed (exit %d): %s"
+                   d (car res) (cdr res)))
+          nil)
+      (cl-find-if
+       (lambda (e)
+         (string= d (directory-file-name (plist-get e :path))))
+       (super-harness-bd-worktree--porcelain-entries (cdr res))))))
+
 (provide 'super-harness-bd-bridge)
 
 ;;; super-harness-bd-bridge.el ends here
