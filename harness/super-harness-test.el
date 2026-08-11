@@ -270,14 +270,14 @@ Mimics an opencode subprocess so session tests need no real CLI."
         (super-harness-bootstrap)
         (should t))
     (error
-     (should nil (format "bootstrap errored: %s" (error-message-string err))))))
+     (ert-fail (format "bootstrap errored: %s" (error-message-string err))))))
 
 (ert-deftest super-harness-test-land-branch-bogus-seat ()
   :tags '(super-harness)
   (condition-case err
       (should (null (super-harness-pipeline-land-branch "no-such-seat-xyz")))
     (error
-     (should nil (format "land-branch errored: %s" (error-message-string err))))))
+     (ert-fail (format "land-branch errored: %s" (error-message-string err))))))
 
 (ert-deftest super-harness-test-config-workspaces-land-on-stop ()
   :tags '(super-harness)
