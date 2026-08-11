@@ -248,6 +248,42 @@ Mimics an opencode subprocess so session tests need no real CLI."
                super-harness-bootstrap))
     (should (fboundp f))))
 
+;;; 10. workspace integration
+
+(ert-deftest super-harness-test-workspace-path ()
+  :tags '(super-harness)
+  (should (equal (super-harness-workspace-path "ant")
+                 (expand-file-name
+                  "ant"
+                  (expand-file-name
+                   (or (cdr (assq 'path (cdr (assq 'workspaces super-harness-config))))
+                       "harness/workspaces"))))))
+
+(ert-deftest super-harness-test-workspace-exists-bogus ()
+  :tags '(super-harness)
+  (should-not (super-harness-workspace-exists-p "no-such-seat-xyz")))
+
+(ert-deftest super-harness-test-bootstrap-no-error ()
+  :tags '(super-harness)
+  (condition-case err
+      (progn
+        (super-harness-bootstrap)
+        (should t))
+    (error
+     (should nil (format "bootstrap errored: %s" (error-message-string err))))))
+
+(ert-deftest super-harness-test-land-branch-bogus-seat ()
+  :tags '(super-harness)
+  (condition-case err
+      (should (null (super-harness-pipeline-land-branch "no-such-seat-xyz")))
+    (error
+     (should nil (format "land-branch errored: %s" (error-message-string err))))))
+
+(ert-deftest super-harness-test-config-workspaces-land-on-stop ()
+  :tags '(super-harness)
+  (let ((ws (cdr (assq 'workspaces super-harness-config))))
+    (should (eq (alist-get 'land-on-stop ws) t))))
+
 (provide 'super-harness-test)
 
 ;;; super-harness-test.el ends here

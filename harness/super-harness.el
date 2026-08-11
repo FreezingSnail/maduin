@@ -23,6 +23,7 @@
 (require 'super-harness-agent)
 (require 'super-harness-handoff)
 (require 'super-harness-pipeline)
+(require 'super-harness-workspace)
 (require 'super-harness-cockpit)
 
 ;;; Minor mode
@@ -125,6 +126,15 @@ then kills survivors.  Logs shutdown."
             (progn
               (super-harness-handoff-stop-all
                (super-harness--config-get 'handoff-timeout 'welfare))
+              ;; Land fleet branches when configured; never abort stop.
+              (when (super-harness--config-get 'land-on-stop 'workspaces)
+                (dolist (pair (super-harness--seats))
+                  (when (string= (cdr pair) "fleet")
+                    (condition-case err
+                        (super-harness-pipeline-land-branch (car pair))
+                      (error
+                       (message "super-harness: land-branch failed for %s: %s"
+                                (car pair) (error-message-string err)))))))
               (dolist (pair (super-harness-session-list))
                 (super-harness-session-kill (car pair))))
           (error
@@ -180,6 +190,13 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
     (make-directory dir t))
   (dolist (pair (super-harness--seats))
     (make-directory (super-harness--seat-workdir (car pair)) t))
+  ;; Ensure per-seat git worktrees; never abort on failure (logged, nil).
+  (dolist (pair (super-harness--seats))
+    (condition-case err
+        (super-harness-workspace-ensure (car pair))
+      (error
+       (message "super-harness: worktree ensure failed for %s: %s"
+                (car pair) (error-message-string err)))))
   (if (file-exists-p ".beads")
       (message "super-harness: bootstrap done")
     (message "super-harness: bootstrap done; hint: run `bd init` (no .beads found)")))

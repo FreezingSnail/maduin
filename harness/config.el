@@ -14,7 +14,7 @@
               (poll-interval . 30) (max-concurrent . 1)))
     (brain . ((path . ".agents/brain") (prime-files . ("architecture.md" "conventions.md"))))
     (welfare . ((handoff-enabled . t) (handoff-timeout . 120) (blameless . t)))
-    (workspaces . ((path . "harness/workspaces")))
+    (workspaces . ((path . "harness/workspaces") (land-on-stop . t)))
     (pipeline . ((review-required . nil) (auto-close-epic . t)))))
 
 (provide 'super-harness-config)
