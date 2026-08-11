@@ -1,60 +1,94 @@
-# output.md — super-harness-c7d.9 (cockpit.el: dashboard buffer)
+# output.md — super-harness-c7d.10 (super-harness.el: minor mode, commands, keybindings)
 
 ## Implemented interface
 
-File: `harness/super-harness-cockpit.el`
+File: `harness/super-harness.el`
 
-### New public functions
+### Minor mode
 
-- `(super-harness-cockpit-show)` → buffer
-  Creates/switches to `*super-harness-cockpit*`, enables
-  `tabulated-list-mode`, installs `super-harness-cockpit-map`, then
-  calls `super-harness-cockpit-refresh`. Returns the buffer.
+- `super-harness-mode` — global minor mode, lighter ` SH`.
+  Keymap `super-harness-mode-map`:
+  - `C-c s s` → `super-harness-status`
+  - `C-c s a` → `super-harness-attach`
+  - `C-c s c` → `super-harness-crew`
 
-- `(super-harness-cockpit-refresh)` → void (interactive, bound to `r`)
-  Sets `tabulated-list-format` to columns `Agent | Role | Status |
-  Task | Uptime(s)`. Rows are built from `(super-harness-agent-status
-  SEAT)` for every seat in config crew + fleet (via
-  `super-harness-pipeline--crew-seats` and
-  `super-harness-pipeline-fleet-seats`). Prints the table
-  (`tabulated-list-print t`), then appends a pipeline summary line
-  from `(super-harness-pipeline-status)`:
-  `queued N | active N | completed N | blocked N | fleet-free N | fleet-busy N`.
+### Interactive commands
 
-- `(super-harness-cockpit-attach)` → void (interactive, bound to `RET`)
-  Reads the row id (`tabulated-list-get-id`) and calls
-  `super-harness-session-switch`. Errors when no row under point.
+- `(super-harness-start)` → void
+  Reads config; for each crew seat: `super-harness-agent-spawn`
+  seat `crew` model workdir (workdir = `workspaces.path`/SEAT); for
+  each fleet seat: spawn + `super-harness-pipeline-start-fleet`;
+  then `super-harness-cockpit-show` + `super-harness-cockpit-refresh`;
+  message `super-harness started`.
 
-- `(super-harness-cockpit-kill)` → void (interactive, bound to `k`)
-  Reads the row id; when `super-harness-handoff-restart` is loaded
-  uses it, else falls back to `super-harness-agent-kill`.
+- `(super-harness-stop)` → void
+  `(super-harness-handoff-stop-all welfare.handoff-timeout)` then
+  `super-harness-session-kill` for every remaining session; message
+  `super-harness stopped`.
 
-### Keymap
+- `(super-harness-status)` → void
+  `super-harness-cockpit-refresh` + summary message with session
+  count and `super-harness-cockpit--pipeline-summary`.
 
-`super-harness-cockpit-map` (sparse keymap, parent
-`tabulated-list-mode-map`, installed in `super-harness-cockpit-show`
-via `use-local-map`):
+- `(super-harness-restart)` → void
+  `super-harness-stop` then `super-harness-start`.
 
-- `RET` → `super-harness-cockpit-attach`
-- `r` → `super-harness-cockpit-refresh`
-- `q` → `quit-window`
-- `k` → `super-harness-cockpit-kill`
+- `(super-harness-attach SEAT)` → void (interactive)
+  `completing-read` over config seats (crew + fleet), then
+  `super-harness-session-switch`.
 
-### Notes
+- `(super-harness-crew WORK)` → void (interactive)
+  Prompts for work text, `super-harness-pipeline-dispatch-crew`.
 
-- Requires `cl-lib`, `tabulated-list`, `super-harness-session`,
-  `super-harness-agent`, `super-harness-pipeline`,
-  `super-harness-config`; `super-harness-handoff` guarded by
-  `condition-case`.
-- Seat with no live session renders Status `dead`, Task `—`,
-  Uptime `—`.
-- Pipeline summary appended after the table inside
-  `let ((inhibit-read-only t))` because `tabulated-list-mode` buffers
-  are read-only.
+- `(super-harness-bootstrap)` → void
+  Creates `.agents/brain`, `.agents/handoff`, `.agents/logs` and
+  per-seat workspace dirs; checks `.beads` (hint to run `bd init`
+  when absent); message done.
+
+### Helpers
+
+- `(super-harness--config-get KEY [SECTION])` → value | nil
+  Looks up KEY in `super-harness-config`; optional SECTION scopes
+  lookup, e.g. `(super-harness--config-get 'handoff-timeout 'welfare)`.
+
+- `(super-harness--seats)` → `((SEAT . ROLE) ...)` from config, crew
+  then fleet.
+
+- `(super-harness--seat-model SEAT ROLE)` → model string | "default".
+
+- `(super-harness--seat-workdir SEAT)` → expanded workspace path.
+
+### Hooks
+
+- `kill-emacs-hook` — `super-harness-stop` added at load time
+  (`add-hook` deduplicates on re-require).
+
+### Requires
+
+`cl-lib`, `super-harness-config`, `super-harness-session`,
+`super-harness-agent`, `super-harness-handoff`,
+`super-harness-pipeline`, `super-harness-cockpit`. Provides
+`super-harness`.
 
 ## Validation
 
-- `emacs -Q --batch -l harness/super-harness-cockpit.el -f batch-byte-compile` → exit 0
-- `super-harness-cockpit-show` in batch → creates `*super-harness-cockpit*`
-  in `tabulated-list-mode`, renders 5 seats (ant, bat = crew; homer,
-  plato, austen = fleet) plus pipeline summary line, no error.
+- `emacs -Q --batch -l harness/super-harness.el -f batch-byte-compile` → exit 0, no error.
+- `(super-harness-bootstrap)` in batch → `bootstrap done`, dirs
+  created, `.beads` present (no hint).
+- `(super-harness-status)` in batch → 5 seats, no error.
+- `(super-harness-start)` in batch → 5 sessions `running` (ant, bat
+  crew; homer, plato, austen fleet), cockpit rendered, no error.
+- Batch `(super-harness-stop)` blocks ~120s per live session by
+  design (`super-harness-handoff-wait` timeout); interactive use is
+  the intended path.
+
+## Usage
+
+1. `M-x super-harness-bootstrap` — first-time setup.
+2. `M-x super-harness-start` — launch crew + fleet, open cockpit.
+3. `C-c s s` / `M-x super-harness-status` — refresh dashboard.
+4. `C-c s a` / `M-x super-harness-attach` — jump to an agent buffer.
+5. `C-c s c` / `M-x super-harness-crew` — dispatch work to crew.
+6. `M-x super-harness-restart` — stop + start.
+7. `M-x super-harness-stop` — graceful handoff + shutdown (also runs
+   on Emacs exit via `kill-emacs-hook`).
