@@ -123,13 +123,20 @@ still alive."
   (let ((timeout (or timeout
                      (super-harness-handoff--config-get 'handoff-timeout)
                      120))
-        (inhibit-redisplay t))
+        (inhibit-redisplay t)
+        (mode-line-format nil)
+        (debug-on-error nil))
     (dolist (pair (super-harness-session-list))
       (let ((seat (car pair)))
-        (super-harness-handoff-request seat)
-        (super-harness-handoff-wait seat timeout)
-        (when (super-harness-session-alive-p seat)
-          (super-harness-session-kill seat))))))
+        (condition-case err
+            (progn
+              (super-harness-handoff-request seat)
+              (super-harness-handoff-wait seat timeout)
+              (when (super-harness-session-alive-p seat)
+                (super-harness-session-kill seat)))
+          (error
+           (message "super-harness: error stopping %s (continuing): %s"
+                    seat (error-message-string err))))))))
 
 (provide 'super-harness-handoff)
 

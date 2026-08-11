@@ -109,11 +109,18 @@ cockpit dashboard."
 Requests handoff from each agent, waits up to welfare.handoff-timeout,
 then kills survivors.  Logs shutdown."
   (interactive)
-  (let ((inhibit-redisplay t))
-    (super-harness-handoff-stop-all
-     (super-harness--config-get 'handoff-timeout 'welfare))
-    (dolist (pair (super-harness-session-list))
-      (super-harness-session-kill (car pair))))
+  (let ((inhibit-redisplay t)
+        (mode-line-format nil)           ; suppress modeline evals globally
+        (debug-on-error nil))
+    (condition-case err
+        (progn
+          (super-harness-handoff-stop-all
+           (super-harness--config-get 'handoff-timeout 'welfare))
+          (dolist (pair (super-harness-session-list))
+            (super-harness-session-kill (car pair))))
+      (error
+       (message "super-harness: shutdown error (continuing): %s"
+                (error-message-string err)))))
   (message "super-harness stopped"))
 
 ;;;###autoload

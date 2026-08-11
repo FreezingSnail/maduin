@@ -1,30 +1,26 @@
-# super-harness-m0b.1 — bd-bridge: worktree wrappers
+# super-harness-m0b.2 — workspace.el: per-seat worktree provisioning
+
+## 交付
+
+新檔 `harness/super-harness-workspace.el`（含 .elc 編譯產物）。
 
 ## 介面
 
-`harness/super-harness-bd-bridge.el` 新增三函數（`provide` 前）：
+- `(super-harness-workspace-ensure seat-name)` → worktree path 字串或 nil。既存（`super-harness-bd-worktree-list` 命中）→ 回傳其 path；缺失 → `make-directory` workspaces root（`t` 遞歸）後 `super-harness-bd-worktree-create`。建立失敗 → log warning（`super-harness-log` 存在則用之，否則 `message`；fboundp 守衛）→ nil。冪等。
+- `(super-harness-workspace-path seat-name)` → 字串，`workspaces.path` + seat-name，不建立。
+- `(super-harness-workspace-branch seat-name)` → 字串 = seat-name。
+- `(super-harness-workspace-exists-p seat-name)` → 布林，依 bd worktree list。
 
-- `(super-harness-bd-worktree-create name)` → path string 或 nil
-  - 執行 `bd worktree create <name> --branch <name>`
-  - 從輸出 `✓ Created worktree: <path>` 解析；不獲則退 `(super-harness-bd-worktree-list)` 查 name
-- `(super-harness-bd-worktree-list)` → alist `((name . path) ...)`
-  - 主 `bd worktree list --json`（name/path 欄位）；失敗退 `git worktree list --porcelain`（name 取自路徑 basename）
-- `(super-harness-bd-worktree-info dir)` → plist `(:path :branch :name)` 或 nil
-  - 執行 `git -C <dir> worktree list --porcelain`，篩 path 相等之條目
-  - （`git worktree info` 子命令不存在於 git 2.50；用 list --porcelain）
+私有：`super-harness-workspace--root`（config `workspaces.path`，缺省 `harness/workspaces`，expand 絕對路徑）、`super-harness-workspace--log-warning`。
 
-私助（`--` 前綴）：`super-harness-bd-worktree--entry`、`--porcelain-entries`（容 detached 無 branch）、`--parse-created-path`。
-
-## 錯誤處理
-
-沿襲既有：`super-harness-bd--run` + 退出碼檢查；失敗經 `super-harness-bd--log-error`，回 nil。
+Require：`cl-lib`、`super-harness-bd-bridge`、`super-harness-config`。`provide 'super-harness-workspace`。
 
 ## 驗證
 
-- 編譯：`emacs -Q --batch -l harness/super-harness-bd-bridge.el -f batch-byte-compile` — 淨，exit 0
-- 功能（暫存庫 `~/.wt-test-scratch`，git init + bd init 後）：
-  - list → `(("wt-test-scratch" . "…/.wt-test-scratch") ("x" . "…/x") ("y" . "…/y"))` ✓
-  - create `z` → `"…/.wt-test-scratch/z"` ✓
-  - info `z` → `(:path "…/z" :branch "z" :name "z")` ✓
-  - info 不存在目錄 → nil + error log ✓
-  - 事後 `git worktree remove --force z`，刪暫存庫 ✓
+- `emacs -Q --batch -L harness -l super-harness-workspace -f batch-byte-compile harness/super-harness-workspace.el` → 零警告零錯誤。
+- 功能測試於 scratch git repo（`bd init` 後）：
+  - `bd worktree create test --branch test` 預置 → `exists-p` t，`ensure` 重用既有 path（未重建）。
+  - `ensure "bat"`（缺失）→ 建立新 worktree，`exists-p` t。
+  - 再 `ensure "bat"` → 回傳同 path（冪等）。
+  - `path "homer"` → `<repo>/harness/workspaces/homer`；`branch "homer"`。
+- scratch repo 已清理。
