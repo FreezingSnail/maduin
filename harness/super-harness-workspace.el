@@ -42,11 +42,16 @@ Reuse existing worktree when present.  Return nil if creation fails."
     (if existing
         existing
       (make-directory (super-harness-workspace--root) t)
-      (or (super-harness-bd-worktree-create seat-name)
-          (progn
-            (super-harness-workspace--log-warning
-             (format "worktree create failed for seat %s" seat-name))
-            nil)))))
+      ;; bd worktree create accepts a path; pass full path under
+      ;; workspaces root so `workspace-path' and actual location agree.
+      (let ((target (super-harness-workspace-path seat-name)))
+        (if (file-exists-p target)
+            target
+          (or (super-harness-bd-worktree-create target)
+              (progn
+                (super-harness-workspace--log-warning
+                 (format "worktree create failed for seat %s" seat-name))
+                nil)))))))
 
 (provide 'super-harness-workspace)
 

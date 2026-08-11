@@ -207,19 +207,20 @@ Handle detached worktrees (no branch line)."
   (when (string-match "Created worktree: \\([^\n]+\\)" output)
     (string-trim (match-string 1 output))))
 
-(defun super-harness-bd-worktree-create (name)
-  "Create worktree NAME via `bd worktree create NAME --branch NAME'.
-Return worktree path string or nil on failure."
-  (let ((res (super-harness-bd--run
-              (format "bd worktree create %s --branch %s"
-                      (shell-quote-argument name)
-                      (shell-quote-argument name)))))
+(defun super-harness-bd-worktree-create (path &optional branch)
+  "Create worktree at PATH via `bd worktree create PATH --branch BRANCH'.
+BRANCH defaults to the basename of PATH.  Return worktree path string or nil."
+  (let* ((branch (or branch (file-name-nondirectory (directory-file-name path))))
+         (res (super-harness-bd--run
+               (format "bd worktree create %s --branch %s"
+                       (shell-quote-argument path)
+                       (shell-quote-argument branch)))))
     (if (= 0 (car res))
         (or (super-harness-bd-worktree--parse-created-path (cdr res))
-            (cdr (assoc name (super-harness-bd-worktree-list))))
+            path)
       (super-harness-bd--log-error
        (format "bd worktree create %s failed (exit %d): %s"
-               name (car res) (cdr res)))
+               path (car res) (cdr res)))
       nil)))
 
 (defun super-harness-bd-worktree-list ()
