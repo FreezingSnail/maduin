@@ -1,94 +1,38 @@
-# output.md — super-harness-c7d.10 (super-harness.el: minor mode, commands, keybindings)
+# super-harness-c7d.11 — ERT tests for all harness components
 
-## Implemented interface
+## 變更
 
-File: `harness/super-harness.el`
+- `harness/super-harness-test.el` — 新建 ERT 測試套件，20 測試，全標 `:tags '(super-harness)`。
 
-### Minor mode
+## 覆蓋
 
-- `super-harness-mode` — global minor mode, lighter ` SH`.
-  Keymap `super-harness-mode-map`:
-  - `C-c s s` → `super-harness-status`
-  - `C-c s a` → `super-harness-attach`
-  - `C-c s c` → `super-harness-crew`
+| 組件 | 測試 | 驗證 |
+|---|---|---|
+| config | 5 | 非 nil；crew seats = ant/bat；fleet seats = homer/plato/austen；welfare.handoff-enabled = t；fleet.poll-interval = 30 |
+| brain | 3 | write→file 存在；read 回內容；read 缺失→nil；list 回相對路徑（temp dir 綁定 `super-harness-config` brain.path） |
+| bd-bridge | 2 | 九函數皆 fboundp；bd CLI 可用時 `super-harness-bd-remember` 存無害 fact，再 `bd forget` 清理（`super-harness-test--bd-forget-matching` 解析 `bd memories --json`）；全程 condition-case 守護，無 bd 亦過 |
+| session | 1 | fake CLI（temp shell script `sleep 60`）→ buffer 存在、`alive-p` t、`session-list` 含之、kill→alive-p nil |
+| agent | 2 | `agent-status` 無此 seat→nil；`agent-prime` 於 dead session buffer 不 error（綁不存在 CLI 使無 process，走 insert 路徑） |
+| handoff | 2 | write/read roundtrip（let 綁 `default-directory` 至 temp dir）；read 缺失→nil |
+| pipeline | 2 | `pipeline-status` plist 含六鍵 `:queued :active :completed :blocked :fleet-free :fleet-busy`；`pipeline-fleet-seats` 回 3 |
+| cockpit | 2 | `cockpit-show` 造 `*super-harness-cockpit*` buffer；`cockpit-refresh` 不 error（batch 下 `switch-to-buffer` 以 condition-case 守護） |
+| main | 1 | `super-harness-mode/start/stop/status/restart/attach/crew/bootstrap` 皆 fboundp |
 
-### Interactive commands
+## 環境安全
 
-- `(super-harness-start)` → void
-  Reads config; for each crew seat: `super-harness-agent-spawn`
-  seat `crew` model workdir (workdir = `workspaces.path`/SEAT); for
-  each fleet seat: spawn + `super-harness-pipeline-start-fleet`;
-  then `super-harness-cockpit-show` + `super-harness-cockpit-refresh`;
-  message `super-harness started`.
+- bd 調用（remember/status count）以 condition-case 守護；無 bd 時測試仍過。
+- session/agent 用 temp shell script 或不存在 CLI 路徑，不依賴 opencode 真實安裝。
+- 不啟動真實進程、不觸發真實 bd 寫入（除可清理之 probe fact）。
 
-- `(super-harness-stop)` → void
-  `(super-harness-handoff-stop-all welfare.handoff-timeout)` then
-  `super-harness-session-kill` for every remaining session; message
-  `super-harness stopped`.
+## 執行
 
-- `(super-harness-status)` → void
-  `super-harness-cockpit-refresh` + summary message with session
-  count and `super-harness-cockpit--pipeline-summary`.
+```bash
+# 形式 1：全跑（測試皆 tag super-harness）
+emacs -Q --batch -l harness/super-harness-test.el -f ert-run-tests-batch-and-exit
 
-- `(super-harness-restart)` → void
-  `super-harness-stop` then `super-harness-start`.
+# 形式 2：tag selector
+emacs -Q --batch -l harness/super-harness-test.el \
+  --eval "(ert-run-tests-batch-and-exit '(tag super-harness))"
+```
 
-- `(super-harness-attach SEAT)` → void (interactive)
-  `completing-read` over config seats (crew + fleet), then
-  `super-harness-session-switch`.
-
-- `(super-harness-crew WORK)` → void (interactive)
-  Prompts for work text, `super-harness-pipeline-dispatch-crew`.
-
-- `(super-harness-bootstrap)` → void
-  Creates `.agents/brain`, `.agents/handoff`, `.agents/logs` and
-  per-seat workspace dirs; checks `.beads` (hint to run `bd init`
-  when absent); message done.
-
-### Helpers
-
-- `(super-harness--config-get KEY [SECTION])` → value | nil
-  Looks up KEY in `super-harness-config`; optional SECTION scopes
-  lookup, e.g. `(super-harness--config-get 'handoff-timeout 'welfare)`.
-
-- `(super-harness--seats)` → `((SEAT . ROLE) ...)` from config, crew
-  then fleet.
-
-- `(super-harness--seat-model SEAT ROLE)` → model string | "default".
-
-- `(super-harness--seat-workdir SEAT)` → expanded workspace path.
-
-### Hooks
-
-- `kill-emacs-hook` — `super-harness-stop` added at load time
-  (`add-hook` deduplicates on re-require).
-
-### Requires
-
-`cl-lib`, `super-harness-config`, `super-harness-session`,
-`super-harness-agent`, `super-harness-handoff`,
-`super-harness-pipeline`, `super-harness-cockpit`. Provides
-`super-harness`.
-
-## Validation
-
-- `emacs -Q --batch -l harness/super-harness.el -f batch-byte-compile` → exit 0, no error.
-- `(super-harness-bootstrap)` in batch → `bootstrap done`, dirs
-  created, `.beads` present (no hint).
-- `(super-harness-status)` in batch → 5 seats, no error.
-- `(super-harness-start)` in batch → 5 sessions `running` (ant, bat
-  crew; homer, plato, austen fleet), cockpit rendered, no error.
-- Batch `(super-harness-stop)` blocks ~120s per live session by
-  design (`super-harness-handoff-wait` timeout); interactive use is
-  the intended path.
-
-## Usage
-
-1. `M-x super-harness-bootstrap` — first-time setup.
-2. `M-x super-harness-start` — launch crew + fleet, open cockpit.
-3. `C-c s s` / `M-x super-harness-status` — refresh dashboard.
-4. `C-c s a` / `M-x super-harness-attach` — jump to an agent buffer.
-5. `C-c s c` / `M-x super-harness-crew` — dispatch work to crew.
-6. `M-x super-harness-restart` — stop + start.
-7. `M-x super-harness-stop` — graceful handoff + shutdown (also runs
-   on Emacs exit via `kill-emacs-hook`).
+結果：**20 tests, 20 results as expected, 0 unexpected**（兩種形式皆然，約 3 秒）。
