@@ -165,6 +165,32 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 
 (add-hook 'kill-emacs-hook #'super-harness-stop)
 
+;;; Dev reload — edit-then-reload loop for developing the harness itself.
+
+(defvar super-harness--feature-list
+  '(super-harness-cockpit super-harness-pipeline super-harness-handoff
+    super-harness-agent super-harness-session super-harness-brain
+    super-harness-bd-bridge super-harness-config)
+  "Features to unload/reload in dependency order (leaf-first).")
+
+;;;###autoload
+(defun super-harness-reload ()
+  "Unload and reload all super-harness modules.
+Development loop: edit a .el file, run this, keep the new code.
+Gracefully stops agents first, preserving handoff caches."
+  (interactive)
+  (when (or (not (called-interactively-p 'interactive))
+            (y-or-n-p "Stop running agents and reload super-harness? "))
+    (super-harness-stop)
+    (dolist (feat super-harness--feature-list)
+      (unload-feature feat 'force))
+    (let ((dir (file-name-directory (locate-library "super-harness"))))
+      (when dir (add-to-list 'load-path dir)))
+    (dolist (feat (cons 'super-harness super-harness--feature-list))
+      (require feat nil 'noerror))
+    (super-harness-mode 1)
+    (message "super-harness reloaded")))
+
 (provide 'super-harness)
 
 ;;; super-harness.el ends here
