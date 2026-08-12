@@ -1,46 +1,40 @@
-# super-harness-m0b.5 — integration: bootstrap worktrees + land on stop + tests
+# super-harness-aaa.1 — pipeline: close bead only after merge
 
 ## 改動
 
-- `harness/config.el`：`workspaces` 節加 `(land-on-stop . t)`。
-  保留 `workspaces` 鍵名（workspace.el 讀 `workspaces.path`，pipeline.el 讀 `workspaces` 節），
-  不更名 `workspace`。
-- `harness/super-harness.el`：
-  - 加 `(require 'super-harness-workspace)`。
-  - `super-harness-bootstrap`：建目錄後，對 `super-harness--seats`（crew+fleet）
-    每 seat 調 `super-harness-workspace-ensure`，`condition-case` 護 —
-    失敗僅 log，不崩。
-  - `super-harness-stop`：handoff-stop-all 後，若 `workspaces.land-on-stop` 真，
-    對每 fleet seat 調 `super-harness-pipeline-land-branch`，
-    `condition-case` 護 — 失敗 log，不阻 stop。
-- `harness/super-harness-test.el`：加 5 測試（tag super-harness）：
-  - `workspace-path` 正路徑
-  - `workspace-exists-p` bogus seat → nil
-  - `bootstrap` 不拋錯（真建 worktree）
-  - `land-branch` bogus seat → nil（護）
-  - config `workspaces.land-on-stop` → t
+- `harness/super-harness-pipeline.el`：
+  - `super-harness-pipeline-land-branch`：
+    - 回 `t`（merge 成功）｜`'conflict`（merge 敗且輸出含 conflict
+      — `CONFLICT`／`fix conflicts`／`merge conflict`，比對下寫
+      `(string-match-p "conflict" (downcase out))`）｜`nil`
+      （worktree 缺、commit 敗、非 conflict merge 敗）。
+    - docstring 更新；`'conflict` 以 `\\='` 逸出，byte-compile 無警告。
+  - `super-harness-pipeline--poll` sentinel：閉合路徑反序 —
+    先 `land-branch`，後 `bd-close`。
+    - `t` → `(super-harness-bd-close task output)`，唯此閉合。
+    - `'conflict` → 不閉；shell 跑 `bd comment <id> "merge conflict — resolver dispatched"`；
+      log-warning；留開；sentinel 回 `'conflict`。
+    - `nil`（含 land 拋錯，condition-case 護）→ 不閉；
+      shell 跑 `bd comment <id> "land failed — task left open"`；log-warning；留開。
+    - 舊「先 close 後 land」路徑全刪。
 
 ## 介面
 
-- `super-harness-bootstrap` → worktrees 對全部 seat ensure；失敗 log+nil，無崩。
-- `super-harness-stop` → handoff 後 fleet 分支 land；`workspaces.land-on-stop`
-  控制，預設 t。
-- config `workspaces.land-on-stop`（boolean）。
+- `super-harness-pipeline-land-branch` → `t` | `'conflict` | `nil`。
+- poll 閉合：僅 `t` 時 `bd-close`；conflict／失敗留開 + 註。
+- bd-bridge 無 `bd-comment` 函；經 `super-harness-bd--run`
+  shell 跑 `bd comment`（bd CLI 有 `comment` 子命令，驗過）。
 
 ## 驗證
 
-- `emacs -Q --batch -l harness/super-harness.el -f batch-byte-compile
-  harness/super-harness.el harness/super-harness-test.el` — 淨。
-  唯既存 `super-harness-mode` defcustom group 警告（舊碼，非本次）。
-- `emacs -Q --batch -l harness/super-harness-test.el
-  --eval "(ert-run-tests-batch-and-exit '(tag super-harness))"` —
-  25/25 過（20 舊 + 5 新），0 失敗。
-- bootstrap 實跑：`bd worktree create` 成功，5 worktree 建
-  （ant/bat/homer/plato/austen + 各分支），無崩。
+- `emacs -Q --batch -l harness/super-harness-pipeline.el
+  -f batch-byte-compile harness/super-harness-pipeline.el` — 淨，無警告。
+- `emacs -Q --batch -L harness -l super-harness-test
+  --eval '(ert-run-tests-batch-and-exit "super-harness-test-")'` —
+  25/25 過，0 失敗。
 
-## 注意（非本任務範圍）
+## 注意
 
-- `bd worktree create` 將 worktree 建於項目根（如 `/super-harness/ant`），
-  而 `super-harness-workspace-path` 返回 `harness/workspaces/ant`（空目錄）。
-  分歧源於 bd CLI 建位，屬 workspace/bd-bridge 上游設計；
-  本任務唯整合調用，不改其邏輯。
+- `super-harness.el` 內 `super-harness-stop` 亦調 `land-branch`
+  （舊介面 nil／t 兼容：conflict 時回 `'conflict`，該處僅判真偽 —
+  未改動，不在本任務範圍）。

@@ -3,6 +3,16 @@
   "permission": {
     "bash": {
       "*": "allow",
+      "python*": "deny",
+      "python3*": "deny",
+      "perl*": "deny",
+      "ruby*": "deny",
+      "lua*": "deny",
+      "php*": "deny",
+      "Rscript*": "deny",
+      "pip*": "deny",
+      "gem*": "deny",
+      "cpan*": "deny",
       "rm -rf *": "ask",
       "git push*": "ask",
       "DROP *": "ask"

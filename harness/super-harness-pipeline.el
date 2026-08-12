@@ -118,7 +118,9 @@ Prefer the directory containing super-harness.el, else
 
 (defun super-harness-pipeline-land-branch (seat-name)
   "Commit SEAT-NAME worktree changes and merge its branch into main.
-Return t on success, nil on conflict or failure (logged, never forced).
+Return t on successful merge, \\='conflict when the merge failed and
+output indicates a conflict, nil on other failures (missing worktree,
+commit failure, non-conflict merge failure; logged, never forced).
 Steps: add -A in worktree; commit if staged (t if nothing to land);
 then `git merge --no-ff' the seat branch from the main repo."
   (let* ((wt (super-harness-workspace-path seat-name))
@@ -148,10 +150,14 @@ then `git merge --no-ff' the seat branch from the main repo."
                         "-m" (format "land %s" seat-name))))
               (if (= 0 (car res))
                   t
-                (super-harness-workspace--log-warning
-                 (format "land-branch: merge of %s into main failed (exit %d): %s"
-                         branch (car res) (cdr res)))
-                 nil))))))))
+                ;; Distinguish conflict from other merge failures:
+                ;; git prints "CONFLICT (content): ..." / "fix conflicts".
+                (if (string-match-p "conflict" (downcase (cdr res)))
+                    'conflict
+                   (super-harness-workspace--log-warning
+                    (format "land-branch: merge of %s into main failed (exit %d): %s"
+                            branch (car res) (cdr res)))
+                   nil)))))))))
 
 (defun super-harness-pipeline-start-fleet (seat-name)
   "Start fleet polling timer for SEAT-NAME.  Return the timer.
@@ -182,8 +188,9 @@ Repeats every `fleet.poll-interval' from config (default 30s)."
 
 (defun super-harness-pipeline--poll (seat-name)
   "Poll for a ready bd task and dispatch to fleet SEAT-NAME.
-Skip when SEAT-NAME is already working.  On agent exit, close the
-task with the agent's output, land its branch, and mark the seat idle."
+Skip when SEAT-NAME is already working.  On agent exit, land the
+branch first, then close the task only on successful land; on
+conflict or other failure leave the task open, and mark the seat idle."
   (let ((status (super-harness-agent-status seat-name)))
     (unless (and status (eq (plist-get status :status) 'working))
       (let ((task (car (super-harness-bd-ready-tasks))))
@@ -207,18 +214,42 @@ task with the agent's output, land its branch, and mark the seat idle."
                  proc
                  (lambda (p _event)
                    (when (eq (process-status p) 'exit)
-                     (let ((pbuf (process-buffer p)))
-                       (super-harness-bd-close
-                        task
-                        (when (buffer-live-p pbuf)
-                          (with-current-buffer pbuf
-                            (super-harness-pipeline--last-output))))
-                       (condition-case err
-                           (super-harness-pipeline-land-branch seat-name)
-                         (error
-                          (super-harness-workspace--log-warning
-                           (format "land-branch failed for seat %s: %s"
-                                   seat-name (error-message-string err)))))
+                     (let* ((pbuf (process-buffer p))
+                            (output (when (buffer-live-p pbuf)
+                                      (with-current-buffer pbuf
+                                        (super-harness-pipeline--last-output))))
+                            (land (condition-case err
+                                      (super-harness-pipeline-land-branch seat-name)
+                                    (error
+                                     (super-harness-workspace--log-warning
+                                      (format "land-branch failed for seat %s: %s"
+                                              seat-name (error-message-string err)))
+                                     nil))))
+                       (cond
+                        ((eq land t)
+                         ;; Landed — close the task now.
+                         (super-harness-bd-close task output))
+                        ((eq land 'conflict)
+                         (super-harness-bd--run
+                          (format "bd comment %s %s"
+                                  (shell-quote-argument task)
+                                  (shell-quote-argument
+                                   "merge conflict — resolver dispatched")))
+                         (super-harness-workspace--log-warning
+                          (format "land-branch: conflict for seat %s task %s; left open"
+                                  seat-name task))
+                         'conflict)
+                        (t
+                         ;; Other land failure — never close.
+                         (super-harness-bd--run
+                          (format "bd comment %s %s"
+                                  (shell-quote-argument task)
+                                  (shell-quote-argument
+                                   "land failed — task left open")))
+                         (super-harness-workspace--log-warning
+                          (format "land-branch: failure for seat %s task %s; left open"
+                                  seat-name task))
+                         nil))
                        (when (buffer-live-p pbuf)
                          (with-current-buffer pbuf
                            (setq-local super-harness-current-task nil)
