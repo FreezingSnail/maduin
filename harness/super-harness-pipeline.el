@@ -215,6 +215,20 @@ conflict or other failure leave the task open, and mark the seat idle."
                   (with-current-buffer buf
                     (setq-local super-harness-current-task task)
                     (setq-local super-harness-status 'working)))
+                ;; Feed the plan: fetch task spec, send into worker process.
+                (when (process-live-p proc)
+                  (let* ((spec (condition-case nil
+                                   (super-harness-bd-show task)
+                                 (error nil)))
+                         (instr
+                          (format
+                           "Implement bd task %s.\n\nTitle: %s\n\nDescription:\n%s\n\n\
+Write output.md describing what you changed. Commit your work to this \
+branch when done. If blocked, explain why — do not invent work."
+                           task
+                           (if (plist-get spec :title) (plist-get spec :title) "?")
+                           (if (plist-get spec :desc) (plist-get spec :desc) "?"))))
+                    (process-send-string proc instr)))
                 (set-process-sentinel
                  proc
                  (lambda (p _event)
