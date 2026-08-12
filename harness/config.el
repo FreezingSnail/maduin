@@ -6,8 +6,7 @@
 
 (defvar super-harness-config
   '((harness . ((name . "super-harness") (version . "0.1.0")))
-    (crew . ((seats . (((name . "ant") (model . "deepseek-v3"))
-                       ((name . "bat") (model . "deepseek-v3"))))))
+    (crew . ((seats . (((name . "ant") (model . "deepseek-v3"))))))
     (fleet . ((seats . (((name . "homer") (model . "deepseek-v3"))
                         ((name . "plato") (model . "deepseek-v3"))
                         ((name . "austen") (model . "deepseek-v3"))))

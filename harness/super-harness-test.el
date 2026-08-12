@@ -65,7 +65,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(super-harness)
   (let ((crew (cdr (assq 'seats (cdr (assq 'crew super-harness-config))))))
     (should (equal (mapcar (lambda (s) (alist-get 'name s)) crew)
-                   '("ant" "bat")))))
+                   '("ant")))))
 
 (ert-deftest super-harness-test-config-fleet-seats ()
   :tags '(super-harness)
