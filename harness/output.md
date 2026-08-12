@@ -38,3 +38,38 @@
 - `super-harness.el` 內 `super-harness-stop` 亦調 `land-branch`
   （舊介面 nil／t 兼容：conflict 時回 `'conflict`，該處僅判真偽 —
   未改動，不在本任務範圍）。
+
+# super-harness-aaa.4 — config + ERT tests for resolver
+
+## 改動
+
+- `harness/config.el`：加 resolver 段 —
+  `(resolver . ((enabled . t) (model . "deepseek-v3") (max-retries . 3)))`。
+- `harness/super-harness.el`：
+  - `(require 'super-harness-resolver)`。
+  - `super-harness-stop`：既有停止邏輯後，遍歷
+    `super-harness-resolver-processes` 快照，逐座
+    `super-harness-resolver-stop`，condition-case 守護，不中斷停止。
+  - `super-harness-start`：不改 — 無自動 spawn，on-demand 唯。
+- `harness/super-harness-test.el`：加 6 測試（tag super-harness）：
+  - `config-resolver-keys`：enabled t、model "deepseek-v3"、max-retries 3。
+  - `resolver-active-p-bogus`：虛席 → nil，無崩。
+  - `resolver-prompt`：prompt 含席名 + `RESOLVED_DONE`。
+  - `resolver-start-degraded`：opencode 缺 → 不誤；buffer 生；nil 回。
+  - `resolver-start-fake-process`：sleep 偽程序 → active-p t → stop →
+    active-p nil。
+  - `resolver-stop-inactive`：虛席 stop → 不誤。
+  - `config-workspaces-land-on-stop`（既有）留，回歸驗。
+
+## 介面
+
+- `super-harness-config` resolver 段：`enabled` / `model` / `max-retries`。
+- `super-harness-stop` 現亦停 resolver 會話。
+
+## 驗證
+
+- byte-compile：淨（僅既有警告：pipeline 舊 .elc、
+  `super-harness-mode` defcustom group、resolver docstring 引號、
+  `noninteractive` prefix — 皆前任務遺留）。
+- ERT：31/31 過（25 舊 + 6 新），0 unexpected。
+- full load：`emacs -Q --batch -l harness/super-harness.el --eval '(message "OK")'` → OK，exit 0。

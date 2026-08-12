@@ -24,6 +24,7 @@
 (require 'super-harness-handoff)
 (require 'super-harness-pipeline)
 (require 'super-harness-workspace)
+(require 'super-harness-resolver)
 (require 'super-harness-cockpit)
 
 ;;; Minor mode
@@ -136,7 +137,16 @@ then kills survivors.  Logs shutdown."
                        (message "super-harness: land-branch failed for %s: %s"
                                 (car pair) (error-message-string err)))))))
               (dolist (pair (super-harness-session-list))
-                (super-harness-session-kill (car pair))))
+                (super-harness-session-kill (car pair)))
+              ;; Stop resolver (beadle) sessions; never abort stop.
+              (dolist (seat (mapcar #'car
+                                    (copy-sequence
+                                     super-harness-resolver-processes)))
+                (condition-case err
+                    (super-harness-resolver-stop seat)
+                  (error
+                   (message "super-harness: resolver stop failed for %s: %s"
+                            seat (error-message-string err))))))
           (error
            (message "super-harness: shutdown error (continuing): %s"
                     (error-message-string err))))

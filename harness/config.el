@@ -15,6 +15,7 @@
     (brain . ((path . ".agents/brain") (prime-files . ("architecture.md" "conventions.md"))))
     (welfare . ((handoff-enabled . t) (handoff-timeout . 120) (blameless . t)))
     (workspaces . ((path . "harness/workspaces") (land-on-stop . t)))
+    (resolver . ((enabled . t) (model . "deepseek-v3") (max-retries . 3)))
     (pipeline . ((review-required . nil) (auto-close-epic . t)))))
 
 (provide 'super-harness-config)

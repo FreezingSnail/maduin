@@ -21,6 +21,7 @@
 (require 'super-harness-handoff)
 (require 'super-harness-pipeline)
 (require 'super-harness-cockpit)
+(require 'super-harness-resolver)
 
 ;;; Helpers
 
@@ -283,6 +284,64 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(super-harness)
   (let ((ws (cdr (assq 'workspaces super-harness-config))))
     (should (eq (alist-get 'land-on-stop ws) t))))
+
+;;; 11. resolver
+
+(ert-deftest super-harness-test-config-resolver-keys ()
+  :tags '(super-harness)
+  (let ((resolver (cdr (assq 'resolver super-harness-config))))
+    (should (eq (alist-get 'enabled resolver) t))
+    (should (string= (alist-get 'model resolver) "deepseek-v3"))
+    (should (= (alist-get 'max-retries resolver) 3))))
+
+(ert-deftest super-harness-test-resolver-active-p-bogus ()
+  :tags '(super-harness)
+  (should-not (super-harness-resolver-active-p "bogus-seat-xyz")))
+
+(ert-deftest super-harness-test-resolver-prompt ()
+  :tags '(super-harness)
+  (let ((prompt (super-harness-resolver--prompt "prompt-seat-xyz")))
+    (should (string-match-p "prompt-seat-xyz" prompt))
+    (should (string-match-p "RESOLVED_DONE" prompt))))
+
+(ert-deftest super-harness-test-resolver-start-degraded ()
+  :tags '(super-harness)
+  (let ((seat "degraded-seat-xyz")
+        (super-harness-opencode-command "no-such-opencode-cli-xyz"))
+    (unwind-protect
+        (progn
+          (should-not (super-harness-resolver-start seat))
+          (should-not (super-harness-resolver-active-p seat))
+          (should (get-buffer "*super-harness/resolver-degraded-seat-xyz*")))
+      (super-harness-resolver-stop seat)
+      (when (get-buffer "*super-harness/resolver-degraded-seat-xyz*")
+        (kill-buffer "*super-harness/resolver-degraded-seat-xyz*")))))
+
+(ert-deftest super-harness-test-resolver-start-fake-process ()
+  :tags '(super-harness)
+  (let* ((script (super-harness-test--fake-opencode))
+         (seat "fake-resolver-seat-xyz")
+         (workdir (super-harness-workspace-path seat))
+         (super-harness-opencode-command script))
+    (unwind-protect
+        (progn
+          (make-directory workdir t)
+          (super-harness-resolver-start seat)
+          (should (super-harness-resolver-active-p seat))
+          (super-harness-resolver-stop seat)
+          (should-not (super-harness-resolver-active-p seat)))
+      (delete-file script)
+      (super-harness-resolver-stop seat)
+      (ignore-errors (delete-directory workdir t)))))
+
+(ert-deftest super-harness-test-resolver-stop-inactive ()
+  :tags '(super-harness)
+  (should
+   (condition-case nil
+       (progn
+         (super-harness-resolver-stop "ghost-seat-xyz")
+         t)
+     (error nil))))
 
 (provide 'super-harness-test)
 
