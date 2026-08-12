@@ -22,6 +22,11 @@
 (require 'super-harness-config)
 (require 'super-harness-workspace)
 
+;; resolver may not exist when pipeline is loaded standalone.
+(condition-case nil
+    (require 'super-harness-resolver)
+  (error nil))
+
 (defvar super-harness-pipeline-timers nil
   "Alist ((SEAT-NAME . TIMER) ...) of active fleet polling timers.")
 
@@ -235,8 +240,11 @@ conflict or other failure leave the task open, and mark the seat idle."
                                   (shell-quote-argument task)
                                   (shell-quote-argument
                                    "merge conflict — resolver dispatched")))
+                         (unless (super-harness-resolver-active-p seat-name)
+                           (super-harness-resolver-start seat-name))
+                         (super-harness-resolver-register seat-name task)
                          (super-harness-workspace--log-warning
-                          (format "land-branch: conflict for seat %s task %s; left open"
+                          (format "land-branch: conflict for seat %s task %s; resolver dispatched"
                                   seat-name task))
                          'conflict)
                         (t

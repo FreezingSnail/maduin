@@ -19,9 +19,20 @@
 (require 'super-harness-session)
 (require 'super-harness-workspace)
 (require 'super-harness-config)
+(require 'super-harness-bd-bridge)
+
+(declare-function super-harness-pipeline-land-branch "super-harness-pipeline")
 
 (defvar super-harness-resolver-processes nil
   "Alist of (SEAT-NAME . PROCESS) for active resolver sessions.")
+
+(defvar super-harness-resolver-pending-tasks nil
+  "Alist of (SEAT-NAME . TASK-ID) awaiting resolver completion.
+Set by `super-harness-resolver-register' when the pipeline dispatches
+a resolver for a conflicting land on TASK-ID.")
+
+(defvar super-harness-resolver-retries nil
+  "Alist of (SEAT-NAME . RETRY-COUNT) of resolver respawns per seat.")
 
 (defun super-harness-resolver--config-get (key &optional default)
   "Return resolver section KEY from super-harness-config, or DEFAULT.
@@ -57,6 +68,77 @@ is alive; otherwise insert into BUF (degraded, opencode missing)."
   (let ((proc (cdr (assoc seat-name super-harness-resolver-processes))))
     (and proc (process-live-p proc))))
 
+(defun super-harness-resolver-register (seat-name task-id)
+  "Record TASK-ID as pending for SEAT-NAME and reset retry count to 1."
+  (setq super-harness-resolver-pending-tasks
+        (cons (cons seat-name task-id)
+              (assoc-delete-all seat-name super-harness-resolver-pending-tasks)))
+  (setq super-harness-resolver-retries
+        (cons (cons seat-name 1)
+              (assoc-delete-all seat-name super-harness-resolver-retries)))
+  nil)
+
+(defun super-harness-resolver--scan-done (buf)
+  "Return t when BUF holds the RESOLVED_DONE marker."
+  (and (buffer-live-p buf)
+       (with-current-buffer buf
+         (string-match-p "RESOLVED_DONE" (buffer-string)))))
+
+(defun super-harness-resolver--on-exit (proc seat-name)
+  "Handle resolver PROC exit for SEAT-NAME.
+When the resolver buffer holds RESOLVED_DONE, re-land; on t close the
+pending task, on 'conflict retry up to resolver.max-retries, on nil
+leave the task open.  When the marker is absent, log and leave open."
+  (let ((buf (process-buffer proc)))
+    (if (super-harness-resolver--scan-done buf)
+        (let ((land (super-harness-pipeline-land-branch seat-name)))
+          (cond
+           ((eq land t)
+            (let ((task (cdr (assoc seat-name super-harness-resolver-pending-tasks))))
+              (when task
+                (super-harness-bd-close task nil)
+                (setq super-harness-resolver-pending-tasks
+                      (assoc-delete-all seat-name super-harness-resolver-pending-tasks)))
+              (setq super-harness-resolver-retries
+                    (assoc-delete-all seat-name super-harness-resolver-retries))
+              (super-harness-resolver-stop seat-name)))
+           ((eq land 'conflict)
+            (let* ((max (or (super-harness-resolver--config-get 'max-retries 3) 3))
+                   (n (1+ (or (cdr (assoc seat-name super-harness-resolver-retries)) 0))))
+              (if (< n max)
+                  (progn
+                    (setq super-harness-resolver-retries
+                          (cons (cons seat-name n)
+                                (assoc-delete-all seat-name super-harness-resolver-retries)))
+                    (super-harness-resolver-start seat-name))
+                (super-harness-workspace--log-warning
+                 (format "resolver: seat %s retries exhausted (%d); task left open"
+                         seat-name max))
+                (setq super-harness-resolver-retries
+                      (assoc-delete-all seat-name super-harness-resolver-retries)))))
+           (t
+            (super-harness-workspace--log-warning
+             (format "resolver: re-land failed for seat %s; task left open" seat-name))
+            (setq super-harness-resolver-retries
+                  (assoc-delete-all seat-name super-harness-resolver-retries)))))
+      (super-harness-workspace--log-warning
+       (format "resolver: seat %s exited without RESOLVED_DONE; task left open"
+               seat-name))
+      (setq super-harness-resolver-retries
+            (assoc-delete-all seat-name super-harness-resolver-retries)))))
+
+(defun super-harness-resolver-attach-sentinel (proc seat-name)
+  "Attach completion sentinel to resolver PROC for SEAT-NAME.
+No-op when PROC is not live or Emacs is batch/non-interactive.
+On process exit delegates to `super-harness-resolver--on-exit'."
+  (when (and proc (process-live-p proc))
+    (set-process-sentinel
+     proc
+     (lambda (p _event)
+       (unless (bound-and-true-p noninteractive)
+         (when (eq (process-status p) 'exit)
+           (super-harness-resolver--on-exit p seat-name)))))))
+
 (defun super-harness-resolver-start (seat-name)
   "Start dedicated resolver session for SEAT-NAME.
 
@@ -81,6 +163,7 @@ spawned (opencode missing — buffer still created, degraded)."
              (proc (and buf (get-buffer-process buf))))
         (when buf
           (super-harness-resolver--prime seat-name proc buf)
+          (super-harness-resolver-attach-sentinel proc seat-name)
           (setq super-harness-resolver-processes
                 (cons (cons seat-name proc)
                       (assq-delete-all seat-name

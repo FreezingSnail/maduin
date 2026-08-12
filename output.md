@@ -1,26 +1,35 @@
-# super-harness-aaa.2 — resolver.el: dedicated beadle merge-conflict session
+# output — super-harness-aaa.3
 
-## 交付
+## 改
 
-新檔 `harness/super-harness-resolver.el`（含 .elc 編譯產物）。
+- `harness/super-harness-pipeline.el`:
+  - 頂加 `(condition-case nil (require 'super-harness-resolver) (error nil))`
+  - `super-harness-pipeline--poll` conflict 路徑: resolver 未活時 `super-harness-resolver-start seat-name`; 繼 `super-harness-resolver-register seat-name task`
+- `harness/super-harness-resolver.el`:
+  - 加 defvar `super-harness-resolver-pending-tasks` (seat . task-id)、`super-harness-resolver-retries` (seat . count)
+  - 加 `super-harness-resolver-register seat-name task-id` → 存 pending、retries 置 1
+  - 加 `super-harness-resolver-attach-sentinel proc seat-name` → 掛 sentinel; batch/non-interactive 守護 `(bound-and-true-p noninteractive)`
+  - 加 `super-harness-resolver--on-exit proc seat-name` → 掃 buffer `RESOLVED_DONE`:
+    - 有 → re-land: t → `super-harness-bd-close task-id` + 清 pending/retries + `super-harness-resolver-stop`
+    - 仍 conflict → retries < `resolver.max-retries` (default 3) → 再 start; 盡 → log、task 留開
+    - nil → log、task 留開
+    - 無 marker → log、task 留開
+  - `super-harness-resolver-start` 內 spawn 後掛 sentinel
 
 ## 介面
 
-- `(super-harness-resolver-start seat-name)` → process 或 nil。已活躍（alist 有 live process）→ 返既有 process。config `resolver.enabled` nil → 返 nil（記 message）。`super-harness-session-create` role `resolver`、model 取 config `resolver.model`（缺省 `"deepseek-v3"`）、workdir `(super-harness-workspace-path seat-name)`。`default-directory` 設為 workdir。opencode 缺失 → buffer 仍建、process nil（degraded，不崩）。process 記入 `super-harness-resolver-processes`（alist，seat → process，含 nil 項）。
-- `(super-harness-resolver-active-p seat-name)` → 布林。process 存在且 `process-live-p`；nil 安全。
-- `(super-harness-resolver--prompt seat-name)` → 字串。Beadle 提示詞，替換 `{seat}`、`{path}`（workspace path）。
-- `(super-harness-resolver-stop seat-name)` → 布林。alist 除項 + `super-harness-session-kill`（殺 process + buffer）。
-
-私有：`super-harness-resolver--config-get`（存在即取、值可為 nil、缺 key 才 fallback default）、`super-harness-resolver--prime`（process live → `process-send-string`；否則插入 buffer，仿 agent-prime degrade）。
-
-Require：`cl-lib`、`super-harness-session`、`super-harness-workspace`、`super-harness-config`（先 `add-to-list load-path` 以支持直載）。`provide 'super-harness-resolver`。`defvar super-harness-resolver-processes`。
+- `super-harness-resolver-register` — (seat-name task-id) → void; pipeline 派 resolver 時記 pending
+- `super-harness-resolver-attach-sentinel` — (proc seat-name) → void; 掛完成 sentinel
+- `super-harness-resolver-pending-tasks` — alist (seat . task-id)
+- `super-harness-resolver-retries` — alist (seat . count)
 
 ## 驗證
 
-- `emacs -Q --batch -l harness/super-harness-resolver.el -f batch-byte-compile harness/super-harness-resolver.el` → 零警告零錯誤。
-- 功能測試（`super-harness-opencode-command` 設為不存在名，模擬 opencode 缺失）：
-  - `start "zz-test"` → nil，無崩；buffer `*super-harness/resolver-zz-test*` 存在，role `resolver`、model `"deepseek-v3"`、workdir `<repo>/harness/workspaces/zz-test`。
-  - `active-p` nil（無 process）。
-  - `stop` → t；事後 `active-p` nil，buffer 滅。
-  - `resolver.enabled . nil` 注入 config → `start` nil，buffer 未建。
-  - prompt 文本含 seat、worktree path、branch、RESOLVED_DONE，合 spec。
+- `emacs -Q --batch -l harness/super-harness-pipeline.el -l harness/super-harness-resolver.el -f batch-byte-compile` — 淨
+- ERT 25/25 pass（tag super-harness）
+
+## 註
+
+- config 無 resolver 段 → max-retries default 3
+- 成功 re-land 時 `super-harness-bd-close` 以 nil output 呼叫（不覆寫 agent output.md）
+- retries 計數: register 置 1; 每次 conflict 後 +1; 至 max 即棄
