@@ -37,6 +37,27 @@
              maduin-config)
     (cdr (assq key maduin-config))))
 
+(defun maduin-agent--config-get-section (section key)
+  "Return KEY from config SECTION (symbol), or nil when unset."
+  (when (and (boundp 'maduin-config)
+             maduin-config)
+    (cdr (assq key (cdr (assq section maduin-config))))))
+
+(defun maduin-agent--for-role (role)
+  "Return the opencode agent name for ROLE, or nil.
+ROLE is a string or symbol.  Maps implementer to fleet.agent,
+designer to designer.agent, concierge to concierge.agent; any
+other role resolves to nil."
+  (let* ((name (cond ((stringp role) role)
+                     ((symbolp role) (symbol-name role))))
+         (section (pcase name
+                    ("implementer" 'fleet)
+                    ("designer" 'designer)
+                    ("concierge" 'concierge)
+                    (_ nil))))
+    (and section
+         (maduin-agent--config-get-section section 'agent))))
+
 (defun maduin-agent--template (role)
   "Return role template text for ROLE, or nil.
 Implementer roles read templates/fleet-prompt.txt; all other roles
@@ -129,9 +150,10 @@ Delegate to maduin-session-create, prime the new agent, and
 return its process (or nil on failure)."
   (condition-case err
       (let* ((dir (or (maduin-workspace-ensure seat)
-                      (maduin-workspace-path seat)))
+                       (maduin-workspace-path seat)))
              (default-directory (or dir default-directory))
-             (buf (maduin-session-create seat role model dir)))
+             (agent (maduin-agent--for-role role))
+             (buf (maduin-session-create seat role model dir agent)))
         (when buf
           (maduin-agent-prime seat role)
           (get-buffer-process buf)))
