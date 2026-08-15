@@ -10,6 +10,8 @@
 
 (require 'cl-lib)
 
+(require 'maduin-config nil t)
+
 (condition-case nil
     (require 'maduin-logging)
   (error nil))
@@ -55,13 +57,19 @@
                  maduin-seat event))
       (run-hooks 'maduin-session-on-exit-hook))))
 
-(defun maduin-session-create (seat-name role model workdir)
+(defun maduin-session-create (seat-name role model &optional workdir)
   "Create session buffer for SEAT-NAME with ROLE and MODEL in WORKDIR.
+WORKDIR defaults to the project root (via `maduin-project-root',
+falling back to `default-directory') when omitted.
 
 Return the buffer.  Launches opencode as subprocess when the CLI is
 available; otherwise still returns a buffer holding the spawn intent
 in `maduin-intent' with status `dead'."
   (let* ((buf (get-buffer-create (maduin-session--buffer-name role seat-name)))
+         (workdir (or workdir
+                      (if (fboundp 'maduin-project-root)
+                          (maduin-project-root)
+                        default-directory)))
          (exe (executable-find maduin-opencode-command)))
     (with-current-buffer buf
       (when (fboundp 'compilation-mode)

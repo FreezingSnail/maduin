@@ -12,10 +12,11 @@
 (require 'maduin-config)
 
 (defun maduin-workspace--root ()
-  "Return absolute workspaces root from config, default `harness/workspaces'."
+  "Return absolute workspaces root from config, default `harness/workspaces'.
+Resolved under the current project root."
   (let* ((workspaces (cdr (assq 'workspaces maduin-config)))
          (path (or (cdr (assq 'path workspaces)) "harness/workspaces")))
-    (expand-file-name path)))
+    (expand-file-name path (maduin-project-root))))
 
 (defun maduin-workspace--log-warning (msg)
   "Log MSG as warning via maduin-log if available, else `message'."

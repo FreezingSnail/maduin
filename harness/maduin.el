@@ -75,13 +75,14 @@ looked up at the top level of `maduin-config'."
         "default")))
 
 (defun maduin--seat-workdir (seat)
-  "Return workspace directory for SEAT under workspaces.path."
+  "Return workspace directory for SEAT under workspaces.path.
+Resolved under the current project root."
   (expand-file-name
    seat
    (expand-file-name
     (or (maduin--config-get 'path 'workspaces)
         "harness/workspaces")
-    default-directory)))
+    (maduin-project-root))))
 
 ;;; Commands
 

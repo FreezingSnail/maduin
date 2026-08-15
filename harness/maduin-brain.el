@@ -25,10 +25,13 @@ Return nil when config not loaded or key missing."
         (cdr (assq key brain))))))
 
 (defun maduin-brain-root ()
-  "Return absolute brain root directory."
+  "Return absolute brain root directory, under the current project root."
   (expand-file-name
    (or (maduin-brain--config-get 'path)
-       maduin-brain-default-root)))
+       maduin-brain-default-root)
+   (if (fboundp 'maduin-project-root)
+       (maduin-project-root)
+     default-directory)))
 
 (defun maduin-brain--expand (file)
   "Expand FILE relative to brain root to an absolute path."

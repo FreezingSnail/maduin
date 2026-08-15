@@ -35,9 +35,10 @@ Return nil when config not loaded or key missing."
 
 (defun maduin-handoff-cache-path (seat-name)
   "Return handoff cache file path for SEAT-NAME.
-Path is .agents/handoff/SEAT-NAME.md relative to `default-directory'."
+Path is .agents/handoff/SEAT-NAME.md relative to the project root."
   (expand-file-name
-   (format ".agents/handoff/%s.md" seat-name)))
+   (format ".agents/handoff/%s.md" seat-name)
+   (maduin-project-root)))
 
 (defun maduin-handoff-read (seat-name)
   "Return handoff cache content for SEAT-NAME as string.

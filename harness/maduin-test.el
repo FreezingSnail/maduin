@@ -258,7 +258,8 @@ Mimics an opencode subprocess so session tests need no real CLI."
                   "ant"
                   (expand-file-name
                    (or (cdr (assq 'path (cdr (assq 'workspaces maduin-config))))
-                       "harness/workspaces"))))))
+                       "harness/workspaces")
+                   (maduin-project-root))))))
 
 (ert-deftest maduin-test-workspace-exists-bogus ()
   :tags '(maduin)
@@ -342,6 +343,30 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-resolver-stop "ghost-seat-xyz")
          t)
      (error nil))))
+
+;;; 12. project root
+
+(ert-deftest maduin-test-project-root-returns-dir ()
+  :tags '(maduin)
+  (let ((root (maduin-project-root)))
+    (should (stringp root))
+    (should (file-directory-p root))))
+
+(ert-deftest maduin-test-project-root-fallback ()
+  :tags '(maduin)
+  (let ((dir (maduin-test--temp-dir)))
+    (unwind-protect
+        (let ((default-directory dir))
+          (should (equal (directory-file-name (maduin-project-root))
+                         (directory-file-name dir))))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-handoff-cache-under-project-root ()
+  :tags '(maduin)
+  (should (equal (maduin-handoff-cache-path "root-seat-xyz")
+                 (expand-file-name
+                  ".agents/handoff/root-seat-xyz.md"
+                  (maduin-project-root)))))
 
 (provide 'maduin-test)
 
