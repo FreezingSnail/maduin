@@ -14,3 +14,6 @@ homer/
 plato/
 # bd worktree
 austen/
+
+# Build artifacts
+*.elc

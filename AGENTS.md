@@ -47,6 +47,24 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Testing (check.sh)
+
+Single entry point for the whole feedback loop. Run ONE command, read ALL
+output in one turn — never inline `--eval` probes.
+
+```bash
+harness/check.sh                     # byte-compile + ERT (clean first)
+harness/check.sh -c                  # compile only
+harness/check.sh probe probes/x.el   # + exploratory probe test
+```
+
+Exit codes: 0 green · 1 compile error · 2 test fail · 3 probe fail · 5 warnings.
+
+Rules:
+- After every source edit, run `harness/check.sh` and read everything in one turn.
+- Unknown behavior → add a `probe-*` ERT test in `harness/probes/`, run `harness/check.sh probe probes/<topic>.el`.
+- Probes are exploratory; promote by renaming `probe-*` → `maduin-test-*`.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 
