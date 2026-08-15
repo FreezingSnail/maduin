@@ -1,3 +1,48 @@
+# maduin-00r.6 — concierge (Alexander): epic discussion TUI + dismiss→bd
+
+## 改動
+
+- `harness/maduin-concierge.el`（新）— concierge 角色（Alexander），
+  Summoner 單一對口；按 epic 討論需召喚、議畢即遣散，**非持久** session。
+  - `(maduin-concierge)` — M-x 召喚：`maduin-terminal-open` 開
+    opencode TUI，prime concierge 角色模板。回 terminal buffer。
+  - `(maduin-concierge-dismiss)` — M-x 遣散：`maduin-terminal-dismiss`
+    → export → handoff note → kill buffer；回 handoff note｜nil。
+    epic + HIGH-LEVEL（deferred）task 由 concierge 於 TUI 內自行
+    bd 呼叫完成 — elisp 不代跑 bd。
+  - 注入縫（defvar fn slot，鏡像 maduin-dispatch.el）：
+    `maduin-concierge--terminal-open-fn`／`--terminal-dismiss-fn`。
+  - model 自 config 解析（非硬編）：`maduin-concierge--seat-model seat`
+    讀 `(concierge seats)` by-name；`--model` → concierge 席 model。
+  - `maduin-concierge--seat` defvar = "alexander"（可覆寫）。
+- `harness/templates/concierge-prompt.txt`（新）— 模板以 `{name}`
+  placeholder 起頭（經 `maduin-terminal--substitute` 換 "alexander"），
+  含必要指令：epic、HIGH-LEVEL、`--defer`、Do not design、Do not implement。
+- `harness/maduin.el`：
+  - `(require 'maduin-concierge)`。
+  - 刪舊 `maduin-concierge (work)`（v0.1 pipeline dispatch 版）—
+    新定義在 maduin-concierge.el（`C-c s c` 綁定照舊指向新函數）。
+  - keymap 加 `C-c s d` → `maduin-concierge-dismiss`。
+  - `maduin--feature-list` 加 `maduin-concierge`（reload 覆蓋）。
+
+## 介面
+
+- `maduin-concierge`        → buffer（interactive）
+- `maduin-concierge-dismiss` → handoff note string｜nil
+- `maduin-concierge--seat-model SEAT` → model string（alexander →
+  `opencode-go/deepseek-v4-pro`）
+
+## 驗證
+
+- `emacs -Q --batch -L harness -l maduin-test
+  --eval '(ert-run-tests-batch-and-exit "maduin-test-")'` →
+  73/73 過，0 unexpected（68 舊 + 5 新 concierge 測）。
+- byte-compile `maduin-concierge.el` 淨，無警告（.elc 已移除）。
+
+## 注意
+
+- 未手動 commit（auto-commit watcher 處理）。
+
 # maduin-00r.5 — demand-driven ephemeral session dispatcher
 
 ## 改動
