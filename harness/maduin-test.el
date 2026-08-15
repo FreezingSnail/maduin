@@ -34,6 +34,7 @@
 (require 'maduin-cockpit)
 (require 'maduin-resolver)
 (require 'maduin-terminal)
+(require 'maduin-dispatch)
 
 ;;; Helpers
 
@@ -679,6 +680,157 @@ Both nil if bd unavailable."
 (ert-deftest maduin-test-terminal-dismiss-no-buffer ()
   :tags '(maduin)
   (should (null (maduin-terminal-dismiss "no-such-seat-xyz"))))
+
+;;; 15. dispatch
+
+(ert-deftest maduin-test-dispatch-functions-exist ()
+  :tags '(maduin)
+  (dolist (f '(maduin-dispatch-start
+               maduin-dispatch-stop
+               maduin-dispatch-implement
+               maduin-dispatch-design
+               maduin-dispatch-resolve
+               maduin-dispatch-run-loop))
+    (should (fboundp f))))
+
+(ert-deftest maduin-test-dispatch-implement-concurrency-cap ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (run-count 0)
+         (maduin-dispatch--active
+          (list (list :handle "s-ifrit" :seat "ifrit" :role 'implementer :task "t0")
+                (list :handle "s-shiva" :seat "shiva" :role 'implementer :task "t0")))
+         (maduin-dispatch--session-run-fn
+          (lambda (_w _m _p)
+            (setq run-count (1+ run-count))
+            (format "s-%d" run-count)))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir)))
+    (unwind-protect
+        (progn
+          ;; 2 active → 1 more on free seat titan.
+          (let ((sid (maduin-dispatch-implement "t1")))
+            (should (stringp sid))
+            (should (= (length maduin-dispatch--active) 3))
+            (should (equal (plist-get (car maduin-dispatch--active) :seat)
+                           "titan")))
+          ;; 3 active (cap) → nil, no further spawn.
+          (let ((before run-count))
+            (should-not (maduin-dispatch-implement "t2"))
+            (should (= run-count before))))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-completion-lands-and-closes ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (landed nil)
+         (closed nil)
+         (deleted '())
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _p) "s-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--diff-fn
+          (lambda (_sid) (list '((file . "a.el") (patch . "+x")))))
+         (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
+         (maduin-dispatch--close-fn (lambda (task out) (setq closed (cons task out)) t))
+         (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+    (unwind-protect
+        (progn
+          (should (equal (maduin-dispatch-implement "t1") "s-1"))
+          (should (= (length maduin-dispatch--active) 1))
+          (maduin-dispatch--on-complete "s-1" 'completed)
+          (should (equal landed "ifrit"))
+          (should (equal (car closed) "t1"))
+          (should (member "s-1" deleted))
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-completion-failure-keeps-open ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (commented nil)
+         (closed nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _p) "s-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
+         (maduin-dispatch--close-fn (lambda (task out) (setq closed task) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-implement "t1")
+          (maduin-dispatch--on-complete "s-1" 'failed)
+          (should (equal (car commented) "t1"))
+          (should-not closed)
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-completion-conflict-dispatches-resolver ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (run-count 0)
+         (commented nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn
+          (lambda (_w _m _p)
+            (setq run-count (1+ run-count))
+            (format "s-%d" run-count)))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--land-fn (lambda (_seat) 'conflict))
+         (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
+         (maduin-dispatch--close-fn (lambda (_t _o) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-implement "t1")   ; run-count 1, seat ifrit
+          (maduin-dispatch--on-complete "s-1" 'completed)
+          ;; conflict → resolver dispatched → second session run.
+          (should (= run-count 2))
+          (should (equal (car commented) "t1"))
+          (should (cl-find-if (lambda (e) (eq (plist-get e :role) 'resolver))
+                              maduin-dispatch--active)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-run-loop-dispatches-ready ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (run-count 0)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn
+          (lambda (_w _m _p)
+            (setq run-count (1+ run-count))
+            (format "s-%d" run-count)))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--ready-fn (lambda () '("t1" "t2"))))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-run-loop)
+          (should (= run-count 2))
+          (should (= (length maduin-dispatch--active) 2)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-start-stop-timer ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--timer nil)
+        (maduin-dispatch--active nil)
+        (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-start)
+          (should maduin-dispatch--timer)
+          (maduin-dispatch-stop)
+          (should-not maduin-dispatch--timer))
+      (maduin-dispatch-stop))))
 
 (provide 'maduin-test)
 

@@ -313,3 +313,72 @@
 - 測試 handoff 寫入 repo 自身 `.agents/handoff/`（gitignored），
   `unwind-protect` 刪檔自清理，無 /tmp、無一次性測試。
 - 未手動 commit（auto-commit watcher 處理）。
+
+# maduin-00r.3 — autonomous session substrate: opencode run + NDJSON parsing
+
+## 改動
+
+- `harness/maduin-session.el` — 重寫為雙 substrate：
+  - **autonomous（一次性）substrate**（本任務核心）：
+    - `(maduin-session-run workdir model plan)` →
+      spawn `opencode run --dir WORKDIR -m MODEL --format json --auto
+      --title <handle> PLAN`（`make-process` + `process-filter` 逐行消費
+      NDJSON），回 session handle（string）或 nil（opencode 缺／spawn 敗）。
+    - `(maduin-session-complete-p sid)` → `completed`｜`running`｜`failed`。
+    - `(maduin-session-diff sid)` → `opencode export` 的 `messages[].info.summary.diffs[]`
+      攤平為 diff alist list。
+    - `(maduin-session-delete sid)` → `opencode session delete`，回 boolean，
+      並清 registry／kill process+buffer。
+    - `maduin-session-on-complete-hook` — (sid status) 於 sentinel 一次性觸發。
+    - NDJSON parser（純，可單元測）：`(maduin-session--parse-line line)`
+      → `(:type :session-id :terminal)`，`terminal` 由
+      `step_finish.reason`（stop→completed，error→failed）＋
+      `tool_use.state.status`（error→failed）判定。
+    - **不信 exit code**：permission 拒仍 exit 0 → 完成態只由事件流判定；
+      sentinel 無 terminal 事件即 `failed`。
+    - registry：`maduin-session--registry` hash（handle → buffer），
+      buffer-local 持 status/session-id/pending/done-p。
+  - **legacy seat-buffer substrate（compat shims）**：`maduin-session-create`／
+    `-kill`／`-list`／`-switch`／`-alive-p`／`--buffer`／`--buffer-name`／
+    `--sentinel`／`maduin-session-on-exit-hook` 原樣保留 — pipeline／agent／
+    resolver／cockpit／handoff 既有呼叫點不破；.5 dispatch 重建後再移除。
+  - 不再掃 RESOLVED_DONE（session.el 內無殘留 text scanning）。
+- `harness/test/fake-opencode`（新增，repo 內永久 shim，非 /tmp）：
+  emulates `run`（emit NDJSON；`MADUIN_FAKE_MODE=fail` 時 emit tool_use error
+  但 exit 0 — 驗證 exit code 不可信）、`export`（emit 單 diff）、`session delete`。
+- `harness/maduin-test.el`：+12 ERT（tag maduin）— parser 6、run 集成 2
+  （completes／permission-denied）、missing-cli／complete-p-unknown／diff-unknown、
+  原 `session-create-kill` 留。
+
+## 介面
+
+- `maduin-session-run`        → handle string｜nil
+- `maduin-session-complete-p` → `completed`｜`running`｜`failed`
+- `maduin-session-diff`       → diff alist list｜nil
+- `maduin-session-delete`     → boolean
+- `maduin-session-on-complete-hook` — (sid status)
+- `maduin-session--parse-line` → `(:type :session-id :terminal)`（純）
+
+## CLI 驗證（opencode 1.18.15，實測）
+
+- `opencode run [msg] --dir --format json --auto -m --title` — 有；NDJSON 事件
+  `sessionID` 於每事件頂層；`step_finish.reason` = stop/tool-calls/error；
+  `tool_use.part.state.status` = completed/error（實測探針）。
+- `opencode session delete <sid>` — 有。
+- `opencode export [sid]` — 有；`messages[].info.summary.diffs[]` 含 patch。
+
+## 驗證
+
+- `emacs -Q --batch -L harness -l maduin-test
+  --eval '(ert-run-tests-batch-and-exit "maduin-test-")'` →
+  61/61 過，0 unexpected（50 舊 + 12 新）。
+- byte-compile `maduin-session.el` 淨，無警告。
+- 註：另發現並清除了 2 枚 stale `.elc`（`maduin-bd-bridge.elc`／`maduin-gate.elc`，
+  由前任務誤提交），其載入導致 `resolver-start-*` 兩測
+  `void-variable opencode-go/deepseek-v4-pro` — 刪後全綠。
+
+## 注意
+
+- `run` 回 handle（自 `--title` 派生）；真 `sessionID` 由 NDJSON 捕獲存於
+  buffer，`diff`／`delete` 內部解析 — caller 只持 handle 即可。
+- 未手動 commit（auto-commit watcher 處理）。
