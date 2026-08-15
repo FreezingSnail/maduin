@@ -1,11 +1,11 @@
-;;; config.el --- super-harness configuration  -*- lexical-binding: t; -*-
+;;; config.el --- maduin configuration  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
 ;;; Code:
 
-(defvar super-harness-config
-  '((harness . ((name . "super-harness") (version . "0.1.0")))
+(defvar maduin-config
+  '((harness . ((name . "maduin") (version . "0.1.0")))
     (crew . ((seats . (((name . "ant") (model . "deepseek-v3"))))))
     (fleet . ((seats . (((name . "homer") (model . "deepseek-v3"))
                         ((name . "plato") (model . "deepseek-v3"))
@@ -17,6 +17,6 @@
     (resolver . ((enabled . t) (model . "deepseek-v3") (max-retries . 3)))
     (pipeline . ((review-required . nil) (auto-close-epic . t)))))
 
-(provide 'super-harness-config)
+(provide 'maduin-config)
 
 ;;; config.el ends here

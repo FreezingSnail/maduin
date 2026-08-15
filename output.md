@@ -66,7 +66,7 @@ GET  /event (SSE) · GET /session (list) · GET /session/status
 Live session create + message:
 ```
 $ curl -s -X POST localhost:4199/session -d '{"title":"probe"}'
-{"id":"ses_...","directory":"/Users/connorfranc/code/super-harness",...}
+{"id":"ses_...","directory":"/Users/connorfranc/code/maduin",...}
 $ curl -s -X POST localhost:4199/session/ses_.../message \
     -d '{"parts":[{"type":"text","text":"say hi"}],
          "model":{"providerID":"opencode-go","modelID":"deepseek-v4-pro"}}'

@@ -1,9 +1,9 @@
-;;; super-harness.el --- main entry: minor mode, commands, keybindings  -*- lexical-binding: t; -*-
+;;; maduin.el --- main entry: minor mode, commands, keybindings  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
 ;; Orchestrator entry point.  Defines the global minor mode
-;; `super-harness-mode', the interactive user commands, and the
+;; `maduin-mode', the interactive user commands, and the
 ;; graceful-shutdown hook.  All heavy lifting lives in sibling
 ;; harness modules.
 
@@ -11,62 +11,62 @@
 
 (require 'cl-lib)
 
-(defconst super-harness--dir
+(defconst maduin--dir
   (file-name-directory (or load-file-name buffer-file-name))
-  "Directory containing super-harness.el.")
+  "Directory containing maduin.el.")
 
 ;; Ensure sibling harness modules resolve when loaded directly.
-(add-to-list 'load-path super-harness--dir)
+(add-to-list 'load-path maduin--dir)
 
-(require 'super-harness-config)
-(require 'super-harness-session)
-(require 'super-harness-agent)
-(require 'super-harness-handoff)
-(require 'super-harness-pipeline)
-(require 'super-harness-workspace)
-(require 'super-harness-resolver)
-(require 'super-harness-cockpit)
+(require 'maduin-config)
+(require 'maduin-session)
+(require 'maduin-agent)
+(require 'maduin-handoff)
+(require 'maduin-pipeline)
+(require 'maduin-workspace)
+(require 'maduin-resolver)
+(require 'maduin-cockpit)
 
 ;;; Minor mode
 
-(defvar super-harness-mode-map
+(defvar maduin-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c s s") #'super-harness-status)
-    (define-key map (kbd "C-c s a") #'super-harness-attach)
-    (define-key map (kbd "C-c s c") #'super-harness-crew)
+    (define-key map (kbd "C-c s s") #'maduin-status)
+    (define-key map (kbd "C-c s a") #'maduin-attach)
+    (define-key map (kbd "C-c s c") #'maduin-crew)
     map)
-  "Keymap for `super-harness-mode'.")
+  "Keymap for `maduin-mode'.")
 
 ;;;###autoload
-(define-minor-mode super-harness-mode
-  "Global minor mode for super-harness orchestration.
+(define-minor-mode maduin-mode
+  "Global minor mode for maduin orchestration.
 Provides commands to start, stop and monitor the agent fleet."
   :global t
   :lighter " SH"
-  :keymap super-harness-mode-map)
+  :keymap maduin-mode-map)
 
 ;;; Config helpers
 
-(defun super-harness--config-get (key &optional section)
+(defun maduin--config-get (key &optional section)
   "Return config value for KEY in SECTION, or nil.
 SECTION is a top-level config section symbol; when omitted, KEY is
-looked up at the top level of `super-harness-config'."
-  (let ((conf (bound-and-true-p super-harness-config)))
+looked up at the top level of `maduin-config'."
+  (let ((conf (bound-and-true-p maduin-config)))
     (cdr (assq key (if section
                        (cdr (assq section conf))
                      conf)))))
 
-(defun super-harness--seats ()
+(defun maduin--seats ()
   "Return alist ((SEAT-NAME . ROLE) ...) from config (crew then fleet)."
   (append
    (mapcar (lambda (s) (cons (alist-get 'name s) "crew"))
-           (super-harness--config-get 'seats 'crew))
+           (maduin--config-get 'seats 'crew))
    (mapcar (lambda (s) (cons (alist-get 'name s) "fleet"))
-           (super-harness--config-get 'seats 'fleet))))
+           (maduin--config-get 'seats 'fleet))))
 
-(defun super-harness--seat-model (seat role)
+(defun maduin--seat-model (seat role)
   "Return model configured for SEAT in ROLE section, or \"default\"."
-  (let ((seats (super-harness--config-get 'seats role)))
+  (let ((seats (maduin--config-get 'seats role)))
     (or (and (listp seats)
              (alist-get 'model
                         (cl-find-if
@@ -74,39 +74,39 @@ looked up at the top level of `super-harness-config'."
                          seats)))
         "default")))
 
-(defun super-harness--seat-workdir (seat)
+(defun maduin--seat-workdir (seat)
   "Return workspace directory for SEAT under workspaces.path."
   (expand-file-name
    seat
    (expand-file-name
-    (or (super-harness--config-get 'path 'workspaces)
+    (or (maduin--config-get 'path 'workspaces)
         "harness/workspaces")
     default-directory)))
 
 ;;; Commands
 
 ;;;###autoload
-(defun super-harness-start ()
+(defun maduin-start ()
   "Start all agents per config and open the cockpit.
 For each crew seat: spawn an agent.  For each fleet seat: spawn an
 agent and start its pipeline polling.  Then show and refresh the
 cockpit dashboard."
   (interactive)
-  (dolist (pair (super-harness--seats))
+  (dolist (pair (maduin--seats))
     (let* ((seat (car pair))
            (role (cdr pair))
-           (model (super-harness--seat-model seat role))
-           (workdir (super-harness--seat-workdir seat)))
+           (model (maduin--seat-model seat role))
+           (workdir (maduin--seat-workdir seat)))
       (make-directory workdir t)
-      (super-harness-agent-spawn seat role model workdir)
+      (maduin-agent-spawn seat role model workdir)
       (when (string= role "fleet")
-        (super-harness-pipeline-start-fleet seat))))
-  (super-harness-cockpit-show)
-  (super-harness-cockpit-refresh)
-  (message "super-harness started"))
+        (maduin-pipeline-start-fleet seat))))
+  (maduin-cockpit-show)
+  (maduin-cockpit-refresh)
+  (message "maduin started"))
 
 ;;;###autoload
-(defun super-harness-stop ()
+(defun maduin-stop ()
   "Gracefully stop all agents and kill any remaining sessions.
 Requests handoff from each agent, waits up to welfare.handoff-timeout,
 then kills survivors.  Logs shutdown."
@@ -125,30 +125,30 @@ then kills survivors.  Logs shutdown."
     (unwind-protect
         (condition-case err
             (progn
-              (super-harness-handoff-stop-all
-               (super-harness--config-get 'handoff-timeout 'welfare))
+              (maduin-handoff-stop-all
+               (maduin--config-get 'handoff-timeout 'welfare))
               ;; Land fleet branches when configured; never abort stop.
-              (when (super-harness--config-get 'land-on-stop 'workspaces)
-                (dolist (pair (super-harness--seats))
+              (when (maduin--config-get 'land-on-stop 'workspaces)
+                (dolist (pair (maduin--seats))
                   (when (string= (cdr pair) "fleet")
                     (condition-case err
-                        (super-harness-pipeline-land-branch (car pair))
+                        (maduin-pipeline-land-branch (car pair))
                       (error
-                       (message "super-harness: land-branch failed for %s: %s"
+                       (message "maduin: land-branch failed for %s: %s"
                                 (car pair) (error-message-string err)))))))
-              (dolist (pair (super-harness-session-list))
-                (super-harness-session-kill (car pair)))
+              (dolist (pair (maduin-session-list))
+                (maduin-session-kill (car pair)))
               ;; Stop resolver (beadle) sessions; never abort stop.
               (dolist (seat (mapcar #'car
                                     (copy-sequence
-                                     super-harness-resolver-processes)))
+                                     maduin-resolver-processes)))
                 (condition-case err
-                    (super-harness-resolver-stop seat)
+                    (maduin-resolver-stop seat)
                   (error
-                   (message "super-harness: resolver stop failed for %s: %s"
+                   (message "maduin: resolver stop failed for %s: %s"
                             seat (error-message-string err))))))
           (error
-           (message "super-harness: shutdown error (continuing): %s"
+           (message "maduin: shutdown error (continuing): %s"
                     (error-message-string err))))
       ;; Restore modelines on surviving buffers.
       (dolist (pair saved-modelines)
@@ -156,91 +156,91 @@ then kills survivors.  Logs shutdown."
           (when (buffer-live-p buf)
             (with-current-buffer buf
               (setq mode-line-format (cdr pair))))))))
-  (message "super-harness stopped"))
+  (message "maduin stopped"))
 
 ;;;###autoload
-(defun super-harness-status ()
+(defun maduin-status ()
   "Refresh cockpit and show a summary message."
   (interactive)
-  (super-harness-cockpit-refresh)
-  (message "super-harness: %d sessions | %s"
-           (length (super-harness-session-list))
-           (super-harness-cockpit--pipeline-summary)))
+  (maduin-cockpit-refresh)
+  (message "maduin: %d sessions | %s"
+           (length (maduin-session-list))
+           (maduin-cockpit--pipeline-summary)))
 
 ;;;###autoload
-(defun super-harness-restart ()
+(defun maduin-restart ()
   "Stop then start all agents."
   (interactive)
-  (super-harness-stop)
-  (super-harness-start))
+  (maduin-stop)
+  (maduin-start))
 
 ;;;###autoload
-(defun super-harness-attach (seat)
+(defun maduin-attach (seat)
   "Attach to SEAT's session buffer.
 SEAT is chosen by completing-read from configured seats."
   (interactive
    (list (completing-read "Attach to seat: "
-                          (mapcar #'car (super-harness--seats))
+                          (mapcar #'car (maduin--seats))
                           nil t)))
-  (super-harness-session-switch seat))
+  (maduin-session-switch seat))
 
 ;;;###autoload
-(defun super-harness-crew (work)
+(defun maduin-crew (work)
   "Dispatch WORK text to the first free crew agent."
   (interactive "sCrew work: ")
-  (super-harness-pipeline-dispatch-crew work))
+  (maduin-pipeline-dispatch-crew work))
 
 ;;;###autoload
-(defun super-harness-bootstrap ()
+(defun maduin-bootstrap ()
   "First-time setup: create dirs and verify bd init.
 Creates .agents/brain, .agents/handoff, .agents/logs and per-seat
 workspace dirs.  Hints to run `bd init' when .beads is absent."
   (interactive)
   (dolist (dir '(".agents/brain" ".agents/handoff" ".agents/logs"))
     (make-directory dir t))
-  (dolist (pair (super-harness--seats))
-    (make-directory (super-harness--seat-workdir (car pair)) t))
+  (dolist (pair (maduin--seats))
+    (make-directory (maduin--seat-workdir (car pair)) t))
   ;; Ensure per-seat git worktrees; never abort on failure (logged, nil).
-  (dolist (pair (super-harness--seats))
+  (dolist (pair (maduin--seats))
     (condition-case err
-        (super-harness-workspace-ensure (car pair))
+        (maduin-workspace-ensure (car pair))
       (error
-       (message "super-harness: worktree ensure failed for %s: %s"
+       (message "maduin: worktree ensure failed for %s: %s"
                 (car pair) (error-message-string err)))))
   (if (file-exists-p ".beads")
-      (message "super-harness: bootstrap done")
-    (message "super-harness: bootstrap done; hint: run `bd init` (no .beads found)")))
+      (message "maduin: bootstrap done")
+    (message "maduin: bootstrap done; hint: run `bd init` (no .beads found)")))
 
 ;;; Shutdown hook
 
-(add-hook 'kill-emacs-hook #'super-harness-stop)
+(add-hook 'kill-emacs-hook #'maduin-stop)
 
 ;;; Dev reload — edit-then-reload loop for developing the harness itself.
 
-(defvar super-harness--feature-list
-  '(super-harness-cockpit super-harness-pipeline super-harness-handoff
-    super-harness-agent super-harness-session super-harness-brain
-    super-harness-bd-bridge super-harness-config)
+(defvar maduin--feature-list
+  '(maduin-cockpit maduin-pipeline maduin-handoff
+    maduin-agent maduin-session maduin-brain
+    maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")
 
 ;;;###autoload
-(defun super-harness-reload ()
-  "Unload and reload all super-harness modules.
+(defun maduin-reload ()
+  "Unload and reload all maduin modules.
 Development loop: edit a .el file, run this, keep the new code.
 Gracefully stops agents first, preserving handoff caches."
   (interactive)
   (when (or (not (called-interactively-p 'interactive))
-            (y-or-n-p "Stop running agents and reload super-harness? "))
-    (super-harness-stop)
-    (dolist (feat super-harness--feature-list)
+            (y-or-n-p "Stop running agents and reload maduin? "))
+    (maduin-stop)
+    (dolist (feat maduin--feature-list)
       (unload-feature feat 'force))
-    (let ((dir (file-name-directory (locate-library "super-harness"))))
+    (let ((dir (file-name-directory (locate-library "maduin"))))
       (when dir (add-to-list 'load-path dir)))
-    (dolist (feat (cons 'super-harness super-harness--feature-list))
+    (dolist (feat (cons 'maduin maduin--feature-list))
       (require feat nil 'noerror))
-    (super-harness-mode 1)
-    (message "super-harness reloaded")))
+    (maduin-mode 1)
+    (message "maduin reloaded")))
 
-(provide 'super-harness)
+(provide 'maduin)
 
-;;; super-harness.el ends here
+;;; maduin.el ends here
