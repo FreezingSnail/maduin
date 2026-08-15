@@ -25,6 +25,7 @@
 (require 'maduin-pipeline)
 (require 'maduin-workspace)
 (require 'maduin-resolver)
+(require 'maduin-terminal)
 (require 'maduin-cockpit)
 (require 'maduin-gate)
 
@@ -224,8 +225,8 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 ;;; Dev reload — edit-then-reload loop for developing the harness itself.
 
 (defvar maduin--feature-list
-  '(maduin-cockpit maduin-pipeline maduin-handoff
-    maduin-agent maduin-session maduin-brain maduin-gate
+  '(maduin-cockpit maduin-terminal maduin-pipeline maduin-handoff
+    maduin-agent maduin-session maduin-brain
     maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")
 

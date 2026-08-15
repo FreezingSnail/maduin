@@ -23,6 +23,7 @@
 (require 'maduin-pipeline)
 (require 'maduin-cockpit)
 (require 'maduin-resolver)
+(require 'maduin-terminal)
 
 ;;; Helpers
 
@@ -497,6 +498,83 @@ Both nil if bd unavailable."
       (maduin-test--bd-delete t1)
       (maduin-test--bd-delete t2)
       (maduin-test--bd-delete epic))))
+
+;;; 14. terminal (interactive substrate)
+
+(ert-deftest maduin-test-terminal-buffer-name ()
+  :tags '(maduin)
+  (should (equal (maduin-terminal--buffer-name 'concierge "alexander")
+                 "*maduin/concierge-alexander*"))
+  (should (equal (maduin-terminal--buffer-name "designer" "ramuh")
+                 "*maduin/designer-ramuh*")))
+
+(ert-deftest maduin-test-terminal-choose-backend ()
+  :tags '(maduin)
+  (should (eq (maduin-terminal--choose-backend t) 'vterm))
+  (should (eq (maduin-terminal--choose-backend nil) 'term))
+  ;; batch: vterm not installed → term fallback
+  (should (eq (maduin-terminal--backend) 'term)))
+
+(ert-deftest maduin-test-terminal-prompt-inline ()
+  :tags '(maduin)
+  (let ((p (maduin-terminal--prompt "alexander" 'concierge "pro")))
+    (should (string-match-p "alexander" p))
+    (should (string-match-p "concierge" p))))
+
+(ert-deftest maduin-test-terminal-prompt-template ()
+  :tags '(maduin)
+  ;; "crew" has templates/crew-prompt.txt → template wins, substituted.
+  (let ((p (maduin-terminal--prompt "ant" "crew" "deepseek-v3")))
+    (should (string-match-p "ant" p))
+    (should-not (string-match-p "{name}" p))
+    (should-not (string-match-p "{model}" p))))
+
+(ert-deftest maduin-test-terminal-command-line ()
+  :tags '(maduin)
+  (let ((cmd (maduin-terminal--command-line "/acme/root" "deepseek-v3"
+                                             "You are x" "opencode")))
+    (should (string-match-p "\\`opencode " cmd))
+    (should (string-match-p "deepseek-v3" cmd))
+    (should (string-match-p "--prompt" cmd))))
+
+(ert-deftest maduin-test-terminal-parse-session-ids ()
+  :tags '(maduin)
+  (let ((root "/acme/demo")
+        (json (concat
+               "[{\"id\":\"ses_old\",\"directory\":\"/acme/demo\",\"created\":1000},"
+               "{\"id\":\"ses_new\",\"directory\":\"/acme/demo\",\"created\":2000},"
+               "{\"id\":\"ses_other\",\"directory\":\"/acme/other\",\"created\":3000}]")))
+    (should (equal (mapcar #'cdr (maduin-terminal--parse-session-ids json root))
+                   '("ses_new" "ses_old")))
+    (should (null (maduin-terminal--parse-session-ids json "/acme/missing")))
+    ;; since filter (seconds): 1.5s → 1500ms, drops ses_old(1000).
+    (should (equal (mapcar #'cdr (maduin-terminal--parse-session-ids json root 1.5))
+                   '("ses_new")))
+    ;; since 2.5s → 2500ms, drops both.
+    (should (null (maduin-terminal--parse-session-ids json root 2.5)))
+    ;; exclude ses_new → only ses_old.
+    (should (equal (mapcar #'cdr (maduin-terminal--parse-session-ids json root nil '("ses_new")))
+                   '("ses_old")))))
+
+(ert-deftest maduin-test-terminal-handoff-note-write ()
+  :tags '(maduin)
+  (let* ((seat (format "ert-term-seat-%s" (format-time-string "%H%M%S%N" (current-time))))
+         (note (maduin-terminal--handoff-note "ses_test123" "{\"ok\":true}"))
+         (path (maduin-handoff-cache-path seat)))
+    (unwind-protect
+        (progn
+          (should (maduin-terminal--write-handoff seat note (maduin-project-root)))
+          (should (file-exists-p path))
+          (should (string= (maduin-handoff-read seat) note)))
+      (ignore-errors (delete-file path)))))
+
+(ert-deftest maduin-test-terminal-active-p-bogus ()
+  :tags '(maduin)
+  (should-not (maduin-terminal-active-p "no-such-seat-xyz")))
+
+(ert-deftest maduin-test-terminal-dismiss-no-buffer ()
+  :tags '(maduin)
+  (should (null (maduin-terminal-dismiss "no-such-seat-xyz"))))
 
 (provide 'maduin-test)
 
