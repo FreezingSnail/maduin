@@ -17,3 +17,7 @@ austen/
 
 # Build artifacts
 *.elc
+
+# Local agent tooling (not shared)
+.claude/
+.codex/
