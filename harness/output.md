@@ -136,3 +136,62 @@
   34/34 過（31 舊 + 3 新），0 unexpected。
 - byte-compile 淨（僅既有警告：handoff-wait `buf` free var、
   `maduin-mode` defcustom group）。
+
+# maduin-00r.2 — FF seats + model config (alexander/ramuh/ifrit/shiva/titan/phoenix)
+
+## 改動
+
+- `harness/config.el`：席段全換 FF 名 —
+  - `concierge` → alexander（role `concierge`，model `opencode-go/deepseek-v4-pro`）。
+  - `designer` → ramuh（role `designer`，model `opencode-go/deepseek-v4-pro`）。
+  - `fleet` → ifrit/shiva/titan（role `implementer`，model `opencode-go/deepseek-v4-flash`）。
+    `poll-interval` 30、`max-concurrent` 1 留。
+  - `resolver`（Phoenix）→ `enabled t`、model `opencode-go/deepseek-v4-pro`、`max-retries 3`。
+  - 舊 `crew`/ant/homer/plato/austen 段全刪。
+- `harness/maduin.el`：
+  - `maduin--seats`：遍歷 `(concierge designer fleet)`，取席名 +
+    `(symbol-name (alist-get 'role s))` → 回 `((SEAT . ROLE-string) ...)`。
+  - `maduin--seat-model`：改單參 `seat`，跨三段 by-name 查 `model`。
+  - `maduin-start`：`(maduin--seat-model seat)`；`(string= role "implementer")`
+    才 `maduin-pipeline-start-fleet`。
+  - `maduin-stop`：land-branch 判 `"implementer"`（原 `"fleet"`）。
+  - `maduin-crew` → `maduin-concierge`（keybinding `C-c s c` 留，c=concierge）。
+- `harness/maduin-pipeline.el`：
+  - `maduin-pipeline--crew-seats` → `--concierge-seats`（讀 `concierge`）；
+    加 `--designer-seats`（讀 `designer`）。
+  - `maduin-pipeline-find-free-agent`：role `"concierge"|"designer"|"implementer"`
+    分支映射三段席。
+  - `maduin-pipeline-dispatch-crew` → `maduin-pipeline-dispatch-concierge`（找 concierge）。
+  - `maduin-pipeline--poll`：spawn role `"implementer"`（原 `"fleet"`）。
+- `harness/maduin-cockpit.el`：`maduin-cockpit--seats` 三段
+  concierge/designer/implementer 對位（原 crew/fleet）。
+- `harness/maduin-agent.el`：`maduin-agent--template` role 映射 —
+  `"implementer"` → `fleet-prompt.txt`，餘 → `crew-prompt.txt`；
+  `maduin-agent-prime` 缺省 role `"concierge"`。templates 檔案名不改（本任務只 plumbing）。
+- `harness/maduin-resolver.el`：`maduin-resolver-start` docstring + 缺省 model
+  → `opencode-go/deepseek-v4-pro`（docstring 內不帶引號，避字串終止）。
+- `harness/maduin-workspace.el`：**無改** — worktree 路徑自席名派生，
+  無硬編席名；新席於下次 `maduin-bootstrap` 建 alexander/ramuh/ifrit/shiva/titan。
+
+## 介面
+
+- `(maduin--seats)` → `(("alexander" . "concierge") ("ramuh" . "designer")
+  ("ifrit" . "implementer") ("shiva" . "implementer") ("titan" . "implementer"))`。
+- `(maduin--seat-model SEAT)` → model string（pro：alexander/ramuh；
+  flash：ifrit/shiva/titan）。
+- 模型 ID：`opencode-go/deepseek-v4-pro`（concierge/designer/resolver）、
+  `opencode-go/deepseek-v4-flash`（implementers）— 已 `opencode models` 核實。
+
+## 驗證
+
+- `emacs -Q --batch -L harness -l maduin-test
+  --eval '(ert-run-tests-batch-and-exit "maduin-test-")'` →
+  41/41 過，0 unexpected。
+  （本任務測試 37 枚含新 `config-seats`/`config-seat-models` 與改寫之
+  concierge/designer/fleet/resolver 測；餘 4 枚 gate 測屬並行任務 maduin-gate。）
+
+## 注意
+
+- 無舊 `crew`/`ant`/`homer`/`plato`/`austen` 殘留（除 output.md 歷史、
+  agent 內 template 檔名映射 `fleet`/`crew`）。
+- 未手動 commit（auto-commit watcher 處理）。
