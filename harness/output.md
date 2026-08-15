@@ -471,3 +471,49 @@
 - `run` 回 handle（自 `--title` 派生）；真 `sessionID` 由 NDJSON 捕獲存於
   buffer，`diff`／`delete` 內部解析 — caller 只持 handle 即可。
 - 未手動 commit（auto-commit watcher 處理）。
+
+# maduin-00r.7 — designer (Ramuh): PDD research + design/acceptance + stage
+
+## 改動
+
+- `harness/maduin-designer.el`（新）— Ramuh designer：
+  - `(maduin-designer-design task &optional plan)` → session handle｜nil。
+    從 `templates/designer-prompt.txt` 建 plan（`{id}/{title}/{desc}` 代入，
+    title/desc 經 `maduin-bd-show`），呼叫 `maduin-dispatch-design`。
+    designer 擁有 prompt 內容；dispatch 擁有 spawn／concurrency。
+  - `(maduin-designer-drop-in seat)` → buffer。委派 `maduin-terminal-open`
+    （role `designer`，model 自 config designer 席解析）— Summoner 中途澄清。
+  - `(maduin-designer-pending-tasks)` → 缺 `--design` 的 deferred task list。
+    `bd query "status=deferred AND type=task"` 後按 design 有無過濾。
+  - `(maduin-designer--has-design id)` — `bd show --json` 不曝 design 欄，
+    故 parse 人類可讀 `bd show ID` 的 `DESIGN` section header 判有無。
+  - 注入縫（defvar fn slot，測試 mock）：`--show-fn`／`--query-fn`／
+    `--has-design-fn`／`--dispatch-fn`／`--terminal-open-fn`。
+- `harness/maduin-dispatch.el` — `maduin-dispatch--spawn` 增 `&optional plan`
+  （`(or plan (maduin-dispatch--plan-for ...))`）；`maduin-dispatch-design` 增
+  `&optional plan` 透傳。dispatch 仍掌 claim/seat/cap，designer 供 plan。
+- `harness/templates/designer-prompt.txt`（新）— Ramuh 設計 prompt 模板。
+- 未 reimplement staging：stage（defer + staged label + design/acceptance）
+  由設計 session 內 bd CLI 執行，鏡像 `maduin-gate-stage`（gate 保持
+  唯一 deterministic staging API）。
+
+## 介面
+
+- `maduin-designer-design`         → session-id｜nil（&optional plan）
+- `maduin-designer-drop-in`        → buffer
+- `maduin-designer-pending-tasks`  → list
+- `maduin-dispatch-design`         → session-id｜nil（&optional plan）
+- `maduin-designer--prompt`/`--template`/`--has-design` — 內部
+
+## 驗證
+
+- `emacs -Q --batch -L harness -l maduin-test
+  --eval '(ert-run-tests-batch-and-exit "maduin-test-")'` →
+  80/80 過，0 unexpected（73 舊 + 7 新 designer 測）。
+- byte-compile `maduin-designer.el` + `maduin-dispatch.el` 淨，無警告。
+
+## 注意
+
+- `bd show --json` 不曝 design/acceptance（--long 亦無）→ 有無 design 以
+  human-readable `DESIGN` header 判定，非 JSON 欄。
+- 未手動 commit（auto-commit watcher 處理）。
