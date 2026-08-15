@@ -517,3 +517,54 @@
 - `bd show --json` 不曝 design/acceptance（--long 亦無）→ 有無 design 以
   human-readable `DESIGN` header 判定，非 JSON 欄。
 - 未手動 commit（auto-commit watcher 處理）。
+
+# maduin-00r.9 — integration: wire v0.2 modules + ERT tests
+
+## 改動
+
+- `harness/maduin.el` — entry point 重新接線到 v0.2 orchestration：
+  - `(require)` 新增 `maduin-dispatch`、`maduin-designer`（terminal/concierge/
+    gate 已在此）。
+  - `maduin-start` → `maduin-dispatch-start`（啟 dispatchers、**零 session**）；
+    移除 v0.1「起 N 席 agent + pipeline fleet」行為。idle = 0 session。
+  - `maduin-stop` → `maduin-dispatch-stop`（cancel timer + handoff in-flight）
+    + `maduin-handoff-stop-all`（teardown 殘留 legacy session）；全程不 abort。
+  - keymap 新增：`C-c s n` → `maduin-designer-drop-in`、
+    `C-c s p` → `maduin-designer-pending-tasks`、
+    `C-c s g a/r/l` → `maduin-gate-approve/reject/staged-list`。
+  - `kill-emacs-hook` 沿用 `maduin-stop`（現走 dispatch-stop）。
+  - `maduin--feature-list` 增 dispatch/designer/gate（reload 覆蓋）。
+  - `define-minor-mode` 補 `:group 'maduin`（消 byte-compile 警告）。
+- `harness/maduin-gate.el` — 三函數加 `(interactive)` 表單：
+  `maduin-gate-approve`（completing-read staged-list）、
+  `maduin-gate-reject`（id + feedback）、`maduin-gate-staged-list`
+  （interactive 時 message list；純呼叫仍回 list，不破既有測試）。
+- `harness/maduin-designer.el` — `maduin-designer-drop-in`、
+  `maduin-designer-pending-tasks` 加 `(interactive)`（純呼叫回傳不變）。
+- `harness/maduin-test.el` — 增 5 測試（tag `maduin`）：
+  `main-interactive-commands`（commandp 驗證 9 命令皆 interactive）、
+  `main-keymap-bindings`、`main-start-zero-sessions`、`main-stop-tears-down`、
+  `full-loop-epic-to-close`（epic → deferred task → design/stage →
+  approve → ready → run-loop → implement session（mock opencode seams）→
+  complete → land → close；scratch beads 自清 `bd delete --force`）。
+
+## 介面
+
+- `maduin-start`  → dispatch-start（0 session）；`maduin-stop` → dispatch-stop + handoff
+- `M-x maduin-concierge` / `maduin-concierge-dismiss` / `maduin-gate-approve` /
+  `maduin-gate-reject` / `maduin-gate-staged-list` / `maduin-designer-drop-in` /
+  `maduin-designer-pending-tasks`
+
+## 驗證
+
+- `emacs -Q --batch -L harness -l maduin-test
+  --eval '(ert-run-tests-batch-and-exit "maduin-test-")'` →
+  85/85 過，0 unexpected（80 舊 + 5 新 integration 測）。
+- byte-compile `harness/*.el`：maduin.el / gate / designer / dispatch 淨；
+  僅 3 個**既有無關**警告（maduin-handoff.el:100 free `buf`、
+  maduin-resolver.el:87 docstring 引號、maduin-resolver.el:138 `noninteractive`
+  缺 prefix）— 均非本 task 所觸及檔案。
+
+## 注意
+
+- 未手動 commit（auto-commit watcher 處理）。

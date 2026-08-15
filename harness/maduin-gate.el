@@ -27,17 +27,29 @@ Return t if all steps succeed, nil otherwise."
   "Approve ID: undefer it and remove the staged label. Return t on success.
 Undefer does not cascade to children — call `maduin-gate-approve-epic' to
 approve a whole epic."
+  (interactive
+   (list (completing-read "Approve task: " (maduin-gate-staged-list))))
   (and (maduin-bd-undefer id)
        (maduin-bd-label-remove id maduin-gate-staged-label)))
 
 (defun maduin-gate-reject (id feedback)
   "Reject ID: comment FEEDBACK, leave it staged. Return t on success."
+  (interactive
+   (list (completing-read "Reject task: " (maduin-gate-staged-list))
+         (read-string "Feedback: ")))
   (maduin-bd-comment id feedback))
 
 (defun maduin-gate-staged-list ()
-  "Return list of staged task IDs (deferred + staged label)."
-  (maduin-bd-query
-   (format "status=deferred AND label=%s" maduin-gate-staged-label)))
+  "Return list of staged task IDs (deferred + staged label).
+Interactively, message the list."
+  (interactive)
+  (let ((staged (maduin-bd-query
+                 (format "status=deferred AND label=%s" maduin-gate-staged-label))))
+    (when (called-interactively-p 'any)
+      (if staged
+          (message "staged tasks: %s" (mapconcat #'identity staged ", "))
+        (message "no staged tasks")))
+    staged))
 
 (defun maduin-gate-approve-epic (epic-id)
   "Approve EPIC-ID: undefer every staged child (undefer does not cascade).

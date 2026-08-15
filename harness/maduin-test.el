@@ -762,7 +762,7 @@ Both nil if bd unavailable."
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
-         (maduin-dispatch--close-fn (lambda (task out) (setq closed task) t))
+          (maduin-dispatch--close-fn (lambda (task _out) (setq closed task) t))
          (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -961,6 +961,119 @@ Both nil if bd unavailable."
     (should (string-match-p "--defer" tmpl))
     (should (string-match-p "Do not design" tmpl))
     (should (string-match-p "Do not implement" tmpl))))
+
+;;; 18. integration (entry point wiring)
+
+(ert-deftest maduin-test-main-interactive-commands ()
+  :tags '(maduin)
+  (dolist (f '(maduin-concierge
+               maduin-concierge-dismiss
+               maduin-gate-approve
+               maduin-gate-reject
+               maduin-gate-staged-list
+               maduin-designer-drop-in
+               maduin-designer-pending-tasks
+               maduin-start
+               maduin-stop))
+    (should (commandp f))))
+
+(ert-deftest maduin-test-main-keymap-bindings ()
+  :tags '(maduin)
+  (dolist (pair '(("C-c s c" . maduin-concierge)
+                  ("C-c s d" . maduin-concierge-dismiss)
+                  ("C-c s n" . maduin-designer-drop-in)
+                  ("C-c s p" . maduin-designer-pending-tasks)
+                  ("C-c s g a" . maduin-gate-approve)
+                  ("C-c s g r" . maduin-gate-reject)
+                  ("C-c s g l" . maduin-gate-staged-list)))
+    (should (eq (lookup-key maduin-mode-map (kbd (car pair))) (cdr pair)))))
+
+(ert-deftest maduin-test-main-start-zero-sessions ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--timer nil)
+        (maduin-dispatch--active nil)
+        (maduin-dispatch--session-run-fn
+         (lambda (_w _m _p) (ert-fail "maduin-start must not spawn sessions")))
+        (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-start)
+          (should maduin-dispatch--timer)     ; dispatchers active
+          (should-not maduin-dispatch--active)) ; zero sessions spawned
+      (maduin-dispatch-stop))))
+
+(ert-deftest maduin-test-main-stop-tears-down ()
+  :tags '(maduin)
+  (let* ((maduin-dispatch--timer nil)
+         (maduin-dispatch--active
+          (list (list :handle "s-stop-1" :seat "ifrit" :role 'implementer :task "t1")))
+         (deleted '())
+         (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+    (unwind-protect
+        (progn
+          (maduin-stop)
+          (should-not maduin-dispatch--timer)
+          (should-not maduin-dispatch--active)
+          (should (member "s-stop-1" deleted)))
+      (maduin-dispatch-stop))))
+
+;;; 19. full-loop integration (mock opencode, chained seams)
+
+(ert-deftest maduin-test-full-loop-epic-to-close ()
+  :tags '(maduin)
+  (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
+         (epic (condition-case nil
+                   (maduin-bd-create-epic
+                    (format "ert-loop-epic-%s" ts) "scratch epic for ERT full-loop")
+                 (error nil)))
+         (task (and epic
+                    (condition-case nil
+                        (maduin-bd-create-task
+                         (format "ert-loop-task-%s" ts)
+                         "scratch task for ERT full-loop" epic)
+                      (error nil)))))
+    (unwind-protect
+        (when (and epic task)
+          ;; 1. concierge files a HIGH-LEVEL (deferred) task.
+          (should (maduin-bd-defer task))
+          ;; 2. designer fills design + stages (defer + staged label).
+          (should (maduin-gate-stage task "design body" "acceptance body"))
+          (should (member task (maduin-gate-staged-list)))
+          ;; 3. gate approves → undefer + remove staged label.
+          (should (maduin-gate-approve task))
+          (should-not (member task (maduin-gate-staged-list)))
+          ;; 4. appears in ready.
+          (should (member task (maduin-bd-ready-tasks)))
+          ;; 5. run-loop → implement session → mock complete → land → close
+          ;;    (session/land/close seams mocked; no real opencode).
+          (let* ((dir (maduin-test--temp-dir))
+                 (landed nil)
+                 (closed nil)
+                 (deleted '())
+                 (maduin-dispatch--active nil)
+                 (maduin-dispatch--ready-fn (lambda () (list task)))
+                 (maduin-dispatch--session-run-fn (lambda (_w _m _p) "s-loop-1"))
+                 (maduin-dispatch--claim-fn (lambda (_t) t))
+                 (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+                 (maduin-dispatch--workdir-fn (lambda (_s) dir))
+                 (maduin-dispatch--diff-fn
+                  (lambda (_sid) (list '((file . "x.el") (patch . "+1")))))
+                 (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
+                 (maduin-dispatch--close-fn (lambda (t2 _out) (setq closed t2) t))
+                 (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+            (unwind-protect
+                (progn
+                  (maduin-dispatch-run-loop)
+                  (should (= (length maduin-dispatch--active) 1))
+                  (should (equal (plist-get (car maduin-dispatch--active) :task) task))
+                  (maduin-dispatch--on-complete "s-loop-1" 'completed)
+                  (should (equal landed "ifrit"))
+                  (should (equal closed task))
+                  (should (member "s-loop-1" deleted))
+                  (should-not maduin-dispatch--active))
+              (delete-directory dir t))))
+      (maduin-test--bd-delete task)
+      (maduin-test--bd-delete epic))))
 
 (provide 'maduin-test)
 

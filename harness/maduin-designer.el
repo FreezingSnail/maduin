@@ -98,6 +98,11 @@ given, overrides the built prompt."
 (defun maduin-designer-drop-in (seat)
   "Open a live TUI on SEAT for Summoner clarification mid-design.
 Role `designer'; model resolved from config.  Return the terminal buffer."
+  (interactive
+   (list (completing-read
+          "Designer seat: "
+          (mapcar (lambda (s) (alist-get 'name s))
+                  (cdr (assq 'seats (cdr (assq 'designer maduin-config))))))))
   (funcall maduin-designer--terminal-open-fn seat 'designer
            (maduin-designer--seat-model 'designer seat)))
 
@@ -116,12 +121,19 @@ Role `designer'; model resolved from config.  Return the terminal buffer."
 (defun maduin-designer-pending-tasks ()
   "Return list of deferred task IDs lacking a --design field.
 Query `status=deferred AND type=task', then drop tasks that already
-have a design (checked via `bd show')."
-  (let ((deferred (funcall maduin-designer--query-fn
-                           "status=deferred AND type=task")))
-    (cl-remove-if (lambda (id)
+have a design (checked via `bd show').  Interactively, message the list."
+  (interactive)
+  (let ((pending (cl-remove-if
+                  (lambda (id)
                     (funcall maduin-designer--has-design-fn id))
-                  (or deferred nil))))
+                  (or (funcall maduin-designer--query-fn
+                               "status=deferred AND type=task")
+                      nil))))
+    (when (called-interactively-p 'any)
+      (if pending
+          (message "pending design tasks: %s" (mapconcat #'identity pending ", "))
+        (message "no tasks pending design")))
+    pending))
 
 (provide 'maduin-designer)
 

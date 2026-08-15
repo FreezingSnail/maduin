@@ -26,7 +26,9 @@
 (require 'maduin-workspace)
 (require 'maduin-resolver)
 (require 'maduin-terminal)
+(require 'maduin-dispatch)
 (require 'maduin-concierge)
+(require 'maduin-designer)
 (require 'maduin-cockpit)
 (require 'maduin-gate)
 
@@ -38,6 +40,11 @@
     (define-key map (kbd "C-c s a") #'maduin-attach)
     (define-key map (kbd "C-c s c") #'maduin-concierge)
     (define-key map (kbd "C-c s d") #'maduin-concierge-dismiss)
+    (define-key map (kbd "C-c s n") #'maduin-designer-drop-in)
+    (define-key map (kbd "C-c s p") #'maduin-designer-pending-tasks)
+    (define-key map (kbd "C-c s g a") #'maduin-gate-approve)
+    (define-key map (kbd "C-c s g r") #'maduin-gate-reject)
+    (define-key map (kbd "C-c s g l") #'maduin-gate-staged-list)
     map)
   "Keymap for `maduin-mode'.")
 
@@ -47,7 +54,8 @@
 Provides commands to start, stop and monitor the agent fleet."
   :global t
   :lighter " SH"
-  :keymap maduin-mode-map)
+  :keymap maduin-mode-map
+  :group 'maduin)
 
 ;;; Config helpers
 
@@ -96,75 +104,32 @@ Resolved under the current project root."
 
 ;;;###autoload
 (defun maduin-start ()
-  "Start all agents per config and open the cockpit.
-For each seat: spawn an agent.  For each implementer seat: spawn an
-agent and start its pipeline polling.  Then show and refresh the
-cockpit dashboard."
+  "Activate dispatchers; spawn NO sessions.
+Demand-driven orchestration: the run-loop polls ready bd tasks and
+spawns an ephemeral implementer session per task (up to the fleet
+concurrency cap).  Idle = zero sessions."
   (interactive)
-  (dolist (pair (maduin--seats))
-    (let* ((seat (car pair))
-           (role (cdr pair))
-           (model (maduin--seat-model seat))
-           (workdir (maduin--seat-workdir seat)))
-      (make-directory workdir t)
-      (maduin-agent-spawn seat role model workdir)
-      (when (string= role "implementer")
-        (maduin-pipeline-start-fleet seat))))
-  (maduin-cockpit-show)
-  (maduin-cockpit-refresh)
-  (message "maduin started"))
+  (maduin-dispatch-start)
+  (message "maduin started (dispatchers active, 0 sessions)"))
 
 ;;;###autoload
 (defun maduin-stop ()
-  "Gracefully stop all agents and kill any remaining sessions.
-Requests handoff from each agent, waits up to welfare.handoff-timeout,
-then kills survivors.  Logs shutdown."
+  "Stop dispatchers and tear down any live sessions.
+Calls `maduin-dispatch-stop' (cancels the run-loop timer and hands off
+in-flight sessions), then gracefully stops any remaining legacy agent
+sessions via `maduin-handoff-stop-all'.  Never aborts on error."
   (interactive)
-  (let ((inhibit-redisplay t)
-        (debug-on-error nil)
-        (saved-modelines nil))
-    ;; Nuke mode-line-format on every visible buffer to prevent
-    ;; doom-modeline :eval segments from firing during buffer kills.
-    ;; let-binding mode-line-format doesn't override buffer-local values.
-    (dolist (buf (buffer-list))
-      (when (buffer-live-p buf)
-        (push (cons buf (buffer-local-value 'mode-line-format buf)) saved-modelines)
-        (with-current-buffer buf
-          (setq mode-line-format nil))))
-    (unwind-protect
-        (condition-case err
-            (progn
-              (maduin-handoff-stop-all
-               (maduin--config-get 'handoff-timeout 'welfare))
-              ;; Land implementer branches when configured; never abort stop.
-              (when (maduin--config-get 'land-on-stop 'workspaces)
-                (dolist (pair (maduin--seats))
-                  (when (string= (cdr pair) "implementer")
-                    (condition-case err
-                        (maduin-pipeline-land-branch (car pair))
-                      (error
-                       (message "maduin: land-branch failed for %s: %s"
-                                (car pair) (error-message-string err)))))))
-              (dolist (pair (maduin-session-list))
-                (maduin-session-kill (car pair)))
-              ;; Stop resolver (beadle) sessions; never abort stop.
-              (dolist (seat (mapcar #'car
-                                    (copy-sequence
-                                     maduin-resolver-processes)))
-                (condition-case err
-                    (maduin-resolver-stop seat)
-                  (error
-                   (message "maduin: resolver stop failed for %s: %s"
-                            seat (error-message-string err))))))
-          (error
-           (message "maduin: shutdown error (continuing): %s"
-                    (error-message-string err))))
-      ;; Restore modelines on surviving buffers.
-      (dolist (pair saved-modelines)
-        (let ((buf (car pair)))
-          (when (buffer-live-p buf)
-            (with-current-buffer buf
-              (setq mode-line-format (cdr pair))))))))
+  (condition-case err
+      (maduin-dispatch-stop)
+    (error
+     (message "maduin: dispatch-stop error (continuing): %s"
+              (error-message-string err))))
+  (condition-case err
+      (maduin-handoff-stop-all
+       (maduin--config-get 'handoff-timeout 'welfare))
+    (error
+     (message "maduin: handoff error (continuing): %s"
+              (error-message-string err))))
   (message "maduin stopped"))
 
 ;;;###autoload
@@ -221,7 +186,8 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 ;;; Dev reload — edit-then-reload loop for developing the harness itself.
 
 (defvar maduin--feature-list
-  '(maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline maduin-handoff
+  '(maduin-designer maduin-gate maduin-dispatch
+    maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline maduin-handoff
     maduin-agent maduin-session maduin-brain
     maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")
