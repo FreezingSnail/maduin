@@ -243,14 +243,15 @@ status); nil on parse failure."
   (condition-case nil
       (let* ((obj (json-read-from-string json-string))
              (msgs (cdr (assq 'messages obj)))
+             (msgs (if (vectorp msgs) (mapcar #'identity msgs) msgs))
              (diffs nil))
         (dolist (m msgs)
           (let* ((info (cdr (assq 'info m)))
                  (summary (and info (cdr (assq 'summary info))))
                  (ds (and summary (cdr (assq 'diffs summary)))))
-            (cond
-             ((vectorp ds) (cl-loop for d across ds do (push d diffs)))
-             ((listp ds) (dolist (d ds) (push d diffs))))))
+            (when ds
+              (dolist (d (if (vectorp ds) (mapcar #'identity ds) ds))
+                (push d diffs)))))
         (nreverse diffs))
     (error nil)))
 
