@@ -195,3 +195,66 @@
 - 無舊 `crew`/`ant`/`homer`/`plato`/`austen` 殘留（除 output.md 歷史、
   agent 內 template 檔名映射 `fleet`/`crew`）。
 - 未手動 commit（auto-commit watcher 處理）。
+
+# maduin-00r.8 — approval gate: stage/approve/reject via defer-undefer + staged label
+
+## 改動
+
+- `harness/maduin-bd-bridge.el`：+7 gate wrappers（沿用既有
+  `maduin-bd--run`／`--log-error`／`shell-quote-argument` 風格）：
+  - `(maduin-bd-defer id)` → boolean — `bd defer <id>`（無 `--until`
+    = 無限期延遲）。
+  - `(maduin-bd-undefer id)` → boolean — `bd undefer <id>`（不級聯子項）。
+  - `(maduin-bd-label id label)` → boolean — `bd label add <id> <label>`。
+  - `(maduin-bd-label-remove id label)` → boolean — `bd label remove <id> <label>`。
+  - `(maduin-bd-query q)` → id list — `bd query <q> --json`，經
+    `maduin-bd--json-ids` 取 `id` 欄。
+  - `(maduin-bd-comment id text)` → boolean — `bd comment <id> <text>`。
+  - `(maduin-bd-update-design-acceptance id design acceptance)` → boolean —
+    `bd update <id> --design ... --acceptance ...`。
+- `harness/maduin-gate.el`（新）：
+  - `(maduin-gate-stage task design acceptance)` → boolean —
+    update design/acceptance + defer + `label add staged`。
+  - `(maduin-gate-approve id)` → boolean — undefer + `label remove staged`。
+  - `(maduin-gate-reject id feedback)` → boolean — `bd comment`；留 staged。
+  - `(maduin-gate-staged-list)` → id list — `bd query
+    "status=deferred AND label=staged"`。
+  - `(maduin-gate-approve-epic epic-id)` → approved id list — 逐子項 approve
+    （`bd query "parent=<epic> AND status=deferred AND label=staged"`，
+    undefer 不級聯，故迴圈）。
+  - `maduin-gate-staged-label` = `"staged"`。
+- `harness/maduin.el`：`(require 'maduin-gate)`；`maduin--feature-list`
+  加 `maduin-gate`（bd-bridge 前，leaf-first）。
+- `harness/maduin-test.el`：+4 ERT（tag maduin）— gate functions-exist、
+  stage-approve-list、reject-keeps-staged、approve-epic。scratch 珠
+  （timestamp 命名 epic+task）建於 repo 自身 `.beads`，測後
+  `bd delete <id> --force` 自清理。
+
+## 介面
+
+- bd wrappers：`maduin-bd-defer/undefer/label/label-remove/query/comment/
+  update-design-acceptance`。
+- gate API：`maduin-gate-stage/approve/reject/staged-list/approve-epic`。
+
+## reject 回饋機制（選定）
+
+- `bd comment <id> <text>`（`bd --help` 有 `comment` 子命令，驗過）—
+  bd-native，append 到 issue 註解串；task 保持 staged（deferred + label）。
+  未採 `bd update --body`（body 為描述，非回饋串）。
+
+## 驗證
+
+- `emacs -Q --batch -L harness -l maduin-test
+  --eval '(ert-run-tests-batch-and-exit "maduin-test-")'` →
+  41/41 過，0 unexpected（含 4 gate 測：stage→staged-list 含→approve→除、
+  reject→仍 staged、approve-epic→兩子全除、functions-exist）。
+- byte-compile：`maduin-gate.el`／`maduin-bd-bridge.el` 淨，無警告。
+
+## 注意
+
+- `bd label add/remove` 語法 = `bd label add <issue-id...> [label]`（驗過，
+  非 spike 猜測）。
+- 早前一次全量跑見 2 resolver 測 `void-variable opencode-go/deepseek-v4-pro`
+  失敗 — 並行任務（ifrit）改 config/resolver 途中之暫態，非本任務；
+  commit `dac54b1` 落定後復跑 41/41 綠。
+- 未手動 commit（auto-commit watcher 已併入 `dac54b1`）。
