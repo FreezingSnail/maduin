@@ -258,3 +258,58 @@
   失敗 — 並行任務（ifrit）改 config/resolver 途中之暫態，非本任務；
   commit `dac54b1` 落定後復跑 41/41 綠。
 - 未手動 commit（auto-commit watcher 已併入 `dac54b1`）。
+
+# maduin-00r.4 — interactive session substrate: opencode TUI in terminal buffer
+
+## 改動
+
+- `harness/maduin-terminal.el`（新）：
+  - `(maduin-terminal-open seat role model)` → buffer —
+    於 `(maduin-project-root)` 開 vterm（缺則 `term`），啟動
+    `opencode <root> -m <model> --prompt <role-template>`（TUI，互動）；
+    設 buffer-local 狀態（seat/role/model/root/session-id/started-at/known-ids）。
+  - `(maduin-terminal-dismiss seat)` → handoff-note string｜nil —
+    查新 session id → `opencode export <sid>` → 寫
+    `.agents/handoff/<seat>.md`（`maduin-handoff-write`，缺則直寫）→
+    殺 buffer。**export 先於 kill**。
+  - `(maduin-terminal-active-p seat)` → boolean。
+  - Buffer 名 `*maduin/{role}-{seat}*`。
+  - 純函式（可單元測）：`--buffer-name`、`--choose-backend`、
+    `--backend`、`--template`、`--substitute`、`--prompt`、
+    `--command-line`、`--parse-session-ids`、`--handoff-note`。
+- `harness/maduin.el`：`(require 'maduin-terminal)`；
+  `maduin--feature-list` 加 `maduin-terminal`。
+- `harness/maduin-test.el`：+9 ERT（tag maduin）。
+
+## 介面
+
+- `maduin-terminal-open` ／ `maduin-terminal-dismiss` ／ `maduin-terminal-active-p`。
+- `(maduin-terminal--backend)` → `vterm`｜`term`（`(require 'vterm nil t)`
+  探測，無硬依賴）。
+- `(maduin-terminal--choose-backend VTERM-AVAILABLE)` → symbol（純，供測試）。
+- `(maduin-terminal--parse-session-ids JSON ROOT &optional SINCE EXCLUDE)`
+  → ((created . id) ...) 新→舊。
+
+## CLI 驗證（opencode 1.18.15）
+
+- `opencode export [sessionID]` — 有（`opencode --help`）。
+- `opencode session list [--format table|json]` — 有；json 回 `id/directory/created`。
+- TUI 啟動旗標：`--dir` **非** TUI 合法選項（傳入即打 help 拒絕）—
+  以 positional `<root>` 取代 spec 的 `--dir`。`-m`/`--prompt` 合法（`--prompt`
+  實測啟動 TUI 並掛起 = 接受）。故 launch = `opencode <root> -m <model> --prompt <template>`。
+
+## 驗證
+
+- `emacs -Q --batch -L harness -l maduin-test
+  --eval '(ert-run-tests-batch-and-exit "maduin-test-")'` →
+  50/50 過，0 unexpected（41 舊 + 9 新）。
+- byte-compile `maduin-terminal.el` 淨（vterm 三函 `declare-function` 靜音）。
+
+## 注意
+
+- session id 擷取：dismiss 時 `session list --format json` 取 root 目錄下
+  新於 started-at 且不在 open 時快照（known-ids）的最新 session。
+  並行 `opencode run` 同目錄碰撞仍理論可能（取最新）；substrate 階段可接受。
+- 測試 handoff 寫入 repo 自身 `.agents/handoff/`（gitignored），
+  `unwind-protect` 刪檔自清理，無 /tmp、無一次性測試。
+- 未手動 commit（auto-commit watcher 處理）。

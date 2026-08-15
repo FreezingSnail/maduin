@@ -248,8 +248,9 @@ status); nil on parse failure."
           (let* ((info (cdr (assq 'info m)))
                  (summary (and info (cdr (assq 'summary info))))
                  (ds (and summary (cdr (assq 'diffs summary)))))
-            (when (listp ds)
-              (dolist (d ds) (push d diffs)))))
+            (cond
+             ((vectorp ds) (cl-loop for d across ds do (push d diffs)))
+             ((listp ds) (dolist (d ds) (push d diffs))))))
         (nreverse diffs))
     (error nil)))
 
@@ -258,14 +259,12 @@ status); nil on parse failure."
 Each diff is an alist with keys file, patch, additions, deletions,
 status (opencode export output).  Return nil on failure."
   (let ((real (maduin-session--real-id sid)))
-    (unless real
-      (maduin-session--log "diff: no opencode session id for %s" sid)
-      (cl-return-from maduin-session-diff nil))
-    (let ((res (maduin-session--call
-                (list maduin-opencode-command "export" real))))
-      (and res
-           (= 0 (car res))
-           (maduin-session--extract-diffs (cdr res))))))
+    (when real
+      (let ((res (maduin-session--call
+                  (list maduin-opencode-command "export" real))))
+        (and res
+             (= 0 (car res))
+             (maduin-session--extract-diffs (cdr res)))))))
 
 (defun maduin-session-delete (sid)
   "Delete autonomous session SID via `opencode session delete'.
