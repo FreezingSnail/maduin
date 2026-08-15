@@ -170,10 +170,11 @@ Return nil when no live session matches."
     (when buf
       (buffer-local-value 'maduin-session--session-id buf))))
 
-(defun maduin-session-run (workdir model plan)
-  "Run one autonomous task in WORKDIR with MODEL and PLAN via `opencode run'.
-Spawns `opencode run --dir WORKDIR -m MODEL --format json --auto --title
-<handle> PLAN' asynchronously; a process-filter consumes the NDJSON
+(defun maduin-session-run (workdir model agent plan)
+  "Run one autonomous task in WORKDIR with MODEL, AGENT and PLAN via `opencode run'.
+Spawns `opencode run --dir WORKDIR -m MODEL --agent AGENT --format json
+--auto --title <handle> PLAN' asynchronously (the `--agent AGENT' pair is
+omitted when AGENT is nil or empty); a process-filter consumes the NDJSON
 event stream and a sentinel fires `maduin-session-on-complete-hook'.
 
 Return a session handle (string) for `maduin-session-complete-p',
@@ -190,9 +191,11 @@ opencode CLI is unavailable or the process cannot be spawned."
                        (make-process
                         :name (format "maduin-run-%d" maduin-session--seq)
                         :buffer buf
-                        :command (list exe "run" "--dir" workdir "-m" model
-                                       "--format" "json" "--auto"
-                                       "--title" handle plan)
+                        :command (append (list exe "run" "--dir" workdir "-m" model)
+                                         (when (and agent (not (string-empty-p agent)))
+                                           (list "--agent" agent))
+                                         (list "--format" "json" "--auto"
+                                               "--title" handle plan))
                         :filter #'maduin-session--run-filter
                         :sentinel #'maduin-session--run-sentinel
                         :noquery t)
@@ -300,6 +303,7 @@ when the opencode session was deleted, nil otherwise."
 (defvar maduin-seat nil)
 (defvar maduin-role nil)
 (defvar maduin-model nil)
+(defvar maduin-agent nil)
 (defvar maduin-status nil)
 (defvar maduin-started-at nil)
 (defvar maduin-current-task nil)
@@ -331,10 +335,12 @@ when the opencode session was deleted, nil otherwise."
                  maduin-seat event))
       (run-hooks 'maduin-session-on-exit-hook))))
 
-(defun maduin-session-create (seat-name role model &optional workdir)
-  "Create session buffer for SEAT-NAME with ROLE and MODEL in WORKDIR.
+(defun maduin-session-create (seat-name role model &optional workdir agent)
+  "Create session buffer for SEAT-NAME with ROLE, MODEL and AGENT in WORKDIR.
 WORKDIR defaults to the project root (via `maduin-project-root',
-falling back to `default-directory') when omitted.
+falling back to `default-directory') when omitted.  AGENT is the opencode
+agent name passed via `--agent' after `--model'; it is omitted from the
+spawned command and intent when nil or empty.
 
 Return the buffer.  Launches opencode as subprocess when the CLI is
 available; otherwise still returns a buffer holding the spawn intent
@@ -351,17 +357,23 @@ in `maduin-intent' with status `dead'."
       (setq-local maduin-seat seat-name)
       (setq-local maduin-role role)
       (setq-local maduin-model model)
+      (setq-local maduin-agent agent)
       (setq-local maduin-status 'running)
       (setq-local maduin-started-at (float-time))
       (setq-local maduin-current-task nil)
       (setq-local maduin-workdir workdir)
-      (setq-local maduin-intent (list maduin-opencode-command "--model" model))
+      (setq-local maduin-intent
+                  (append (list maduin-opencode-command "--model" model)
+                          (when (and agent (not (string-empty-p agent)))
+                            (list "--agent" agent))))
       (if exe
           (progn
             (make-process
              :name (format "maduin-%s-%s" role seat-name)
              :buffer buf
-             :command (list exe "--model" model)
+             :command (append (list exe "--model" model)
+                              (when (and agent (not (string-empty-p agent)))
+                                (list "--agent" agent)))
              :sentinel #'maduin-session--sentinel)
             (set-process-query-on-exit-flag (get-buffer-process buf) nil))
         (setq maduin-status 'dead)
