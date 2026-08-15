@@ -106,3 +106,33 @@
 - `.beads/interactions.jsonl` 歷史 issue ID 仍含舊前綴
   （被動匯出，`rename-prefix` 不覆；可接受）。
 - 未 commit。
+
+# maduin-00r.1 — project scoping: (maduin-project-root)
+
+## 改動
+
+- `harness/maduin-config.el`：加 `(maduin-project-root)` —
+  `(project-root (project-current))`，非 project 回 `default-directory`。
+  `(require 'project)`。
+- `harness/maduin-brain.el`：`maduin-brain-root` 於 project root 下解析；
+  `fboundp` 守護（config 缺時回 `default-directory`）。
+- `harness/maduin-handoff.el`：`maduin-handoff-cache-path` 於 project root 下解析。
+- `harness/maduin-workspace.el`：`maduin-workspace--root` 於 project root 下解析。
+- `harness/maduin-session.el`：`maduin-session-create` WORKDIR 變可選，
+  缺省 `(maduin-project-root)`（fboundp 守護）。
+- `harness/maduin.el`：`maduin--seat-workdir` 於 project root 下解析（一致性）。
+- `harness/maduin-test.el`：+3 ERT（`project-root-returns-dir`、
+  `project-root-fallback`、`handoff-cache-under-project-root`）；
+  `workspace-path` 測更新為 project root 期望。
+
+## 介面
+
+- `(maduin-project-root)` → string path（project.el 倉根；無 project 回 default-directory）。
+
+## 驗證
+
+- `emacs -Q --batch -L harness -l maduin-test
+  --eval '(ert-run-tests-batch-and-exit "maduin-test-")'` →
+  34/34 過（31 舊 + 3 新），0 unexpected。
+- byte-compile 淨（僅既有警告：handoff-wait `buf` free var、
+  `maduin-mode` defcustom group）。

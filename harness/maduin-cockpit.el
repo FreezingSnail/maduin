@@ -3,8 +3,8 @@
 ;;; Commentary:
 
 ;; The Wheelhouse rolodex: a tabulated-list buffer showing every agent
-;; seat (crew + fleet) with status, task, and uptime, plus a pipeline
-;; health summary.
+;; seat (concierge + designer + implementer) with status, task, and
+;; uptime, plus a pipeline health summary.
 
 ;;; Code:
 
@@ -38,11 +38,13 @@
   "Keymap for the cockpit buffer.")
 
 (defun maduin-cockpit--seats ()
-  "Return alist ((SEAT-NAME . ROLE) ...) from config (crew then fleet)."
+  "Return alist ((SEAT-NAME . ROLE) ...) from config seats."
   (append
-   (mapcar (lambda (s) (cons s "crew"))
-           (maduin-pipeline--crew-seats))
-   (mapcar (lambda (s) (cons s "fleet"))
+   (mapcar (lambda (s) (cons s "concierge"))
+           (maduin-pipeline--concierge-seats))
+   (mapcar (lambda (s) (cons s "designer"))
+           (maduin-pipeline--designer-seats))
+   (mapcar (lambda (s) (cons s "implementer"))
            (maduin-pipeline-fleet-seats))))
 
 (defun maduin-cockpit--status-string (status)

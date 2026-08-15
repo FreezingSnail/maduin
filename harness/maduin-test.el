@@ -15,6 +15,7 @@
 (add-to-list 'load-path (file-name-directory (or load-file-name buffer-file-name)))
 (require 'maduin)
 (require 'maduin-bd-bridge)
+(require 'maduin-gate)
 (require 'maduin-brain)
 (require 'maduin-session)
 (require 'maduin-agent)
@@ -61,17 +62,44 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (should maduin-config))
 
-(ert-deftest maduin-test-config-crew-seats ()
+(ert-deftest maduin-test-config-concierge-seats ()
   :tags '(maduin)
-  (let ((crew (cdr (assq 'seats (cdr (assq 'crew maduin-config))))))
-    (should (equal (mapcar (lambda (s) (alist-get 'name s)) crew)
-                   '("ant")))))
+  (let ((concierge (cdr (assq 'seats (cdr (assq 'concierge maduin-config))))))
+    (should (equal (mapcar (lambda (s) (alist-get 'name s)) concierge)
+                   '("alexander")))
+    (should (eq (alist-get 'role (car concierge)) 'concierge))))
+
+(ert-deftest maduin-test-config-designer-seats ()
+  :tags '(maduin)
+  (let ((designer (cdr (assq 'seats (cdr (assq 'designer maduin-config))))))
+    (should (equal (mapcar (lambda (s) (alist-get 'name s)) designer)
+                   '("ramuh")))
+    (should (eq (alist-get 'role (car designer)) 'designer))))
 
 (ert-deftest maduin-test-config-fleet-seats ()
   :tags '(maduin)
   (let ((fleet (cdr (assq 'seats (cdr (assq 'fleet maduin-config))))))
     (should (equal (mapcar (lambda (s) (alist-get 'name s)) fleet)
-                   '("homer" "plato" "austen")))))
+                   '("ifrit" "shiva" "titan")))
+    (should (equal (mapcar (lambda (s) (alist-get 'role s)) fleet)
+                   '(implementer implementer implementer)))))
+
+(ert-deftest maduin-test-config-seats ()
+  :tags '(maduin)
+  (should (equal (maduin--seats)
+                 '(("alexander" . "concierge")
+                   ("ramuh" . "designer")
+                   ("ifrit" . "implementer")
+                   ("shiva" . "implementer")
+                   ("titan" . "implementer")))))
+
+(ert-deftest maduin-test-config-seat-models ()
+  :tags '(maduin)
+  (should (equal (maduin--seat-model "alexander") "opencode-go/deepseek-v4-pro"))
+  (should (equal (maduin--seat-model "ramuh") "opencode-go/deepseek-v4-pro"))
+  (should (equal (maduin--seat-model "ifrit") "opencode-go/deepseek-v4-flash"))
+  (should (equal (maduin--seat-model "shiva") "opencode-go/deepseek-v4-flash"))
+  (should (equal (maduin--seat-model "titan") "opencode-go/deepseek-v4-flash")))
 
 (ert-deftest maduin-test-config-welfare-handoff-enabled ()
   :tags '(maduin)
@@ -211,7 +239,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
 (ert-deftest maduin-test-pipeline-fleet-seats ()
   :tags '(maduin)
   (should (equal (maduin-pipeline-fleet-seats)
-                 '("homer" "plato" "austen"))))
+                 '("ifrit" "shiva" "titan"))))
 
 ;;; 8. cockpit
 
@@ -245,7 +273,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
                maduin-status
                maduin-restart
                maduin-attach
-               maduin-crew
+               maduin-concierge
                maduin-bootstrap))
     (should (fboundp f))))
 
@@ -253,9 +281,9 @@ Mimics an opencode subprocess so session tests need no real CLI."
 
 (ert-deftest maduin-test-workspace-path ()
   :tags '(maduin)
-  (should (equal (maduin-workspace-path "ant")
+  (should (equal (maduin-workspace-path "alexander")
                  (expand-file-name
-                  "ant"
+                  "alexander"
                   (expand-file-name
                    (or (cdr (assq 'path (cdr (assq 'workspaces maduin-config))))
                        "harness/workspaces")
@@ -292,7 +320,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (let ((resolver (cdr (assq 'resolver maduin-config))))
     (should (eq (alist-get 'enabled resolver) t))
-    (should (string= (alist-get 'model resolver) "deepseek-v3"))
+    (should (string= (alist-get 'model resolver) "opencode-go/deepseek-v4-pro"))
     (should (= (alist-get 'max-retries resolver) 3))))
 
 (ert-deftest maduin-test-resolver-active-p-bogus ()
@@ -367,6 +395,108 @@ Mimics an opencode subprocess so session tests need no real CLI."
                  (expand-file-name
                   ".agents/handoff/root-seat-xyz.md"
                   (maduin-project-root)))))
+
+;;; 13. gate (approval gate)
+
+(defun maduin-test--bd-delete (id)
+  "Force-delete scratch bead ID. Never errors."
+  (condition-case nil
+      (call-process shell-file-name nil nil nil shell-command-switch
+                    (format "bd delete %s --force" id))
+    (error nil)))
+
+(defun maduin-test--gate-scratch (ts)
+  "Create a scratch epic + task for gate tests. Return (epic-id . task-id).
+Both nil if bd unavailable."
+  (let* ((epic (condition-case nil
+                   (maduin-bd-create-epic
+                    (format "ert-gate-epic-%s" ts) "scratch epic for ERT")
+                 (error nil)))
+         (task (and epic
+                    (condition-case nil
+                        (maduin-bd-create-task
+                         (format "ert-gate-task-%s" ts) "scratch task for ERT"
+                         epic)
+                      (error nil)))))
+    (cons epic task)))
+
+(ert-deftest maduin-test-gate-functions-exist ()
+  :tags '(maduin)
+  (dolist (f '(maduin-bd-defer
+               maduin-bd-undefer
+               maduin-bd-label
+               maduin-bd-label-remove
+               maduin-bd-query
+               maduin-bd-comment
+               maduin-bd-update-design-acceptance
+               maduin-gate-stage
+               maduin-gate-approve
+               maduin-gate-reject
+               maduin-gate-staged-list
+               maduin-gate-approve-epic))
+    (should (fboundp f))))
+
+(ert-deftest maduin-test-gate-stage-approve-list ()
+  :tags '(maduin)
+  (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
+         (pair (maduin-test--gate-scratch ts))
+         (epic (car pair))
+         (task (cdr pair)))
+    (unwind-protect
+        (when (and epic task)
+          (should (maduin-gate-stage task "design body" "acceptance body"))
+          (should (member task (maduin-gate-staged-list)))
+          (should (maduin-gate-approve task))
+          (should-not (member task (maduin-gate-staged-list))))
+      (maduin-test--bd-delete task)
+      (maduin-test--bd-delete epic))))
+
+(ert-deftest maduin-test-gate-reject-keeps-staged ()
+  :tags '(maduin)
+  (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
+         (pair (maduin-test--gate-scratch ts))
+         (epic (car pair))
+         (task (cdr pair)))
+    (unwind-protect
+        (when (and epic task)
+          (should (maduin-gate-stage task "design body" "acceptance body"))
+          (should (maduin-gate-reject task "needs rework"))
+          ;; still staged after reject
+          (should (member task (maduin-gate-staged-list))))
+      (maduin-test--bd-delete task)
+      (maduin-test--bd-delete epic))))
+
+(ert-deftest maduin-test-gate-approve-epic ()
+  :tags '(maduin)
+  (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
+         (epic (condition-case nil
+                   (maduin-bd-create-epic
+                    (format "ert-gate-epic2-%s" ts) "scratch epic for ERT")
+                 (error nil)))
+         (t1 (and epic
+                  (condition-case nil
+                      (maduin-bd-create-task
+                       (format "ert-gate-t1-%s" ts) "scratch" epic)
+                    (error nil))))
+         (t2 (and epic
+                  (condition-case nil
+                      (maduin-bd-create-task
+                       (format "ert-gate-t2-%s" ts) "scratch" epic)
+                    (error nil)))))
+    (unwind-protect
+        (when (and epic t1 t2)
+          (should (maduin-gate-stage t1 "d1" "a1"))
+          (should (maduin-gate-stage t2 "d2" "a2"))
+          (should (member t1 (maduin-gate-staged-list)))
+          (should (member t2 (maduin-gate-staged-list)))
+          (let ((approved (maduin-gate-approve-epic epic)))
+            (should (member t1 approved))
+            (should (member t2 approved)))
+          (should-not (member t1 (maduin-gate-staged-list)))
+          (should-not (member t2 (maduin-gate-staged-list))))
+      (maduin-test--bd-delete t1)
+      (maduin-test--bd-delete t2)
+      (maduin-test--bd-delete epic))))
 
 (provide 'maduin-test)
 

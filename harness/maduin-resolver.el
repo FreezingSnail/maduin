@@ -144,9 +144,9 @@ On process exit delegates to `maduin-resolver--on-exit'."
 
 Return existing live process when one is already active.  Spawn a new
 session via `maduin-session-create' with role `resolver' and
-model from config `resolver.model' (default \"deepseek-v3\").  Return
-nil when config `resolver.enabled' is nil, or when no process could be
-spawned (opencode missing — buffer still created, degraded)."
+model from config `resolver.model' (default "opencode-go/deepseek-v4-pro").
+Return nil when config `resolver.enabled' is nil, or when no process
+could be spawned (opencode missing — buffer still created, degraded)."
   (let ((existing (cdr (assoc seat-name maduin-resolver-processes))))
     (cond
      ((not (maduin-resolver--config-get 'enabled t))
@@ -156,7 +156,7 @@ spawned (opencode missing — buffer still created, degraded)."
       existing)
      (t
       (let* ((workdir (maduin-workspace-path seat-name))
-             (model (maduin-resolver--config-get 'model "deepseek-v3"))
+             (model (maduin-resolver--config-get 'model "opencode-go/deepseek-v4-pro"))
              (default-directory (or workdir default-directory))
              (buf (maduin-session-create
                    seat-name 'resolver model workdir))

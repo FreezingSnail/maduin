@@ -173,6 +173,97 @@ Return t on success."
        (format "bd prime failed (exit %d): %s" (car res) (cdr res)))
       nil)))
 
+;;; Approval gate wrappers
+
+(defun maduin-bd-defer (id)
+  "Defer ID indefinitely via `bd defer ID'. Return t on success."
+  (let ((res (maduin-bd--run
+              (format "bd defer %s" (shell-quote-argument id)))))
+    (if (= 0 (car res))
+        t
+      (maduin-bd--log-error
+       (format "bd defer %s failed (exit %d): %s"
+               id (car res) (cdr res)))
+      nil)))
+
+(defun maduin-bd-undefer (id)
+  "Undefer ID via `bd undefer ID'. Return t on success."
+  (let ((res (maduin-bd--run
+              (format "bd undefer %s" (shell-quote-argument id)))))
+    (if (= 0 (car res))
+        t
+      (maduin-bd--log-error
+       (format "bd undefer %s failed (exit %d): %s"
+               id (car res) (cdr res)))
+      nil)))
+
+(defun maduin-bd-label (id label)
+  "Add LABEL to ID via `bd label add ID LABEL'. Return t on success."
+  (let ((res (maduin-bd--run
+              (format "bd label add %s %s"
+                      (shell-quote-argument id)
+                      (shell-quote-argument label)))))
+    (if (= 0 (car res))
+        t
+      (maduin-bd--log-error
+       (format "bd label add %s %s failed (exit %d): %s"
+               id label (car res) (cdr res)))
+      nil)))
+
+(defun maduin-bd-label-remove (id label)
+  "Remove LABEL from ID via `bd label remove ID LABEL'. Return t on success."
+  (let ((res (maduin-bd--run
+              (format "bd label remove %s %s"
+                      (shell-quote-argument id)
+                      (shell-quote-argument label)))))
+    (if (= 0 (car res))
+        t
+      (maduin-bd--log-error
+       (format "bd label remove %s %s failed (exit %d): %s"
+               id label (car res) (cdr res)))
+      nil)))
+
+(defun maduin-bd-query (q)
+  "Return list of issue IDs matching Q via `bd query Q --json'.
+Return nil on failure."
+  (let ((res (maduin-bd--run
+              (format "bd query %s --json" (shell-quote-argument q)))))
+    (if (/= 0 (car res))
+        (progn
+          (maduin-bd--log-error
+           (format "bd query %s failed (exit %d): %s"
+                   q (car res) (cdr res)))
+          nil)
+      (maduin-bd--json-ids (cdr res)))))
+
+(defun maduin-bd-comment (id text)
+  "Add TEXT as a comment on ID via `bd comment ID TEXT'. Return t on success."
+  (let ((res (maduin-bd--run
+              (format "bd comment %s %s"
+                      (shell-quote-argument id)
+                      (shell-quote-argument text)))))
+    (if (= 0 (car res))
+        t
+      (maduin-bd--log-error
+       (format "bd comment %s failed (exit %d): %s"
+               id (car res) (cdr res)))
+      nil)))
+
+(defun maduin-bd-update-design-acceptance (id design acceptance)
+  "Set ID's design and acceptance via `bd update ID --design --acceptance'.
+Return t on success."
+  (let ((res (maduin-bd--run
+              (format "bd update %s --design %s --acceptance %s"
+                      (shell-quote-argument id)
+                      (shell-quote-argument design)
+                      (shell-quote-argument acceptance)))))
+    (if (= 0 (car res))
+        t
+      (maduin-bd--log-error
+       (format "bd update %s (design/acceptance) failed (exit %d): %s"
+               id (car res) (cdr res)))
+      nil)))
+
 ;;; Worktree wrappers
 
 (defun maduin-bd-worktree--entry (path branch)

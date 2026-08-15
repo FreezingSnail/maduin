@@ -26,6 +26,7 @@
 (require 'maduin-workspace)
 (require 'maduin-resolver)
 (require 'maduin-cockpit)
+(require 'maduin-gate)
 
 ;;; Minor mode
 
@@ -33,7 +34,7 @@
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c s s") #'maduin-status)
     (define-key map (kbd "C-c s a") #'maduin-attach)
-    (define-key map (kbd "C-c s c") #'maduin-crew)
+    (define-key map (kbd "C-c s c") #'maduin-concierge)
     map)
   "Keymap for `maduin-mode'.")
 
@@ -57,22 +58,26 @@ looked up at the top level of `maduin-config'."
                      conf)))))
 
 (defun maduin--seats ()
-  "Return alist ((SEAT-NAME . ROLE) ...) from config (crew then fleet)."
-  (append
-   (mapcar (lambda (s) (cons (alist-get 'name s) "crew"))
-           (maduin--config-get 'seats 'crew))
-   (mapcar (lambda (s) (cons (alist-get 'name s) "fleet"))
-           (maduin--config-get 'seats 'fleet))))
+  "Return alist ((SEAT-NAME . ROLE) ...) from config seats.
+Sections: concierge, designer, fleet.  ROLE is each seat's `role'
+field coerced to a string (concierge/designer/implementer)."
+  (cl-loop for section in '(concierge designer fleet)
+           append (mapcar (lambda (s)
+                            (cons (alist-get 'name s)
+                                  (symbol-name (alist-get 'role s))))
+                          (maduin--config-get 'seats section))))
 
-(defun maduin--seat-model (seat role)
-  "Return model configured for SEAT in ROLE section, or \"default\"."
-  (let ((seats (maduin--config-get 'seats role)))
-    (or (and (listp seats)
-             (alist-get 'model
-                        (cl-find-if
-                         (lambda (s) (string= (alist-get 'name s) seat))
-                         seats)))
-        "default")))
+(defun maduin--seat-model (seat)
+  "Return model configured for SEAT, or \"default\".
+Searches concierge/designer/fleet seat sections by name."
+  (or (cl-loop for section in '(concierge designer fleet)
+               for seats = (maduin--config-get 'seats section)
+               thereis (and (listp seats)
+                            (alist-get 'model
+                                       (cl-find-if
+                                        (lambda (s) (string= (alist-get 'name s) seat))
+                                        seats))))
+      "default"))
 
 (defun maduin--seat-workdir (seat)
   "Return workspace directory for SEAT under workspaces.path.
@@ -89,18 +94,18 @@ Resolved under the current project root."
 ;;;###autoload
 (defun maduin-start ()
   "Start all agents per config and open the cockpit.
-For each crew seat: spawn an agent.  For each fleet seat: spawn an
+For each seat: spawn an agent.  For each implementer seat: spawn an
 agent and start its pipeline polling.  Then show and refresh the
 cockpit dashboard."
   (interactive)
   (dolist (pair (maduin--seats))
     (let* ((seat (car pair))
            (role (cdr pair))
-           (model (maduin--seat-model seat role))
+           (model (maduin--seat-model seat))
            (workdir (maduin--seat-workdir seat)))
       (make-directory workdir t)
       (maduin-agent-spawn seat role model workdir)
-      (when (string= role "fleet")
+      (when (string= role "implementer")
         (maduin-pipeline-start-fleet seat))))
   (maduin-cockpit-show)
   (maduin-cockpit-refresh)
@@ -128,10 +133,10 @@ then kills survivors.  Logs shutdown."
             (progn
               (maduin-handoff-stop-all
                (maduin--config-get 'handoff-timeout 'welfare))
-              ;; Land fleet branches when configured; never abort stop.
+              ;; Land implementer branches when configured; never abort stop.
               (when (maduin--config-get 'land-on-stop 'workspaces)
                 (dolist (pair (maduin--seats))
-                  (when (string= (cdr pair) "fleet")
+                  (when (string= (cdr pair) "implementer")
                     (condition-case err
                         (maduin-pipeline-land-branch (car pair))
                       (error
@@ -186,10 +191,10 @@ SEAT is chosen by completing-read from configured seats."
   (maduin-session-switch seat))
 
 ;;;###autoload
-(defun maduin-crew (work)
-  "Dispatch WORK text to the first free crew agent."
-  (interactive "sCrew work: ")
-  (maduin-pipeline-dispatch-crew work))
+(defun maduin-concierge (work)
+  "Dispatch WORK text to the first free concierge agent."
+  (interactive "sConcierge work: ")
+  (maduin-pipeline-dispatch-concierge work))
 
 ;;;###autoload
 (defun maduin-bootstrap ()
@@ -220,7 +225,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 
 (defvar maduin--feature-list
   '(maduin-cockpit maduin-pipeline maduin-handoff
-    maduin-agent maduin-session maduin-brain
+    maduin-agent maduin-session maduin-brain maduin-gate
     maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")
 

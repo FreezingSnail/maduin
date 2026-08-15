@@ -1,11 +1,11 @@
-;;; maduin-pipeline.el --- crew/fleet pipeline  -*- lexical-binding: t; -*-
+;;; maduin-pipeline.el --- concierge/designer/implementer pipeline  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Producer/consumer core.  Crew agents produce bd tasks; fleet
-;; agents consume them.  Fleet polling runs on `run-at-time' timers,
-;; dispatching ready bd tasks to fleet seats.  Crew dispatch sends
-;; prompts to free crew agents.
+;; Producer/consumer core.  Concierge/designer agents produce bd tasks;
+;; implementer (fleet) agents consume them.  Fleet polling runs on
+;; `run-at-time' timers, dispatching ready bd tasks to implementer
+;; seats.  Concierge dispatch sends prompts to free concierge agents.
 
 ;;; Code:
 
@@ -60,12 +60,19 @@ is a stub and the real values live there."
                   (when (listp s) (alist-get 'name s)))
                 (maduin-pipeline--config-get 'fleet 'seats))))
 
-(defun maduin-pipeline--crew-seats ()
-  "Return list of crew seat names from config."
+(defun maduin-pipeline--concierge-seats ()
+  "Return list of concierge seat names from config."
   (delq nil
         (mapcar (lambda (s)
                   (when (listp s) (alist-get 'name s)))
-                (maduin-pipeline--config-get 'crew 'seats))))
+                (maduin-pipeline--config-get 'concierge 'seats))))
+
+(defun maduin-pipeline--designer-seats ()
+  "Return list of designer seat names from config."
+  (delq nil
+        (mapcar (lambda (s)
+                  (when (listp s) (alist-get 'name s)))
+                (maduin-pipeline--config-get 'designer 'seats))))
 
 (defun maduin-pipeline--seat-model (seat-name)
   "Return model configured for fleet SEAT-NAME, or \"default\"."
@@ -78,11 +85,13 @@ is a stub and the real values live there."
         "default")))
 
 (defun maduin-pipeline-find-free-agent (role)
-  "Return first free seat name for ROLE (crew or fleet), or nil.
-Free means session alive and status not `working'."
-  (let ((seats (if (string= role "fleet")
-                   (maduin-pipeline-fleet-seats)
-                 (maduin-pipeline--crew-seats))))
+  "Return first free seat name for ROLE, or nil.
+ROLE is \"concierge\", \"designer\" or \"implementer\".  Free means
+session alive and status not `working'."
+  (let ((seats (cond
+                ((string= role "implementer") (maduin-pipeline-fleet-seats))
+                ((string= role "designer") (maduin-pipeline--designer-seats))
+                (t (maduin-pipeline--concierge-seats)))))
     (cl-find-if
      (lambda (seat)
        (and (maduin-session-alive-p seat)
@@ -205,8 +214,8 @@ conflict or other failure leave the task open, and mark the seat idle."
                  (workdir (expand-file-name
                            (or (maduin-pipeline--config-get 'workspaces 'path)
                                "harness/workspaces")))
-                 (proc (maduin-agent-spawn
-                        seat-name "fleet" model workdir)))
+                  (proc (maduin-agent-spawn
+                         seat-name "implementer" model workdir)))
             (if (not proc)
                 (message "maduin: spawn %s failed for task %s"
                          seat-name task)
@@ -277,12 +286,12 @@ branch when done. If blocked, explain why — do not invent work."
                            (setq-local maduin-current-task nil)
                            (setq-local maduin-status 'idle)))))))))))))))
 
-;;; Crew dispatch
+;;; Concierge dispatch
 
-(defun maduin-pipeline-dispatch-crew (prompt)
-  "Send PROMPT to first free crew agent.
-Warn when no crew agent is free."
-  (let ((seat (maduin-pipeline-find-free-agent "crew")))
+(defun maduin-pipeline-dispatch-concierge (prompt)
+  "Send PROMPT to first free concierge agent.
+Warn when no concierge agent is free."
+  (let ((seat (maduin-pipeline-find-free-agent "concierge")))
     (if seat
         (let* ((buf (maduin-session--buffer seat))
                (proc (and buf (get-buffer-process buf))))
@@ -293,7 +302,7 @@ Warn when no crew agent is free."
                 (let ((inhibit-read-only t))
                   (goto-char (point-max))
                   (insert prompt))))))
-      (message "maduin: no free crew agent; prompt undelivered"))))
+      (message "maduin: no free concierge agent; prompt undelivered"))))
 
 ;;; Review (placeholder for v0.2)
 

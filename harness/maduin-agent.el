@@ -38,9 +38,10 @@
     (cdr (assq key maduin-config))))
 
 (defun maduin-agent--template (role)
-  "Return role template text for ROLE (crew or fleet), or nil.
-Reads templates/crew-prompt.txt or templates/fleet-prompt.txt."
-  (let* ((kind (if (string= role "fleet") "fleet" "crew"))
+  "Return role template text for ROLE, or nil.
+Implementer roles read templates/fleet-prompt.txt; all other roles
+(concierge/designer) read templates/crew-prompt.txt."
+  (let* ((kind (if (string= role "implementer") "fleet" "crew"))
          (path (expand-file-name
                 (format "templates/%s-prompt.txt" kind)
                 maduin-agent--dir)))
@@ -109,7 +110,7 @@ otherwise insert into the agent buffer.  Run
   (let* ((buf (maduin-session--buffer seat-name))
          (proc (and buf (get-buffer-process buf)))
          (role (or role (and buf (buffer-local-value 'maduin-role buf))
-                   "crew"))
+                   "concierge"))
          (text (maduin-agent--priming-text seat-name role)))
     (when buf
       (with-current-buffer buf
