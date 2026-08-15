@@ -13,6 +13,16 @@
 (require 'cl-lib)
 
 (add-to-list 'load-path (file-name-directory (or load-file-name buffer-file-name)))
+
+(defconst maduin-test--dir
+  (file-name-directory (or load-file-name buffer-file-name))
+  "Directory containing maduin-test.el (the harness dir).")
+
+(defun maduin-test--fake-opencode-shim ()
+  "Return path to the repo fake opencode shim, or nil when missing."
+  (let ((p (expand-file-name "test/fake-opencode" maduin-test--dir)))
+    (and (file-exists-p p) p)))
+
 (require 'maduin)
 (require 'maduin-bd-bridge)
 (require 'maduin-gate)
@@ -188,6 +198,100 @@ Mimics an opencode subprocess so session tests need no real CLI."
           (should-not (maduin-session-alive-p "fake-seat")))
       (delete-file script)
       (when (buffer-live-p buf) (kill-buffer buf)))))
+
+;;; 4b. autonomous session substrate (opencode run + NDJSON)
+
+(ert-deftest maduin-test-session-parse-step-finish-stop ()
+  :tags '(maduin)
+  (let ((evt (maduin-session--parse-line
+              "{\"type\":\"step_finish\",\"sessionID\":\"ses_x\",\"part\":{\"reason\":\"stop\"}}")))
+    (should (string= (plist-get evt :type) "step_finish"))
+    (should (string= (plist-get evt :session-id) "ses_x"))
+    (should (eq (plist-get evt :terminal) 'completed))))
+
+(ert-deftest maduin-test-session-parse-step-finish-error ()
+  :tags '(maduin)
+  (let ((evt (maduin-session--parse-line
+              "{\"type\":\"step_finish\",\"sessionID\":\"ses_x\",\"part\":{\"reason\":\"error\"}}")))
+    (should (eq (plist-get evt :terminal) 'failed))))
+
+(ert-deftest maduin-test-session-parse-tool-use-error ()
+  :tags '(maduin)
+  (let ((evt (maduin-session--parse-line
+              "{\"type\":\"tool_use\",\"sessionID\":\"ses_x\",\"part\":{\"type\":\"tool\",\"tool\":\"bash\",\"state\":{\"status\":\"error\"}}}")))
+    (should (eq (plist-get evt :terminal) 'failed))))
+
+(ert-deftest maduin-test-session-parse-tool-use-completed ()
+  :tags '(maduin)
+  (let ((evt (maduin-session--parse-line
+              "{\"type\":\"tool_use\",\"sessionID\":\"ses_x\",\"part\":{\"type\":\"tool\",\"tool\":\"write\",\"state\":{\"status\":\"completed\"}}}")))
+    (should (eq (plist-get evt :terminal) nil))))
+
+(ert-deftest maduin-test-session-parse-nonterminal ()
+  :tags '(maduin)
+  (let ((evt (maduin-session--parse-line
+              "{\"type\":\"text\",\"sessionID\":\"ses_x\",\"part\":{\"type\":\"text\",\"text\":\"hi\"}}")))
+    (should (eq (plist-get evt :terminal) nil))))
+
+(ert-deftest maduin-test-session-parse-garbage ()
+  :tags '(maduin)
+  (should-not (maduin-session--parse-line "not json at all")))
+
+(ert-deftest maduin-test-session-run-missing-cli ()
+  :tags '(maduin)
+  (let ((maduin-opencode-command "no-such-opencode-cli-xyz"))
+    (should-not (maduin-session-run default-directory "m" "p"))))
+
+(ert-deftest maduin-test-session-complete-p-unknown ()
+  :tags '(maduin)
+  (should (eq (maduin-session-complete-p "no-such-handle-xyz") 'failed)))
+
+(ert-deftest maduin-test-session-diff-unknown ()
+  :tags '(maduin)
+  (should-not (maduin-session-diff "no-such-handle-xyz")))
+
+(ert-deftest maduin-test-session-run-completes ()
+  :tags '(maduin)
+  (let* ((shim (maduin-test--fake-opencode-shim))
+         (maduin-opencode-command shim)
+         (captured nil)
+         (maduin-session-on-complete-hook
+          (list (lambda (sid status) (setq captured (cons sid status)))))
+         (dir (maduin-test--temp-dir))
+         (sid (maduin-session-run dir "test-model" "say hi"))
+         (buf (and sid (maduin-session--run-buffer sid)))
+         (proc (and buf (get-buffer-process buf))))
+    (unwind-protect
+        (progn
+          (should (stringp sid))
+          (while (and proc (process-live-p proc))
+            (accept-process-output proc 0.05))
+          (should (eq (maduin-session-complete-p sid) 'completed))
+          (should (equal (car captured) sid))
+          (should (eq (cdr captured) 'completed))
+          (should (maduin-session-diff sid))
+          (should (maduin-session-delete sid)))
+      (ignore-errors (maduin-session-delete sid))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-session-run-permission-denied ()
+  :tags '(maduin)
+  (let* ((shim (maduin-test--fake-opencode-shim))
+         (maduin-opencode-command shim)
+         (process-environment (cons "MADUIN_FAKE_MODE=fail" process-environment))
+         (dir (maduin-test--temp-dir))
+         (sid (maduin-session-run dir "test-model" "edit file"))
+         (buf (and sid (maduin-session--run-buffer sid)))
+         (proc (and buf (get-buffer-process buf))))
+    (unwind-protect
+        (progn
+          (should (stringp sid))
+          (while (and proc (process-live-p proc))
+            (accept-process-output proc 0.05))
+          ;; exit code 0 but event stream says failed — exit code untrusted
+          (should (eq (maduin-session-complete-p sid) 'failed)))
+      (ignore-errors (maduin-session-delete sid))
+      (delete-directory dir t))))
 
 ;;; 5. agent
 

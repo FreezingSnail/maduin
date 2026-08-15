@@ -1,0 +1,36 @@
+#!/bin/sh
+# fake-opencode — test shim standing in for the opencode CLI.
+#
+# Emulates the subcommands the autonomous session substrate uses:
+#   run            → emit NDJSON events on stdout, exit 0
+#   export <sid>   → emit export JSON with one diff, exit 0
+#   session delete → exit 0
+#
+# Run behavior is controlled by MADUIN_FAKE_MODE:
+#   (unset)/complete → step_start + step_finish(reason=stop), exit 0
+#   fail             → step_start + tool_use(state.status=error), exit 0
+#                      (exit 0 is deliberate: exit code is NOT a signal)
+SID="ses_fake_0000000000000000000000"
+
+case "$1" in
+  run)
+    printf '%s\n' "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"$SID\",\"part\":{\"type\":\"step-start\"}}"
+    if [ "$MADUIN_FAKE_MODE" = "fail" ]; then
+      printf '%s\n' "{\"type\":\"tool_use\",\"timestamp\":2,\"sessionID\":\"$SID\",\"part\":{\"type\":\"tool\",\"tool\":\"bash\",\"state\":{\"status\":\"error\",\"error\":\"permission denied\"}}}"
+    else
+      printf '%s\n' "{\"type\":\"step_finish\",\"timestamp\":2,\"sessionID\":\"$SID\",\"part\":{\"reason\":\"stop\"}}"
+    fi
+    exit 0
+    ;;
+  export)
+    printf '%s\n' '{"info":{"summary":{}},"messages":[{"info":{"summary":{"diffs":[{"file":"a.txt","patch":"@@ -0,0 +1 @@\n+hello\n","additions":1,"deletions":0,"status":"added"}]}},"parts":[]}]}'
+    exit 0
+    ;;
+  session)
+    # session delete <sid>
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

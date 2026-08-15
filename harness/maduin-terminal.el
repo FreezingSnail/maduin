@@ -109,10 +109,13 @@ a list of (created . id) pairs for sessions whose directory matches
 ROOT.  SINCE (epoch seconds) is a minimum created time; EXCLUDE is a
 list of ids to skip.  Sorted newest first."
   (condition-case nil
-      (let ((data (json-read-from-string json-str))
-            (root-dir (directory-file-name (expand-file-name root)))
-            (since-ms (and since (* since 1000.0)))
-            (out nil))
+      (let* ((json-object-type 'hash-table)
+             (json-array-type 'vector)
+             (json-key-type 'string)
+             (data (json-read-from-string json-str))
+             (root-dir (directory-file-name (expand-file-name root)))
+             (since-ms (and since (* since 1000.0)))
+             (out nil))
         (when (vectorp data)
           (cl-loop for s across data do
             (let ((dir (and (hash-table-p s) (gethash "directory" s)))
