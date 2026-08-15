@@ -24,7 +24,7 @@
 (require 'maduin-handoff)
 (require 'maduin-pipeline)
 (require 'maduin-workspace)
-(require 'maduin-resolver)
+(require 'maduin-repairer)
 (require 'maduin-terminal)
 (require 'maduin-dispatch)
 (require 'maduin-concierge)

@@ -32,7 +32,8 @@
 (require 'maduin-handoff)
 (require 'maduin-pipeline)
 (require 'maduin-cockpit)
-(require 'maduin-resolver)
+(require 'maduin-repairer)
+(require 'maduin-review)
 (require 'maduin-terminal)
 (require 'maduin-dispatch)
 (require 'maduin-designer)
@@ -243,7 +244,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
 (ert-deftest maduin-test-session-run-missing-cli ()
   :tags '(maduin)
   (let ((maduin-opencode-command "no-such-opencode-cli-xyz"))
-    (should-not (maduin-session-run default-directory "m" "p"))))
+    (should-not (maduin-session-run default-directory "m" nil "p"))))
 
 (ert-deftest maduin-test-session-complete-p-unknown ()
   :tags '(maduin)
@@ -261,7 +262,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-session-on-complete-hook
           (list (lambda (sid status) (setq captured (cons sid status)))))
          (dir (maduin-test--temp-dir))
-         (sid (maduin-session-run dir "test-model" "say hi"))
+         (sid (maduin-session-run dir "test-model" nil "say hi"))
          (buf (and sid (maduin-session--run-buffer sid)))
          (proc (and buf (get-buffer-process buf))))
     (unwind-protect
@@ -283,7 +284,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-opencode-command shim)
          (process-environment (cons "MADUIN_FAKE_MODE=fail" process-environment))
          (dir (maduin-test--temp-dir))
-         (sid (maduin-session-run dir "test-model" "edit file"))
+         (sid (maduin-session-run dir "test-model" nil "edit file"))
          (buf (and sid (maduin-session--run-buffer sid)))
          (proc (and buf (get-buffer-process buf))))
     (unwind-protect
@@ -423,61 +424,61 @@ Mimics an opencode subprocess so session tests need no real CLI."
   (let ((ws (cdr (assq 'workspaces maduin-config))))
     (should (eq (alist-get 'land-on-stop ws) t))))
 
-;;; 11. resolver
+;;; 11. repairer
 
-(ert-deftest maduin-test-config-resolver-keys ()
+(ert-deftest maduin-test-config-repairer-keys ()
   :tags '(maduin)
-  (let ((resolver (cdr (assq 'resolver maduin-config))))
-    (should (eq (alist-get 'enabled resolver) t))
-    (should (string= (alist-get 'model resolver) "opencode-go/deepseek-v4-pro"))
-    (should (= (alist-get 'max-retries resolver) 3))))
+  (let ((repairer (cdr (assq 'repairer maduin-config))))
+    (should (eq (alist-get 'enabled repairer) t))
+    (should (string= (alist-get 'model repairer) "opencode-go/deepseek-v4-pro"))
+    (should (= (alist-get 'max-retries repairer) 3))))
 
-(ert-deftest maduin-test-resolver-active-p-bogus ()
+(ert-deftest maduin-test-repairer-active-p-bogus ()
   :tags '(maduin)
-  (should-not (maduin-resolver-active-p "bogus-seat-xyz")))
+  (should-not (maduin-repairer-active-p "bogus-seat-xyz")))
 
-(ert-deftest maduin-test-resolver-prompt ()
+(ert-deftest maduin-test-repairer-prompt ()
   :tags '(maduin)
-  (let ((prompt (maduin-resolver--prompt "prompt-seat-xyz")))
+  (let ((prompt (maduin-repairer--prompt "prompt-seat-xyz" 'merge-conflict)))
     (should (string-match-p "prompt-seat-xyz" prompt))
     (should (string-match-p "RESOLVED_DONE" prompt))))
 
-(ert-deftest maduin-test-resolver-start-degraded ()
+(ert-deftest maduin-test-repairer-start-degraded ()
   :tags '(maduin)
   (let ((seat "degraded-seat-xyz")
         (maduin-opencode-command "no-such-opencode-cli-xyz"))
     (unwind-protect
         (progn
-          (should-not (maduin-resolver-start seat))
-          (should-not (maduin-resolver-active-p seat))
-          (should (get-buffer "*maduin/resolver-degraded-seat-xyz*")))
-      (maduin-resolver-stop seat)
-      (when (get-buffer "*maduin/resolver-degraded-seat-xyz*")
-        (kill-buffer "*maduin/resolver-degraded-seat-xyz*")))))
+          (should-not (maduin-repairer-start seat))
+          (should-not (maduin-repairer-active-p seat))
+          (should (get-buffer "*maduin/repairer-degraded-seat-xyz*")))
+      (maduin-repairer-stop seat)
+      (when (get-buffer "*maduin/repairer-degraded-seat-xyz*")
+        (kill-buffer "*maduin/repairer-degraded-seat-xyz*")))))
 
-(ert-deftest maduin-test-resolver-start-fake-process ()
+(ert-deftest maduin-test-repairer-start-fake-process ()
   :tags '(maduin)
   (let* ((script (maduin-test--fake-opencode))
-         (seat "fake-resolver-seat-xyz")
+         (seat "fake-repairer-seat-xyz")
          (workdir (maduin-workspace-path seat))
          (maduin-opencode-command script))
     (unwind-protect
         (progn
           (make-directory workdir t)
-          (maduin-resolver-start seat)
-          (should (maduin-resolver-active-p seat))
-          (maduin-resolver-stop seat)
-          (should-not (maduin-resolver-active-p seat)))
+          (maduin-repairer-start seat)
+          (should (maduin-repairer-active-p seat))
+          (maduin-repairer-stop seat)
+          (should-not (maduin-repairer-active-p seat)))
       (delete-file script)
-      (maduin-resolver-stop seat)
+      (maduin-repairer-stop seat)
       (ignore-errors (delete-directory workdir t)))))
 
-(ert-deftest maduin-test-resolver-stop-inactive ()
+(ert-deftest maduin-test-repairer-stop-inactive ()
   :tags '(maduin)
   (should
    (condition-case nil
        (progn
-         (maduin-resolver-stop "ghost-seat-xyz")
+         (maduin-repairer-stop "ghost-seat-xyz")
          t)
      (error nil))))
 
@@ -692,7 +693,7 @@ Both nil if bd unavailable."
                maduin-dispatch-stop
                maduin-dispatch-implement
                maduin-dispatch-design
-               maduin-dispatch-resolve
+               maduin-dispatch-repair
                maduin-dispatch-run-loop))
     (should (fboundp f))))
 
@@ -704,7 +705,7 @@ Both nil if bd unavailable."
           (list (list :handle "s-ifrit" :seat "ifrit" :role 'implementer :task "t0")
                 (list :handle "s-shiva" :seat "shiva" :role 'implementer :task "t0")))
          (maduin-dispatch--session-run-fn
-          (lambda (_w _m _p)
+          (lambda (_w _m _a _p)
             (setq run-count (1+ run-count))
             (format "s-%d" run-count)))
          (maduin-dispatch--claim-fn (lambda (_t) t))
@@ -731,7 +732,7 @@ Both nil if bd unavailable."
          (closed nil)
          (deleted '())
          (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _p) "s-1"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
@@ -757,7 +758,7 @@ Both nil if bd unavailable."
          (commented nil)
          (closed nil)
          (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _p) "s-1"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
@@ -773,14 +774,14 @@ Both nil if bd unavailable."
           (should-not maduin-dispatch--active))
       (delete-directory dir t))))
 
-(ert-deftest maduin-test-dispatch-completion-conflict-dispatches-resolver ()
+(ert-deftest maduin-test-dispatch-completion-conflict-dispatches-repairer ()
   :tags '(maduin)
   (let* ((dir (maduin-test--temp-dir))
          (run-count 0)
          (commented nil)
          (maduin-dispatch--active nil)
          (maduin-dispatch--session-run-fn
-          (lambda (_w _m _p)
+          (lambda (_w _m _a _p)
             (setq run-count (1+ run-count))
             (format "s-%d" run-count)))
          (maduin-dispatch--claim-fn (lambda (_t) t))
@@ -795,10 +796,10 @@ Both nil if bd unavailable."
         (progn
           (maduin-dispatch-implement "t1")   ; run-count 1, seat ifrit
           (maduin-dispatch--on-complete "s-1" 'completed)
-          ;; conflict → resolver dispatched → second session run.
+          ;; conflict → repairer dispatched → second session run.
           (should (= run-count 2))
           (should (equal (car commented) "t1"))
-          (should (cl-find-if (lambda (e) (eq (plist-get e :role) 'resolver))
+          (should (cl-find-if (lambda (e) (eq (plist-get e :role) 'repairer))
                               maduin-dispatch--active)))
       (delete-directory dir t))))
 
@@ -808,7 +809,7 @@ Both nil if bd unavailable."
          (run-count 0)
          (maduin-dispatch--active nil)
          (maduin-dispatch--session-run-fn
-          (lambda (_w _m _p)
+          (lambda (_w _m _a _p)
             (setq run-count (1+ run-count))
             (format "s-%d" run-count)))
          (maduin-dispatch--claim-fn (lambda (_t) t))
@@ -992,8 +993,8 @@ Both nil if bd unavailable."
   :tags '(maduin)
   (let ((maduin-dispatch--timer nil)
         (maduin-dispatch--active nil)
-        (maduin-dispatch--session-run-fn
-         (lambda (_w _m _p) (ert-fail "maduin-start must not spawn sessions")))
+         (maduin-dispatch--session-run-fn
+          (lambda (_w _m _a _p) (ert-fail "maduin-start must not spawn sessions")))
         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -1052,7 +1053,7 @@ Both nil if bd unavailable."
                  (deleted '())
                  (maduin-dispatch--active nil)
                  (maduin-dispatch--ready-fn (lambda () (list task)))
-                 (maduin-dispatch--session-run-fn (lambda (_w _m _p) "s-loop-1"))
+                 (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-loop-1"))
                  (maduin-dispatch--claim-fn (lambda (_t) t))
                  (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
                  (maduin-dispatch--workdir-fn (lambda (_s) dir))
@@ -1074,6 +1075,110 @@ Both nil if bd unavailable."
               (delete-directory dir t))))
       (maduin-test--bd-delete task)
       (maduin-test--bd-delete epic))))
+
+;;; 20. v0.3 — agent resolution + batched review gate (Odin)
+
+(ert-deftest maduin-test-agent-for-role-mapping ()
+  :tags '(maduin)
+  (should (equal (maduin-agent--for-role 'implementer) "slugineer-worker"))
+  (should (equal (maduin-agent--for-role "implementer") "slugineer-worker"))
+  (should (equal (maduin-agent--for-role 'designer) "slugineer-planner-designer"))
+  (should (equal (maduin-agent--for-role "concierge") "slugineer-planner-concierge"))
+  (should (null (maduin-agent--for-role 'reviewer)))
+  (should (null (maduin-agent--for-role "unknown")))
+  (should (null (maduin-agent--for-role nil))))
+
+(ert-deftest maduin-test-session-create-agent-intent ()
+  :tags '(maduin)
+  (let ((maduin-opencode-command "no-such-opencode-cli-xyz"))
+    (let ((buf (maduin-session-create "agent-seat-xyz" 'implementer "test-model"
+                                      default-directory "slugineer-worker")))
+      (unwind-protect
+          (progn
+            (should (buffer-live-p buf))
+            (let ((intent (buffer-local-value 'maduin-intent buf)))
+              (should (member "--agent" intent))
+              (should (member "slugineer-worker" intent))
+              (should (member "--model" intent))))
+        (maduin-session-kill "agent-seat-xyz")
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(ert-deftest maduin-test-review-verdict-approved ()
+  :tags '(maduin)
+  (should (eq (maduin-review--verdict "REVIEW: APPROVED\n") 'approved))
+  (should (eq (maduin-review--verdict "blah\nREVIEW: APPROVED\nmore") 'approved)))
+
+(ert-deftest maduin-test-review-verdict-drift ()
+  :tags '(maduin)
+  (should (equal (maduin-review--verdict "REVIEW: DRIFT fix the widget\n")
+                 '(drift . "fix the widget")))
+  (should (equal (maduin-review--verdict "noise\nREVIEW: DRIFT needs work")
+                 '(drift . "needs work"))))
+
+(ert-deftest maduin-test-review-verdict-garbage ()
+  :tags '(maduin)
+  (should (eq (maduin-review--verdict "no marker here") 'error))
+  (should (eq (maduin-review--verdict nil) 'error)))
+
+(ert-deftest maduin-test-review-note-land-batch-trigger ()
+  :tags '(maduin)
+  (let ((maduin-review--checkpoint '(:start-sha "abc" :landed 0)))
+    (should-not (maduin-review--note-land))
+    (should-not (maduin-review--note-land))
+    (should (maduin-review--note-land))
+    (should (= (plist-get maduin-review--checkpoint :landed) 3)))
+  ;; No checkpoint → no-op.
+  (should-not (maduin-review--note-land)))
+
+(ert-deftest maduin-test-review-blocked-p ()
+  :tags '(maduin)
+  (let ((maduin-review--query-fn (lambda (_q) '("drift-task-1"))))
+    (should (maduin-review--blocked-p)))
+  (let ((maduin-review--query-fn (lambda (_q) nil)))
+    (should-not (maduin-review--blocked-p))))
+
+(ert-deftest maduin-test-review-gate-approved-resets-checkpoint ()
+  :tags '(maduin)
+  (let* ((maduin-review--checkpoint nil)
+         (maduin-review--main-root-fn (lambda () "/repo"))
+         (maduin-review--git-output-fn
+          (lambda (_dir &rest args)
+            (if (member "rev-parse" args)
+                (cons 0 "abc123\n")
+              (cons 0 "+fake diff\n"))))
+         (maduin-review--query-fn (lambda (_q) nil))
+         (maduin-review--session-run-fn (lambda (_w _m _a _p) "sid-1"))
+         (maduin-review--complete-p-fn (lambda (_sid) 'completed))
+         (maduin-review--session-output-fn (lambda (_sid) "REVIEW: APPROVED\n")))
+    (should (eq (maduin-review-gate) 'approved))
+    (should (equal (plist-get maduin-review--checkpoint :start-sha) "abc123"))
+    (should (zerop (plist-get maduin-review--checkpoint :landed)))))
+
+(ert-deftest maduin-test-review-gate-drift-creates-drift-fix ()
+  :tags '(maduin)
+  (let* ((maduin-review--checkpoint '(:start-sha "old" :landed 5))
+         (created-cmd nil)
+         (maduin-review--main-root-fn (lambda () "/repo"))
+         (maduin-review--git-output-fn (lambda (_dir &rest _args) (cons 0 "diff")))
+         (maduin-review--query-fn (lambda (_q) nil))
+         (maduin-review--session-run-fn (lambda (_w _m _a _p) "sid-1"))
+         (maduin-review--complete-p-fn (lambda (_sid) 'completed))
+         (maduin-review--session-output-fn
+          (lambda (_sid) "REVIEW: DRIFT fix the widget\n"))
+         (maduin-review--run-fn
+          (lambda (cmd) (setq created-cmd cmd) (cons 0 "drift-task-1\n")))
+         (maduin-review--comment-fn (lambda (_id _text) t)))
+    (should (eq (maduin-review-gate) 'drift))
+    (should (string-match-p "drift-fix" created-cmd))
+    (should (string-match-p "widget" created-cmd))
+    ;; checkpoint NOT reset on drift.
+    (should (equal (plist-get maduin-review--checkpoint :start-sha) "old"))
+    (should (= (plist-get maduin-review--checkpoint :landed) 5))))
+
+(ert-deftest maduin-test-review-gate-disabled ()
+  :tags '(maduin)
+  (let ((maduin-config '((reviewer (enabled . nil)))))
+    (should (null (maduin-review-gate)))))
 
 (provide 'maduin-test)
 

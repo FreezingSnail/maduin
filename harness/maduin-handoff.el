@@ -96,9 +96,9 @@ Return t when completed, nil on timeout."
                                      maduin-handoff-marker
                                      (buffer-string))))))))
           (when done
-            (cl-return-from wait t)))
-        (when (and buf (get-buffer-process buf))
-          (accept-process-output (get-buffer-process buf) 2))
+            (cl-return-from wait t))
+          (when proc
+            (accept-process-output proc 2)))
         (sleep-for 2))
       nil)))
 

@@ -171,11 +171,12 @@ Return nil when no live session matches."
       (buffer-local-value 'maduin-session--session-id buf))))
 
 (defun maduin-session-run (workdir model agent plan)
-  "Run one autonomous task in WORKDIR with MODEL, AGENT and PLAN via `opencode run'.
-Spawns `opencode run --dir WORKDIR -m MODEL --agent AGENT --format json
---auto --title <handle> PLAN' asynchronously (the `--agent AGENT' pair is
-omitted when AGENT is nil or empty); a process-filter consumes the NDJSON
-event stream and a sentinel fires `maduin-session-on-complete-hook'.
+  "Run one autonomous task in WORKDIR with MODEL, AGENT and PLAN via
+`opencode run'.  Spawns `opencode run --dir WORKDIR -m MODEL --agent
+AGENT --format json --auto --title <handle> PLAN' asynchronously (the
+`--agent AGENT' pair is omitted when AGENT is nil or empty); a
+process-filter consumes the NDJSON event stream and a sentinel fires
+`maduin-session-on-complete-hook'.
 
 Return a session handle (string) for `maduin-session-complete-p',
 `maduin-session-diff' and `maduin-session-delete', or nil when the

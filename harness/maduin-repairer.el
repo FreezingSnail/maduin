@@ -101,7 +101,7 @@ when PROC is alive; otherwise insert into BUF (degraded, opencode missing)."
 (defun maduin-repairer--on-exit (proc seat-name)
   "Handle repairer PROC exit for SEAT-NAME.
 When the repairer buffer holds RESOLVED_DONE, re-land; on t close the
-pending task, on 'conflict retry up to repairer.max-retries, on nil
+pending task, on \\='conflict retry up to repairer.max-retries, on nil
 leave the task open.  When the marker is absent, log and leave open."
   (let ((buf (process-buffer proc)))
     (if (maduin-repairer--scan-done buf)
@@ -150,7 +150,7 @@ On process exit delegates to `maduin-repairer--on-exit'."
     (set-process-sentinel
      proc
      (lambda (p _event)
-       (unless (bound-and-true-p noninteractive)
+       (unless noninteractive
          (when (eq (process-status p) 'exit)
            (maduin-repairer--on-exit p seat-name)))))))
 
