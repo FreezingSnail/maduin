@@ -23,6 +23,11 @@
 
 (require 'maduin-config)
 
+;; Optional vterm dependency (declared to keep byte-compile clean).
+(declare-function vterm "vterm" (&optional arg))
+(declare-function vterm-send-string "vterm" (string))
+(declare-function vterm-send-return "vterm" nil)
+
 ;; maduin-handoff.el provides maduin-handoff-write; reuse it when
 ;; available, fall back to a direct write otherwise.
 (condition-case nil

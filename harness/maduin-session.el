@@ -183,32 +183,32 @@ opencode CLI is unavailable or the process cannot be spawned."
     (let ((exe (executable-find maduin-opencode-command)))
       (unless exe
         (maduin-session--log "run: opencode not found")
-        (cl-return nil)))
-    (let* ((handle (format "maduin-session-%d" (cl-incf maduin-session--seq)))
-           (buf (generate-new-buffer (format " *%s*" handle)))
-           (proc (condition-case nil
-                     (make-process
-                      :name (format "maduin-run-%d" maduin-session--seq)
-                      :buffer buf
-                      :command (list exe "run" "--dir" workdir "-m" model
-                                     "--format" "json" "--auto"
-                                     "--title" handle plan)
-                      :filter #'maduin-session--run-filter
-                      :sentinel #'maduin-session--run-sentinel
-                      :noquery t)
-                   (error nil))))
-      (unless proc
-        (kill-buffer buf)
-        (maduin-session--log "run: failed to spawn opencode")
         (cl-return nil))
-      (with-current-buffer buf
-        (setq-local maduin-session--handle handle)
-        (setq-local maduin-session--status 'running)
-        (setq-local maduin-session--pending "")
-        (setq-local maduin-session--session-id nil)
-        (setq-local maduin-session--done-p nil))
-      (puthash handle buf maduin-session--registry)
-      handle)))
+      (let* ((handle (format "maduin-session-%d" (cl-incf maduin-session--seq)))
+             (buf (generate-new-buffer (format " *%s*" handle)))
+             (proc (condition-case nil
+                       (make-process
+                        :name (format "maduin-run-%d" maduin-session--seq)
+                        :buffer buf
+                        :command (list exe "run" "--dir" workdir "-m" model
+                                       "--format" "json" "--auto"
+                                       "--title" handle plan)
+                        :filter #'maduin-session--run-filter
+                        :sentinel #'maduin-session--run-sentinel
+                        :noquery t)
+                     (error nil))))
+        (unless proc
+          (kill-buffer buf)
+          (maduin-session--log "run: failed to spawn opencode")
+          (cl-return nil))
+        (with-current-buffer buf
+          (setq-local maduin-session--handle handle)
+          (setq-local maduin-session--status 'running)
+          (setq-local maduin-session--pending "")
+          (setq-local maduin-session--session-id nil)
+          (setq-local maduin-session--done-p nil))
+        (puthash handle buf maduin-session--registry)
+        handle))))
 
 (defun maduin-session-complete-p (sid)
   "Return completion status of autonomous session SID.
