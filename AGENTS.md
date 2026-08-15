@@ -65,6 +65,22 @@ Rules:
 - Unknown behavior → add a `probe-*` ERT test in `harness/probes/`, run `harness/check.sh probe probes/<topic>.el`.
 - Probes are exploratory; promote by renaming `probe-*` → `maduin-test-*`.
 
+## Assumptions
+
+### Evil-mode keybindings
+
+Every buffer-local keybinding MUST be evil-aware — do not add bare
+`define-key` to a mode map without also binding evil states. Mirror the
+`chaplet--bind` helper pattern (one helper, single source of truth).
+
+- Bind in the plain keymap AND evil `normal`/`motion` states.
+- Use the `evil-define-key*` *function*, not the `evil-define-key` macro, so
+  the file byte-compiles when evil isn't installed.
+- Guard with `(and (featurep 'evil) (fboundp 'evil-define-key*))`.
+- Read-only buffers: suppress single-char evil motions that would leak
+  (e.g. `v` → visual mode).
+- Test both paths (plain + evil) when adding keybindings.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 
