@@ -52,5 +52,11 @@ else
   echo "Wired: ${TARGET}"
 fi
 
+# --- Install opencode agents (symlink → repo edits live) ---
+mkdir -p "${HOME}/.config/opencode/agent"
+for f in "${HARNESS_DIR}"/agents/*.md; do
+  ln -sf "${f}" "${HOME}/.config/opencode/agent/$(basename "${f}")"
+done
+
 echo "Installed."
 echo "Restart Emacs (or M-x maduin-reload)."
