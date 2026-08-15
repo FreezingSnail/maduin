@@ -154,7 +154,7 @@ Free = a configured seat with no active session of ROLE occupying it."
 (defun maduin-dispatch--spec (task)
   "Return task spec plist for TASK via show-fn, or nil."
   (condition-case nil
-      (maduin-dispatch--show-fn task)
+      (funcall maduin-dispatch--show-fn task)
     (error nil)))
 
 (defun maduin-dispatch--implement-plan (task)
@@ -203,11 +203,11 @@ No-op (nil) when ROLE is at its concurrency cap or no SEAT is free."
   (unless (>= (maduin-dispatch--active-role-count role)
               (maduin-dispatch--role-cap role))
     (let ((seat (or seat (maduin-dispatch--free-seat role))))
-      (when (and seat (maduin-dispatch--claim-fn task))
+      (when (and seat (funcall maduin-dispatch--claim-fn task))
         (let* ((model (or model (maduin-dispatch--seat-model-for role seat)))
-               (workdir (maduin-dispatch--workdir-fn seat))
+               (workdir (funcall maduin-dispatch--workdir-fn seat))
                (plan (maduin-dispatch--plan-for role task seat))
-               (sid (maduin-dispatch--session-run-fn workdir model plan)))
+               (sid (funcall maduin-dispatch--session-run-fn workdir model plan)))
           (when sid
             (push (list :handle sid :seat seat :role role :task task)
                   maduin-dispatch--active)
@@ -233,25 +233,25 @@ failure leave the task open."
   (let* ((seat (plist-get entry :seat))
          (task (plist-get entry :task))
          (role (plist-get entry :role))
-         (diffs (maduin-dispatch--diff-fn sid))
+         (diffs (funcall maduin-dispatch--diff-fn sid))
          (output (maduin-dispatch--format-diffs diffs))
          (land (condition-case nil
-                   (maduin-dispatch--land-fn seat)
+                   (funcall maduin-dispatch--land-fn seat)
                  (error nil))))
     (cond
      ((eq land t)
-      (maduin-dispatch--close-fn task output))
+      (funcall maduin-dispatch--close-fn task output))
      ((eq land 'conflict)
-      (maduin-dispatch--comment-fn task "merge conflict — resolver dispatched")
+      (funcall maduin-dispatch--comment-fn task "merge conflict — resolver dispatched")
       (unless (eq role 'resolver)
         (maduin-dispatch-resolve seat task)))
      (t
-      (maduin-dispatch--comment-fn task "land failed — task left open")))))
+      (funcall maduin-dispatch--comment-fn task "land failed — task left open")))))
 
 (defun maduin-dispatch--fail (entry)
   "Handle failed session for ENTRY: report and keep the task open."
-  (maduin-dispatch--comment-fn (plist-get entry :task)
-                               "session failed — task left open"))
+  (funcall maduin-dispatch--comment-fn (plist-get entry :task)
+           "session failed — task left open"))
 
 (defun maduin-dispatch--on-complete (sid status)
   "Completion hook: route a finished session SID (STATUS `completed'|`failed').
@@ -267,7 +267,7 @@ while work is in flight)."
           (if (eq status 'completed)
               (maduin-dispatch--complete entry sid)
             (maduin-dispatch--fail entry))
-        (maduin-dispatch--session-delete-fn sid)))))
+        (funcall maduin-dispatch--session-delete-fn sid)))))
 
 ;;; Public API
 
@@ -291,7 +291,7 @@ Return a session handle, or nil when a resolver is already active."
 (defun maduin-dispatch-run-loop ()
   "One tick: poll ready bd tasks and dispatch implement for each.
 Stops spawning once the implementer concurrency cap is reached."
-  (let ((ready (maduin-dispatch--ready-fn)))
+  (let ((ready (funcall maduin-dispatch--ready-fn)))
     (dolist (task ready)
       (maduin-dispatch-implement task))))
 
@@ -306,7 +306,7 @@ Stops spawning once the implementer concurrency cap is reached."
   "Delete all in-flight sessions and clear the registry.
 Tasks are left open; their worktree changes persist for the next run."
   (dolist (entry (copy-sequence maduin-dispatch--active))
-    (maduin-dispatch--session-delete-fn (plist-get entry :handle)))
+    (funcall maduin-dispatch--session-delete-fn (plist-get entry :handle)))
   (setq maduin-dispatch--active nil))
 
 (defun maduin-dispatch-start ()
