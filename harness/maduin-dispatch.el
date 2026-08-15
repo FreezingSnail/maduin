@@ -197,16 +197,17 @@ conflicts 3) git add -A 4) git commit. Report blockers instead of guessing."
 
 ;;; Spawn
 
-(defun maduin-dispatch--spawn (task role seat &optional model)
+(defun maduin-dispatch--spawn (task role seat &optional model plan)
   "Claim TASK and spawn one ROLE session at SEAT.  Return handle or nil.
-No-op (nil) when ROLE is at its concurrency cap or no SEAT is free."
+No-op (nil) when ROLE is at its concurrency cap or no SEAT is free.
+PLAN overrides the role's default plan string (designer owns its prompt)."
   (unless (>= (maduin-dispatch--active-role-count role)
               (maduin-dispatch--role-cap role))
     (let ((seat (or seat (maduin-dispatch--free-seat role))))
       (when (and seat (funcall maduin-dispatch--claim-fn task))
         (let* ((model (or model (maduin-dispatch--seat-model-for role seat)))
                (workdir (funcall maduin-dispatch--workdir-fn seat))
-               (plan (maduin-dispatch--plan-for role task seat))
+               (plan (or plan (maduin-dispatch--plan-for role task seat)))
                (sid (funcall maduin-dispatch--session-run-fn workdir model plan)))
           (when sid
             (push (list :handle sid :seat seat :role role :task task)
@@ -276,10 +277,11 @@ while work is in flight)."
 Return a session handle, or nil when all seats are busy or spawn fails."
   (maduin-dispatch--spawn task 'implementer nil))
 
-(defun maduin-dispatch-design (task)
+(defun maduin-dispatch-design (task &optional plan)
   "Dispatch a design session for TASK on a free designer seat (Ramuh).
-Return a session handle, or nil when busy or spawn fails."
-  (maduin-dispatch--spawn task 'designer nil))
+Return a session handle, or nil when busy or spawn fails.  PLAN, when
+given, overrides the default design plan (the designer owns the prompt)."
+  (maduin-dispatch--spawn task 'designer nil nil plan))
 
 (defun maduin-dispatch-resolve (seat task)
   "Dispatch a conflict-resolution session (Phoenix) for SEAT on TASK.

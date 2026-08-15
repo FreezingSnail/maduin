@@ -35,6 +35,8 @@
 (require 'maduin-resolver)
 (require 'maduin-terminal)
 (require 'maduin-dispatch)
+(require 'maduin-designer)
+(require 'maduin-concierge)
 
 ;;; Helpers
 
@@ -378,9 +380,10 @@ Mimics an opencode subprocess so session tests need no real CLI."
                maduin-stop
                maduin-status
                maduin-restart
-               maduin-attach
-               maduin-concierge
-               maduin-bootstrap))
+                maduin-attach
+                maduin-concierge
+                maduin-concierge-dismiss
+                maduin-bootstrap))
     (should (fboundp f))))
 
 ;;; 10. workspace integration
@@ -831,6 +834,133 @@ Both nil if bd unavailable."
           (maduin-dispatch-stop)
           (should-not maduin-dispatch--timer))
       (maduin-dispatch-stop))))
+
+;;; 16. designer (Ramuh)
+
+(ert-deftest maduin-test-designer-functions-exist ()
+  :tags '(maduin)
+  (dolist (f '(maduin-designer-design
+               maduin-designer-drop-in
+               maduin-designer-pending-tasks))
+    (should (fboundp f))))
+
+(ert-deftest maduin-test-designer-prompt-template ()
+  :tags '(maduin)
+  (let ((tmpl (maduin-designer--template)))
+    (should (stringp tmpl))
+    (should (string-match-p "{id}" tmpl))
+    (should (string-match-p "do not implement" (downcase tmpl)))
+    (should (string-match-p "defer" (downcase tmpl)))
+    (should (string-match-p "staged" (downcase tmpl)))
+    (should (string-match-p "--design" tmpl))
+    (should (string-match-p "--acceptance" tmpl))))
+
+(ert-deftest maduin-test-designer-design-builds-prompt-and-dispatches ()
+  :tags '(maduin)
+  (let* ((captured-task nil)
+         (captured-plan nil)
+         (maduin-designer--show-fn
+          (lambda (_t) (list :title "T-Body" :desc "D-Body")))
+         (maduin-designer--dispatch-fn
+          (lambda (task plan)
+            (setq captured-task task)
+            (setq captured-plan plan)
+            "s-des-1")))
+    (should (equal (maduin-designer-design "maduin-abc") "s-des-1"))
+    (should (equal captured-task "maduin-abc"))
+    (should (string-match-p "maduin-abc" captured-plan))
+    (should (string-match-p "T-Body" captured-plan))
+    (should (string-match-p "D-Body" captured-plan))
+    (should (string-match-p "do not implement" (downcase captured-plan)))
+    (should (string-match-p "staged" (downcase captured-plan)))
+    (should (string-match-p "defer" (downcase captured-plan)))
+    ;; {id}/{title}/{desc} placeholders fully substituted.
+    (should-not (string-match-p "{id}" captured-plan))
+    (should-not (string-match-p "{title}" captured-plan))
+    (should-not (string-match-p "{desc}" captured-plan))))
+
+(ert-deftest maduin-test-designer-design-plan-override ()
+  :tags '(maduin)
+  (let* ((got-plan nil)
+         (maduin-designer--dispatch-fn
+          (lambda (_task plan) (setq got-plan plan) "s-des-2")))
+    (should (equal (maduin-designer-design "maduin-abc" "CUSTOM PLAN")
+                   "s-des-2"))
+    (should (equal got-plan "CUSTOM PLAN"))))
+
+(ert-deftest maduin-test-designer-pending-tasks ()
+  :tags '(maduin)
+  (let* ((maduin-designer--query-fn
+          (lambda (_q) '("t-with-design" "t-no-design" "t-no-design2")))
+         (maduin-designer--has-design-fn
+          (lambda (id) (string= id "t-with-design"))))
+    (should (equal (maduin-designer-pending-tasks)
+                   '("t-no-design" "t-no-design2")))))
+
+(ert-deftest maduin-test-designer-pending-tasks-empty ()
+  :tags '(maduin)
+  (let ((maduin-designer--query-fn (lambda (_q) nil)))
+    (should (null (maduin-designer-pending-tasks)))))
+
+(ert-deftest maduin-test-designer-drop-in-delegates ()
+  :tags '(maduin)
+  (let* ((got-seat nil)
+         (got-role nil)
+         (got-model nil)
+         (maduin-designer--terminal-open-fn
+          (lambda (seat role model)
+            (setq got-seat seat)
+            (setq got-role role)
+            (setq got-model model)
+            (get-buffer-create " *ert-designer-dropin*"))))
+    (unwind-protect
+        (progn
+          (should (bufferp (maduin-designer-drop-in "ramuh")))
+          (should (equal got-seat "ramuh"))
+          (should (eq got-role 'designer))
+          (should (string= got-model "opencode-go/deepseek-v4-pro")))
+      (when (get-buffer " *ert-designer-dropin*")
+        (kill-buffer " *ert-designer-dropin*")))))
+
+;;; 17. concierge (Alexander)
+
+(ert-deftest maduin-test-concierge-functions-exist ()
+  :tags '(maduin)
+  (dolist (f '(maduin-concierge maduin-concierge-dismiss))
+    (should (fboundp f))))
+
+(ert-deftest maduin-test-concierge-model-resolution ()
+  :tags '(maduin)
+  (should (equal (maduin-concierge--seat-model "alexander")
+                 "opencode-go/deepseek-v4-pro"))
+  (should (equal (maduin-concierge--model) "opencode-go/deepseek-v4-pro")))
+
+(ert-deftest maduin-test-concierge-summon ()
+  :tags '(maduin)
+  (let* ((called nil)
+         (maduin-concierge--terminal-open-fn
+          (lambda (seat role model) (setq called (list seat role model)))))
+    (maduin-concierge)
+    (should (equal called
+                   '("alexander" concierge "opencode-go/deepseek-v4-pro")))))
+
+(ert-deftest maduin-test-concierge-dismiss ()
+  :tags '(maduin)
+  (let* ((dismissed nil)
+         (maduin-concierge--terminal-dismiss-fn
+          (lambda (seat) (setq dismissed seat) "handoff-note-123")))
+    (should (equal (maduin-concierge-dismiss) "handoff-note-123"))
+    (should (equal dismissed "alexander"))))
+
+(ert-deftest maduin-test-concierge-prompt-template ()
+  :tags '(maduin)
+  (let ((tmpl (maduin-terminal--template "concierge")))
+    (should (stringp tmpl))
+    (should (string-match-p "epic" tmpl))
+    (should (string-match-p "HIGH-LEVEL" tmpl))
+    (should (string-match-p "--defer" tmpl))
+    (should (string-match-p "Do not design" tmpl))
+    (should (string-match-p "Do not implement" tmpl))))
 
 (provide 'maduin-test)
 

@@ -1,3 +1,47 @@
+# maduin-00r.5 — demand-driven ephemeral session dispatcher
+
+## 改動
+
+- `harness/maduin-dispatch.el`（新）— deterministic dispatcher，取代
+  v0.1「起 N 席」為 zero-idle、併發上限 dispatch。
+  - `(maduin-dispatch-start)`／`(maduin-dispatch-stop)` — 啟／停 run-loop
+    timer；start **不 spawn 任何 session**。
+  - `(maduin-dispatch-implement task)` → handle｜nil — claim + 挑自由席
+    （ifrit/shiva/titan，cap 3 併發）+ session-run 注入 plan。
+  - `(maduin-dispatch-design task)` → handle｜nil — Ramuh design session。
+  - `(maduin-dispatch-resolve seat task)` → handle｜nil — Phoenix resolve。
+  - `(maduin-dispatch-run-loop)` — poll `bd ready`，逐 ready task dispatch。
+  - 完成：`maduin-session-on-complete-hook` →
+    `completed`：diff → `maduin-pipeline-land-branch` → `maduin-bd-close`；
+    `failed`：comment + 留開；land conflict → dispatch resolver（非
+    resolver 席則派，resolver 席則留開防無限迴圈）。
+  - session 完成即 delete（ephemeral — session 僅在有 work 時存在）。
+- 併發：active registry（`:handle :seat :role :task` plist）；cap = 席數
+  （implementer 3、designer 1、resolver 1）。滿席 → nil 不 spawn。
+- 注入縫（defvar fn slot，測試 mock，不 spawn 真 opencode）：
+  `--session-run-fn`／`--session-delete-fn`／`--diff-fn`／`--land-fn`／
+  `--close-fn`／`--claim-fn`／`--ready-fn`／`--show-fn`／`--comment-fn`／
+  `--workdir-fn`。
+- plan 注入：`bd show` title+desc → plan string（沿用 pipeline 措辭）。
+- land/close 單一真源：`maduin-pipeline-land-branch` + `maduin-bd-close`
+  （pipeline 未改，dispatch 只調用）。
+
+## 介面
+
+- `maduin-dispatch-start/stop/run-loop`  — lifecycle
+- `maduin-dispatch-implement/design/resolve` → session handle | nil
+
+## 驗證
+
+- `emacs -Q --batch -L harness -l maduin-test
+  --eval '(ert-run-tests-batch-and-exit "maduin-test-")'`
+  → 68/68 過，0 unexpected（61 舊 + 7 新 dispatch 測）。
+- byte-compile `maduin-dispatch.el` 淨，無警告。
+
+## 注意
+
+- 未手動 commit（auto-commit watcher 處理）。
+
 # maduin-aaa.1 — pipeline: close bead only after merge
 
 ## 改動

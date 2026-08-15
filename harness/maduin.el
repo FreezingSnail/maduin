@@ -26,6 +26,7 @@
 (require 'maduin-workspace)
 (require 'maduin-resolver)
 (require 'maduin-terminal)
+(require 'maduin-concierge)
 (require 'maduin-cockpit)
 (require 'maduin-gate)
 
@@ -36,6 +37,7 @@
     (define-key map (kbd "C-c s s") #'maduin-status)
     (define-key map (kbd "C-c s a") #'maduin-attach)
     (define-key map (kbd "C-c s c") #'maduin-concierge)
+    (define-key map (kbd "C-c s d") #'maduin-concierge-dismiss)
     map)
   "Keymap for `maduin-mode'.")
 
@@ -192,12 +194,6 @@ SEAT is chosen by completing-read from configured seats."
   (maduin-session-switch seat))
 
 ;;;###autoload
-(defun maduin-concierge (work)
-  "Dispatch WORK text to the first free concierge agent."
-  (interactive "sConcierge work: ")
-  (maduin-pipeline-dispatch-concierge work))
-
-;;;###autoload
 (defun maduin-bootstrap ()
   "First-time setup: create dirs and verify bd init.
 Creates .agents/brain, .agents/handoff, .agents/logs and per-seat
@@ -225,7 +221,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 ;;; Dev reload — edit-then-reload loop for developing the harness itself.
 
 (defvar maduin--feature-list
-  '(maduin-cockpit maduin-terminal maduin-pipeline maduin-handoff
+  '(maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline maduin-handoff
     maduin-agent maduin-session maduin-brain
     maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")
