@@ -38,7 +38,7 @@
 ;;; Injection seams (function-valued defvars; tests let-bind these).
 
 (defvar maduin-dispatch--session-run-fn #'maduin-session-run
-  "Function `(workdir model plan)' → session handle | nil.")
+  "Function `(workdir model agent plan)' → session handle | nil.")
 
 (defvar maduin-dispatch--session-delete-fn #'maduin-session-delete
   "Function `(sid)' → boolean.")
@@ -71,7 +71,7 @@
 
 (defvar maduin-dispatch--active nil
   "List of plists (:handle :seat :role :task) for in-flight sessions.
-ROLE is a symbol: `implementer', `designer' or `resolver'.")
+ROLE is a symbol: `implementer', `designer' or `repairer'.")
 
 (defvar maduin-dispatch--timer nil
   "Run-loop timer, or nil when dispatchers are inactive.")
@@ -115,8 +115,16 @@ ROLE is a symbol: `implementer', `designer' or `resolver'.")
   (pcase role
     ('implementer (maduin-dispatch--seat-model 'fleet seat))
     ('designer (maduin-dispatch--seat-model 'designer seat))
-    ('resolver (or (maduin-dispatch--config-get 'resolver 'model) "default"))
+    ('repairer (or (maduin-dispatch--config-get 'repairer 'model) "default"))
     (_ "default")))
+
+(defun maduin-dispatch--seat-agent-for (role)
+  "Return agent string for ROLE, or nil."
+  (pcase role
+    ('implementer (maduin-dispatch--config-get 'fleet 'agent))
+    ('designer (maduin-dispatch--config-get 'designer 'agent))
+    ('repairer (maduin-dispatch--config-get 'repairer 'agent))
+    (_ nil)))
 
 ;;; Concurrency
 
@@ -125,7 +133,7 @@ ROLE is a symbol: `implementer', `designer' or `resolver'.")
   (pcase role
     ('implementer (length (maduin-dispatch--fleet-seats)))
     ('designer (length (maduin-dispatch--designer-seats)))
-    ('resolver 1)
+    ('repairer 1)
     (_ 1)))
 
 (defun maduin-dispatch--active-role-count (role)
@@ -179,10 +187,10 @@ the task. If blocked, explain why — do not invent work."
      (or (plist-get spec :title) "?")
      (or (plist-get spec :desc) "?"))))
 
-(defun maduin-dispatch--resolve-plan (seat task)
-  "Build conflict-resolution plan string for SEAT on TASK."
+(defun maduin-dispatch--repair-plan (seat task)
+  "Build conflict-repair plan string for SEAT on TASK."
   (format
-   "You are the merge-conflict resolver for seat %s (task %s). A land \
+   "You are the merge-conflict repairer for seat %s (task %s). A land \
 into main failed with conflicts. Task: 1) git merge main 2) resolve ALL \
 conflicts 3) git add -A 4) git commit. Report blockers instead of guessing."
    seat task))
@@ -192,7 +200,7 @@ conflicts 3) git add -A 4) git commit. Report blockers instead of guessing."
   (pcase role
     ('implementer (maduin-dispatch--implement-plan task))
     ('designer (maduin-dispatch--design-plan task))
-    ('resolver (maduin-dispatch--resolve-plan seat task))
+    ('repairer (maduin-dispatch--repair-plan seat task))
     (_ (maduin-dispatch--implement-plan task))))
 
 ;;; Spawn
@@ -206,9 +214,10 @@ PLAN overrides the role's default plan string (designer owns its prompt)."
     (let ((seat (or seat (maduin-dispatch--free-seat role))))
       (when (and seat (funcall maduin-dispatch--claim-fn task))
         (let* ((model (or model (maduin-dispatch--seat-model-for role seat)))
+               (agent (maduin-dispatch--seat-agent-for role))
                (workdir (funcall maduin-dispatch--workdir-fn seat))
                (plan (or plan (maduin-dispatch--plan-for role task seat)))
-               (sid (funcall maduin-dispatch--session-run-fn workdir model plan)))
+               (sid (funcall maduin-dispatch--session-run-fn workdir model agent plan)))
           (when sid
             (push (list :handle sid :seat seat :role role :task task)
                   maduin-dispatch--active)
@@ -229,7 +238,7 @@ PLAN overrides the role's default plan string (designer owns its prompt)."
 (defun maduin-dispatch--complete (entry sid)
   "Handle successful completion of session for ENTRY (plist) with SID.
 Land the branch, then close the task only on a successful land.  On
-conflict dispatch a resolver (unless already resolving); on other land
+conflict dispatch a repairer (unless already repairing); on other land
 failure leave the task open."
   (let* ((seat (plist-get entry :seat))
          (task (plist-get entry :task))
@@ -243,9 +252,9 @@ failure leave the task open."
      ((eq land t)
       (funcall maduin-dispatch--close-fn task output))
      ((eq land 'conflict)
-      (funcall maduin-dispatch--comment-fn task "merge conflict — resolver dispatched")
-      (unless (eq role 'resolver)
-        (maduin-dispatch-resolve seat task)))
+      (funcall maduin-dispatch--comment-fn task "merge conflict — repairer dispatched")
+      (unless (eq role 'repairer)
+        (maduin-dispatch-repair seat task)))
      (t
       (funcall maduin-dispatch--comment-fn task "land failed — task left open")))))
 
@@ -283,10 +292,10 @@ Return a session handle, or nil when busy or spawn fails.  PLAN, when
 given, overrides the default design plan (the designer owns the prompt)."
   (maduin-dispatch--spawn task 'designer nil nil plan))
 
-(defun maduin-dispatch-resolve (seat task)
-  "Dispatch a conflict-resolution session (Phoenix) for SEAT on TASK.
-Return a session handle, or nil when a resolver is already active."
-  (maduin-dispatch--spawn task 'resolver seat))
+(defun maduin-dispatch-repair (seat task)
+  "Dispatch a conflict-repair session (Phoenix) for SEAT on TASK.
+Return a session handle, or nil when a repairer is already active."
+  (maduin-dispatch--spawn task 'repairer seat))
 
 ;;; Run loop
 
