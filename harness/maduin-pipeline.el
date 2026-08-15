@@ -22,9 +22,12 @@
 (require 'maduin-config)
 (require 'maduin-workspace)
 
-;; resolver may not exist when pipeline is loaded standalone.
+;; repairer + review may not exist when pipeline is loaded standalone.
 (condition-case nil
-    (require 'maduin-resolver)
+    (require 'maduin-repairer)
+  (error nil))
+(condition-case nil
+    (require 'maduin-review)
   (error nil))
 
 (defvar maduin-pipeline-timers nil
@@ -207,9 +210,14 @@ branch first, then close the task only on successful land; on
 conflict or other failure leave the task open, and mark the seat idle."
   (let ((status (maduin-agent-status seat-name)))
     (unless (and status (eq (plist-get status :status) 'working))
-      (let ((task (car (maduin-bd-ready-tasks))))
-        (when task
-          (maduin-bd-claim task)
+      (if (and (fboundp 'maduin-review--blocked-p)
+               (maduin-review--blocked-p))
+          ;; Open drift-fix task blocks all other fleet work: dispatch
+          ;; only the drift-fix to the repairer and return.
+          (maduin-pipeline--dispatch-drift-fix)
+        (let ((task (car (maduin-bd-ready-tasks))))
+          (when task
+            (maduin-bd-claim task)
           (let* ((model (maduin-pipeline--seat-model seat-name))
                  (workdir (expand-file-name
                            (or (maduin-pipeline--config-get 'workspaces 'path)
@@ -255,19 +263,23 @@ branch when done. If blocked, explain why — do not invent work."
                                      nil))))
                        (cond
                         ((eq land t)
-                         ;; Landed — close the task now.
-                         (maduin-bd-close task output))
+                         ;; Landed — close the task now, then advance the
+                         ;; review batch; run the gate when the batch is full.
+                         (maduin-bd-close task output)
+                         (when (and (fboundp 'maduin-review--note-land)
+                                    (maduin-review--note-land))
+                           (maduin-review-gate)))
                         ((eq land 'conflict)
                          (maduin-bd--run
                           (format "bd comment %s %s"
                                   (shell-quote-argument task)
                                   (shell-quote-argument
-                                   "merge conflict — resolver dispatched")))
-                         (unless (maduin-resolver-active-p seat-name)
-                           (maduin-resolver-start seat-name))
-                         (maduin-resolver-register seat-name task)
+                                   "merge conflict — repairer dispatched")))
+                         (unless (maduin-repairer-active-p seat-name)
+                           (maduin-repairer-start seat-name))
+                         (maduin-repairer-register seat-name task)
                          (maduin-workspace--log-warning
-                          (format "land-branch: conflict for seat %s task %s; resolver dispatched"
+                          (format "land-branch: conflict for seat %s task %s; repairer dispatched"
                                   seat-name task))
                          'conflict)
                         (t
@@ -281,10 +293,31 @@ branch when done. If blocked, explain why — do not invent work."
                           (format "land-branch: failure for seat %s task %s; left open"
                                   seat-name task))
                          nil))
-                       (when (buffer-live-p pbuf)
-                         (with-current-buffer pbuf
-                           (setq-local maduin-current-task nil)
-                           (setq-local maduin-status 'idle)))))))))))))))
+                        (when (buffer-live-p pbuf)
+                          (with-current-buffer pbuf
+                            (setq-local maduin-current-task nil)
+                            (setq-local maduin-status 'idle))))))))))))))))
+
+(defun maduin-pipeline--repairer-seat ()
+  "Return the repairer seat name.
+Resolve from config `repairer.seat'; fall back to \"phoenix\" when the
+repairer section has no seat field."
+  (or (maduin-pipeline--config-get 'repairer 'seat)
+      "phoenix"))
+
+(defun maduin-pipeline--dispatch-drift-fix ()
+  "Dispatch the open drift-fix task to the repairer seat.
+Claim the first open drift-fix task, register it with the repairer, and
+start the repairer in `drift-fix' mode.  No-op when no open drift-fix
+task exists or the repairer is not loaded."
+  (when (fboundp 'maduin-repairer-start)
+    (let ((ids (maduin-bd-query "status=open AND label=drift-fix")))
+      (when ids
+        (let ((task (car ids))
+              (seat (maduin-pipeline--repairer-seat)))
+          (maduin-bd-claim task)
+          (maduin-repairer-register seat task)
+          (maduin-repairer-start seat 'drift-fix))))))
 
 ;;; Concierge dispatch
 
@@ -303,14 +336,6 @@ Warn when no concierge agent is free."
                   (goto-char (point-max))
                   (insert prompt))))))
       (message "maduin: no free concierge agent; prompt undelivered"))))
-
-;;; Review (placeholder for v0.2)
-
-(defun maduin-pipeline-review (task-id)
-  "Placeholder review of TASK-ID: message and remember.
-Full review gate lands in v0.2."
-  (message "maduin: reviewing %s" task-id)
-  (maduin-bd-remember (format "reviewed %s" task-id)))
 
 ;;; Status
 
