@@ -171,7 +171,9 @@ Mimics an opencode subprocess so session tests need no real CLI."
                maduin-bd-dep-add
                maduin-bd-show
                maduin-bd-remember
-               maduin-bd-prime))
+               maduin-bd-prime
+               maduin-bd-open-epics
+               maduin-bd-epic-children))
     (should (fboundp f))))
 
 (ert-deftest maduin-test-bd-remember-and-forget ()
@@ -847,7 +849,8 @@ Both nil if bd unavailable."
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
-         (maduin-dispatch--ready-fn (lambda () '("t1" "t2"))))
+         (maduin-dispatch--ready-fn (lambda () '("t1" "t2")))
+         (maduin-dispatch--open-epics-fn (lambda () nil)))
     (unwind-protect
         (progn
           (maduin-dispatch-run-loop)
@@ -868,14 +871,124 @@ Both nil if bd unavailable."
           (should-not maduin-dispatch--timer))
       (maduin-dispatch-stop))))
 
+(ert-deftest maduin-test-dispatch-undecomposed-epics ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--open-epics-fn
+         (lambda () '("epic-a" "epic-b" "epic-c")))
+        (maduin-dispatch--epic-children-fn
+         (lambda (epic)
+           (cond ((string= epic "epic-a") '("t1" "t2"))
+                 ((string= epic "epic-b") '("t3"))
+                 (t nil)))))
+    (should (equal (maduin-dispatch--undecomposed-epics)
+                   '("epic-c")))))
+
+(ert-deftest maduin-test-dispatch-undecomposed-epics-none-open ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--open-epics-fn (lambda () nil)))
+    (should-not (maduin-dispatch--undecomposed-epics))))
+
+(ert-deftest maduin-test-dispatch-run-loop-decomposes-epics ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (decomposed '())
+         (run-count 0)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn
+          (lambda (_w _m _a _p)
+            (setq run-count (1+ run-count))
+            (format "s-%d" run-count)))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--ready-fn (lambda () '("t1")))
+         (maduin-dispatch--open-epics-fn
+          (lambda () '("epic-x" "epic-y")))
+         (maduin-dispatch--epic-children-fn
+          (lambda (epic)
+            (when (string= epic "epic-x") '("c1"))))
+         (maduin-dispatch--epic-decompose-fn
+          (lambda (epic) (push epic decomposed)
+            (maduin-dispatch-design epic))))
+    (unwind-protect
+        (progn
+          ;; epic-x has children → skipped; epic-y lacks decomposition.
+          (maduin-dispatch-run-loop)
+          (should (equal decomposed '("epic-y")))
+          ;; 1 implementer + 1 designer session.
+          (should (= run-count 2))
+          (should (= (length maduin-dispatch--active) 2)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-designer-completion-does-not-close ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (landed nil)
+         (closed nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-des-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
+         (maduin-dispatch--close-fn (lambda (task _out) (setq closed task) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-design "epic-z")
+          (should (= (length maduin-dispatch--active) 1))
+          (maduin-dispatch--on-complete "s-des-1" 'completed)
+          ;; designer session: lands but does NOT close the epic.
+          (should (equal landed "ramuh"))
+          (should-not closed)
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
 ;;; 16. designer (Ramuh)
 
 (ert-deftest maduin-test-designer-functions-exist ()
   :tags '(maduin)
   (dolist (f '(maduin-designer-design
+               maduin-designer-decompose-epic
                maduin-designer-drop-in
                maduin-designer-pending-tasks))
     (should (fboundp f))))
+
+(ert-deftest maduin-test-designer-epic-prompt-template ()
+  :tags '(maduin)
+  (let ((tmpl (maduin-designer--epic-template)))
+    (should (stringp tmpl))
+    (should (string-match-p "{id}" tmpl))
+    (should (string-match-p "decompos" (downcase tmpl)))
+    (should (string-match-p "--parent" tmpl))
+    (should (string-match-p "staged" (downcase tmpl)))
+    (should (string-match-p "--design" tmpl))
+    (should (string-match-p "do not implement" (downcase tmpl)))
+    (should (string-match-p "do not close" (downcase tmpl)))))
+
+(ert-deftest maduin-test-designer-decompose-epic-dispatches ()
+  :tags '(maduin)
+  (let* ((captured-task nil)
+         (captured-plan nil)
+         (maduin-designer--show-fn
+          (lambda (_t) (list :title "E-Body" :desc "E-Desc")))
+         (maduin-designer--dispatch-fn
+          (lambda (task plan)
+            (setq captured-task task)
+            (setq captured-plan plan)
+            "s-epic-1")))
+    (should (equal (maduin-designer-decompose-epic "maduin-ep1") "s-epic-1"))
+    (should (equal captured-task "maduin-ep1"))
+    (should (string-match-p "maduin-ep1" captured-plan))
+    (should (string-match-p "E-Body" captured-plan))
+    (should (string-match-p "E-Desc" captured-plan))
+    (should (string-match-p "decompos" (downcase captured-plan)))
+    (should (string-match-p "--parent" captured-plan))
+    ;; placeholders fully substituted.
+    (should-not (string-match-p "{id}" captured-plan))
+    (should-not (string-match-p "{title}" captured-plan))
+    (should-not (string-match-p "{desc}" captured-plan))))
 
 (ert-deftest maduin-test-designer-prompt-template ()
   :tags '(maduin)
@@ -1085,6 +1198,7 @@ Both nil if bd unavailable."
                  (deleted '())
                  (maduin-dispatch--active nil)
                  (maduin-dispatch--ready-fn (lambda () (list task)))
+                 (maduin-dispatch--open-epics-fn (lambda () nil))
                  (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-loop-1"))
                  (maduin-dispatch--claim-fn (lambda (_t) t))
                  (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))

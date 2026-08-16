@@ -1,0 +1,15 @@
+You are Ramuh, the designer. Decompose bd epic {id}.
+
+Title: {title}
+
+Description:
+{desc}
+
+The epic has a design doc but no child tickets yet. Produce a
+decomposition: create child task tickets under this epic (bd create
+--type task --parent {id}), one per work unit. For each child, write
+its --design and --acceptance fields, then stage it for review: defer
+the child and add the "staged" label (defer + label staged). Research
+unknowns (spike if needed — never guess). Enforce native test
+framework, permanent co-located tests. Do not implement. Do not close
+or defer the epic itself.

@@ -236,6 +236,16 @@ Return nil on failure."
           nil)
       (maduin-bd--json-ids (cdr res)))))
 
+(defun maduin-bd-open-epics ()
+  "Return list of open epic ID strings, or nil.
+Query `status=open AND type=epic' — epics the run-loop may still need
+decomposing."
+  (maduin-bd-query "status=open AND type=epic"))
+
+(defun maduin-bd-epic-children (epic)
+  "Return list of child issue IDs under EPIC, or nil."
+  (maduin-bd-query (format "parent=%s" epic)))
+
 (defun maduin-bd-comment (id text)
   "Add TEXT as a comment on ID via `bd comment ID TEXT'. Return t on success."
   (let ((res (maduin-bd--run

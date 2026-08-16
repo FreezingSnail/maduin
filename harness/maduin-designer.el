@@ -84,6 +84,38 @@ given, overrides the built prompt."
   (funcall maduin-designer--dispatch-fn task
            (or plan (maduin-designer--prompt task))))
 
+;;; Epic decomposition
+
+(defun maduin-designer--epic-template ()
+  "Return the epic decomposition prompt template text, or nil when missing."
+  (let ((path (expand-file-name "templates/designer-epic-prompt.txt"
+                                maduin-designer--dir)))
+    (when (and (file-exists-p path) (file-readable-p path))
+      (with-temp-buffer
+        (insert-file-contents path)
+        (buffer-string)))))
+
+(defun maduin-designer--epic-prompt (epic)
+  "Build the epic decomposition prompt for EPIC.
+Read templates/designer-epic-prompt.txt and substitute {id}/{title}/{desc}."
+  (let* ((spec (condition-case nil
+                   (funcall maduin-designer--show-fn epic)
+                 (error nil)))
+         (tmpl (or (maduin-designer--epic-template) ""))
+         (out (replace-regexp-in-string "{id}" epic tmpl t t)))
+    (setq out (replace-regexp-in-string
+               "{title}" (or (plist-get spec :title) "") out t t))
+    (replace-regexp-in-string
+     "{desc}" (or (plist-get spec :desc) "") out t t)))
+
+(defun maduin-designer-decompose-epic (epic)
+  "Decompose EPIC: dispatch a Ramuh session that breaks it into
+child tickets (each staged: defer + \"staged\" label).  The epic itself
+stays open until its children are implemented.
+Return the session handle, or nil when busy or spawn fails."
+  (funcall maduin-designer--dispatch-fn epic
+           (maduin-designer--epic-prompt epic)))
+
 ;;; Drop-in TUI
 
 (defun maduin-designer--seat-model (role seat)
