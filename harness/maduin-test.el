@@ -175,6 +175,45 @@ Mimics an opencode subprocess so session tests need no real CLI."
                maduin-bd-epic-children))
     (should (fboundp f))))
 
+(ert-deftest maduin-test-bd-close-path ()
+  :tags '(maduin)
+  (let ((maduin-bd-close-file "out.md"))
+    (should (string= (maduin-bd-close-path "/x/y") "/x/y/out.md"))
+    (should (string= (maduin-bd-close-path nil)
+                     (expand-file-name "out.md" default-directory)))))
+
+(ert-deftest maduin-test-bd-close-writes-to-worktree-not-root ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (maduin-bd-close-file (format "ert-close-%d.md" (random)))
+         (root-file (expand-file-name maduin-bd-close-file default-directory)))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'maduin-bd--run)
+                     (lambda (_cmd) (cons 0 ""))))
+            (should (maduin-bd-close "t1" "out" dir)))
+          ;; Written inside DIR (the worktree), NOT the repo/harness root.
+          (should (string= (with-temp-buffer
+                             (insert-file-contents
+                              (expand-file-name maduin-bd-close-file dir))
+                             (buffer-string))
+                           "out"))
+          (should-not (file-exists-p root-file)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-bd-close-default-dir-fallback ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (maduin-bd-close-file (format "ert-close2-%d.md" (random)))
+         (file (expand-file-name maduin-bd-close-file dir)))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'maduin-bd--run) (lambda (_cmd) (cons 0 "")))
+                    (default-directory dir))
+            (should (maduin-bd-close "t2" nil)))
+          (should (file-exists-p file)))
+      (delete-directory dir t))))
+
 (ert-deftest maduin-test-bd-remember-and-forget ()
   :tags '(maduin)
   (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
@@ -351,6 +390,17 @@ Mimics an opencode subprocess so session tests need no real CLI."
   (should (equal (maduin-pipeline-fleet-seats)
                  '("ifrit" "shiva" "titan"))))
 
+(ert-deftest maduin-test-pipeline-fleet-busy-dispatch ()
+  :tags '(maduin)
+  ;; Fleet busy must read the dispatch active registry (demand-driven
+  ;; source of truth), not legacy seat-buffer sessions.
+  (let ((maduin-dispatch--active
+         '((:handle "h1" :seat "ifrit" :role implementer :task "bd-1")
+           (:handle "h2" :seat "shiva" :role designer :task "bd-2"))))
+    (should (= (maduin-pipeline--fleet-busy-count) 1)))
+  (let ((maduin-dispatch--active nil))
+    (should (= (maduin-pipeline--fleet-busy-count) 0))))
+
 ;;; 8. cockpit
 
 (ert-deftest maduin-test-cockpit-show ()
@@ -385,6 +435,41 @@ Mimics an opencode subprocess so session tests need no real CLI."
   ;; Idle seat with no dispatch entry falls back to legacy (nil → dead).
   (let ((maduin-dispatch--active nil))
     (should (null (maduin-cockpit--seat-status "ifrit")))))
+
+(ert-deftest maduin-test-cockpit-refresh-interval-bound ()
+  :tags '(maduin)
+  (should (integerp maduin-cockpit-refresh-interval))
+  (should (> maduin-cockpit-refresh-interval 0)))
+
+(ert-deftest maduin-test-cockpit-timer-start-stop ()
+  :tags '(maduin)
+  (unwind-protect
+      (progn
+        (maduin-cockpit--start-timer)
+        (should maduin-cockpit--timer)
+        (should (timerp maduin-cockpit--timer))
+        ;; Idempotent: starting twice keeps one timer.
+        (let ((t1 maduin-cockpit--timer))
+          (maduin-cockpit--start-timer)
+          (should (eq t1 maduin-cockpit--timer)))
+        (maduin-cockpit--stop-timer)
+        (should (null maduin-cockpit--timer)))
+    (when maduin-cockpit--timer
+      (cancel-timer maduin-cockpit--timer)
+      (setq maduin-cockpit--timer nil))))
+
+(ert-deftest maduin-test-cockpit-auto-refresh-cancels-when-hidden ()
+  :tags '(maduin)
+  ;; In batch (no windows) the buffer is never visible, so one tick must
+  ;; cancel the timer instead of refreshing (prevents timer leak).
+  (unwind-protect
+      (progn
+        (maduin-cockpit--start-timer)
+        (maduin-cockpit--auto-refresh)
+        (should (null maduin-cockpit--timer)))
+    (when maduin-cockpit--timer
+      (cancel-timer maduin-cockpit--timer)
+      (setq maduin-cockpit--timer nil))))
 
 ;;; 9. main
 
@@ -465,26 +550,50 @@ Mimics an opencode subprocess so session tests need no real CLI."
     (error
      (ert-fail (format "land-branch errored: %s" (error-message-string err))))))
 
-(ert-deftest maduin-test-land-branch-nothing-to-land ()
+(ert-deftest maduin-test-land-branch-already-ancestor ()
   :tags '(maduin)
-  ;; Nothing staged → `git diff --cached --quiet' exits 0 → returns t.
+  ;; Seat branch (worktree HEAD) already an ancestor of main → skip the
+  ;; merge entirely and return t.  The git-output mock errors on any
+  ;; "merge" call, so reaching merge would fail the test.
   (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
         (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
         (maduin-pipeline--git-output-fn
-         (lambda (_dir &rest _args) (cons 0 ""))))
+         (lambda (_dir &rest args)
+           (when (member "merge" args)
+             (error "land-branch: merge must not run when already ancestor"))
+           (cons 0 ""))))
     (should (eq (maduin-pipeline-land-branch "test-seat") t))))
 
-(ert-deftest maduin-test-land-branch-conflict ()
+(ert-deftest maduin-test-land-branch-nothing-to-commit-still-merges ()
   :tags '(maduin)
-  ;; Staged changes → commit succeeds → branch verifies → merge reports a
-  ;; conflict → returns `conflict'.
+  ;; Worker pre-committed → `git commit' reports "nothing to commit" (exit
+  ;; 1), but the seat branch is not yet an ancestor of main → still merge,
+  ;; and return t on a clean merge.
   (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
         (maduin-pipeline--git-fn
-         (lambda (_dir &rest args) (if (member "diff" args) 1 0)))
+         (lambda (_dir &rest args) (if (member "merge-base" args) 1 0)))
+        (maduin-pipeline--git-output-fn
+         (lambda (_dir &rest args)
+           (cond
+            ((member "commit" args)
+             (cons 1 "nothing to commit, working tree clean\n"))
+            ((member "rev-parse" args) (cons 0 "abc123\n"))
+            ((member "merge" args) (cons 0 ""))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") t))))
+
+(ert-deftest maduin-test-land-branch-conflict ()
+  :tags '(maduin)
+  ;; Commit succeeds (or nothing to commit) → branch not an ancestor →
+  ;; branch verifies → merge reports a conflict → returns `conflict'.
+  (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+        (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+        (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+        (maduin-pipeline--git-fn
+         (lambda (_dir &rest args) (if (member "merge-base" args) 1 0)))
         (maduin-pipeline--git-output-fn
          (lambda (_dir &rest args)
            (cond
@@ -496,14 +605,15 @@ Mimics an opencode subprocess so session tests need no real CLI."
 
 (ert-deftest maduin-test-land-branch-missing-branch ()
   :tags '(maduin)
-  ;; Staged changes commit, but the seat branch does not exist → logs a
-  ;; warning naming the branch and returns nil (never merges).
+  ;; Commit done (or nothing to commit), branch not an ancestor, but the
+  ;; seat branch does not exist → logs a warning naming the branch and
+  ;; returns nil (never merges).
   (let ((logged nil)
         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
         (maduin-pipeline--git-fn
-         (lambda (_dir &rest args) (if (member "diff" args) 1 0)))
+         (lambda (_dir &rest args) (if (member "merge-base" args) 1 0)))
         (maduin-pipeline--git-output-fn
          (lambda (_dir &rest args)
            (cond
@@ -743,7 +853,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--diff-fn
           (lambda (_sid) (list '((file . "a.el") (patch . "+x")))))
          (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
-         (maduin-dispatch--close-fn (lambda (task out) (setq closed (cons task out)) t))
+         (maduin-dispatch--close-fn (lambda (task out &optional _dir) (setq closed (cons task out)) t))
          (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
     (unwind-protect
         (progn
@@ -767,7 +877,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
-          (maduin-dispatch--close-fn (lambda (task _out) (setq closed task) t))
+          (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
          (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -794,7 +904,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--diff-fn (lambda (_sid) nil))
          (maduin-dispatch--land-fn (lambda (_seat) 'conflict))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
-         (maduin-dispatch--close-fn (lambda (_t _o) t))
+         (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
          (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -820,6 +930,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--ready-fn (lambda () '("t1" "t2")))
+         (maduin-dispatch--in-progress-fn (lambda () nil))
          (maduin-dispatch--open-epics-fn (lambda () nil)))
     (unwind-protect
         (progn
@@ -828,10 +939,40 @@ Mimics an opencode subprocess so session tests need no real CLI."
           (should (= (length maduin-dispatch--active) 2)))
       (delete-directory dir t))))
 
+(ert-deftest maduin-test-dispatch-orphaned-tasks ()
+  :tags '(maduin)
+  ;; in_progress tasks with a live dispatch session are NOT orphans.
+  (let ((maduin-dispatch--in-progress-fn (lambda () '("o1" "o2" "live")))
+        (maduin-dispatch--active
+         (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "live"))))
+    (should (equal (maduin-dispatch--orphaned-tasks) '("o1" "o2")))))
+
+(ert-deftest maduin-test-dispatch-recover-redispatches-orphans ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (run-count 0)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--in-progress-fn (lambda () '("orphan-1")))
+         (maduin-dispatch--session-run-fn
+          (lambda (_w _m _a _p)
+            (setq run-count (1+ run-count))
+            (format "s-%d" run-count)))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir)))
+    (unwind-protect
+        (progn
+          (should (= (maduin-dispatch--recover) 1))
+          (should (= run-count 1))
+          (should (cl-find-if (lambda (e) (string= (plist-get e :task) "orphan-1"))
+                              maduin-dispatch--active)))
+      (delete-directory dir t))))
+
 (ert-deftest maduin-test-dispatch-start-stop-timer ()
   :tags '(maduin)
   (let ((maduin-dispatch--timer nil)
         (maduin-dispatch--active nil)
+        (maduin-dispatch--in-progress-fn (lambda () nil))
         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -854,7 +995,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn (lambda (_sid) nil))
          (maduin-dispatch--land-fn (lambda (_seat) t))
-         (maduin-dispatch--close-fn (lambda (_t _o) t))
+         (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
          (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
     (unwind-protect
         (progn
@@ -929,6 +1070,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--ready-fn (lambda () '("t1")))
+         (maduin-dispatch--in-progress-fn (lambda () nil))
          (maduin-dispatch--open-epics-fn
           (lambda () '("epic-x" "epic-y")))
          (maduin-dispatch--epic-children-fn
@@ -959,7 +1101,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn (lambda (_sid) nil))
          (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
-         (maduin-dispatch--close-fn (lambda (task _out) (setq closed task) t))
+         (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
          (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -1165,8 +1307,9 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (let ((maduin-dispatch--timer nil)
         (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn
-          (lambda (_w _m _a _p) (ert-fail "maduin-start must not spawn sessions")))
+        (maduin-dispatch--in-progress-fn (lambda () nil))
+        (maduin-dispatch--session-run-fn
+         (lambda (_w _m _a _p) (ert-fail "maduin-start must not spawn sessions")))
         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -1223,6 +1366,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
                  (deleted '())
                  (maduin-dispatch--active nil)
                  (maduin-dispatch--ready-fn (lambda () (list task)))
+                 (maduin-dispatch--in-progress-fn (lambda () nil))
                  (maduin-dispatch--open-epics-fn (lambda () nil))
                  (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-loop-1"))
                  (maduin-dispatch--claim-fn (lambda (_t) t))
@@ -1231,7 +1375,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
                  (maduin-dispatch--diff-fn
                   (lambda (_sid) (list '((file . "x.el") (patch . "+1")))))
                  (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
-                 (maduin-dispatch--close-fn (lambda (t2 _out) (setq closed t2) t))
+                 (maduin-dispatch--close-fn (lambda (t2 _out &optional _dir) (setq closed t2) t))
                  (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
             (unwind-protect
                 (progn

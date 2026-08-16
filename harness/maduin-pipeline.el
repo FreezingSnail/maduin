@@ -150,11 +150,14 @@ Prefer the directory containing maduin.el, else
 
 (defun maduin-pipeline-land-branch (seat-name)
   "Commit SEAT-NAME worktree changes and merge its branch into main.
-Return t on successful merge, \\='conflict when the merge failed and
-output indicates a conflict, nil on other failures (missing worktree,
-commit failure, missing seat branch, non-conflict merge failure; logged,
-never forced).  Steps: add -A in worktree; commit if staged (t if nothing
-to land); verify the seat branch exists (`git rev-parse --verify'); then
+Return t on successful merge (or when the seat branch is already an
+ancestor of main), \\='conflict when the merge failed and output
+indicates a conflict, nil on other failures (missing worktree, commit
+failure, missing seat branch, non-conflict merge failure; logged, never
+forced).  Steps: add -A in worktree; commit staged changes (\"nothing to
+commit\" is not a failure); skip the merge only when the seat branch is
+already an ancestor of main (`git merge-base --is-ancestor HEAD main');
+otherwise verify the seat branch exists (`git rev-parse --verify') and
 `git merge --no-ff' the seat branch from the main repo."
   (let* ((wt (funcall maduin-pipeline--worktree-path-fn seat-name))
          (branch (funcall maduin-pipeline--branch-fn seat-name))
@@ -165,21 +168,23 @@ to land); verify the seat branch exists (`git rev-parse --verify'); then
            (format "land-branch: worktree %s missing for seat %s" wt seat-name))
           nil)
       (funcall maduin-pipeline--git-fn wt "add" "-A")
-      (if (= 0 (funcall maduin-pipeline--git-fn wt "diff" "--cached" "--quiet"))
-          ;; Nothing staged — nothing to land.
-          t
-        (let ((res (funcall maduin-pipeline--git-output-fn
-                            wt "commit" "-m"
-                            (format "task complete (%s)" seat-name))))
-          (if (and (/= 0 (car res))
-                   (not (string-match-p "nothing to commit" (cdr res))))
-              (progn
-                (maduin-workspace--log-warning
-                 (format "land-branch: commit failed (exit %d): %s"
-                         (car res) (cdr res)))
-                nil)
-            ;; Commit done (or nothing to commit).  Verify the seat branch
-            ;; exists before merging; log and bail when it doesn't.
+      (let ((res (funcall maduin-pipeline--git-output-fn
+                          wt "commit" "-m"
+                          (format "task complete (%s)" seat-name))))
+        (if (and (/= 0 (car res))
+                 (not (string-match-p "nothing to commit" (cdr res))))
+            (progn
+              (maduin-workspace--log-warning
+               (format "land-branch: commit failed (exit %d): %s"
+                       (car res) (cdr res)))
+              nil)
+          ;; Commit done (or nothing to commit).  Skip the merge only when
+          ;; the seat branch (worktree HEAD) is already an ancestor of main.
+          (if (= 0 (funcall maduin-pipeline--git-fn
+                            wt "merge-base" "--is-ancestor" "HEAD" "main"))
+              t
+            ;; Verify the seat branch exists before merging; log and bail
+            ;; when it doesn't.
             (let ((verify (funcall maduin-pipeline--git-output-fn
                                    main "rev-parse" "--verify" branch)))
               (if (/= 0 (car verify))
@@ -292,7 +297,8 @@ branch when done. If blocked, explain why — do not invent work."
                          ;; Landed — close the task now, then run the
                          ;; per-epic review gate when this task completes
                          ;; its epic (all children closed).
-                         (maduin-bd-close task output)
+                         (maduin-bd-close task output
+                                           (funcall maduin-pipeline--worktree-path-fn seat-name))
                          (when (fboundp 'maduin-review--maybe-review-epic)
                            (maduin-review--maybe-review-epic task)))
                         ((eq land 'conflict)
@@ -373,13 +379,21 @@ Warn when no concierge agent is free."
                     (maduin-bd--json-data (cdr res)))))
     (or (and data (alist-get 'count (car data))) 0)))
 
+(defun maduin-pipeline--fleet-busy-count ()
+  "Return number of in-flight fleet (implementer) sessions.
+Reads `maduin-dispatch--active' — the demand-driven dispatch registry,
+the source of truth for in-flight work — instead of the legacy
+`maduin-agent-status' seat-buffer model.  Returns 0 when dispatch is
+not loaded (pipeline may load standalone)."
+  (if (boundp 'maduin-dispatch--active)
+      (cl-count-if (lambda (e) (eq (plist-get e :role) 'implementer))
+                   maduin-dispatch--active)
+    0))
+
 (defun maduin-pipeline-status ()
   "Return plist (:queued :active :completed :blocked :fleet-free :fleet-busy)."
   (let* ((fleet (maduin-pipeline-fleet-seats))
-         (busy (cl-count-if
-                (lambda (s)
-                  (eq (plist-get (maduin-agent-status s) :status) 'working))
-                fleet)))
+         (busy (maduin-pipeline--fleet-busy-count)))
     (list :queued (length (or (maduin-bd-ready-tasks) nil))
           :active (maduin-pipeline--count "in-progress")
           :completed (maduin-pipeline--count "closed")

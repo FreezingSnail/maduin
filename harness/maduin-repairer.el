@@ -110,7 +110,7 @@ leave the task open.  When the marker is absent, log and leave open."
            ((eq land t)
             (let ((task (cdr (assoc seat-name maduin-repairer-pending-tasks))))
               (when task
-                (maduin-bd-close task nil)
+                (maduin-bd-close task nil (maduin-workspace-path seat-name))
                 (setq maduin-repairer-pending-tasks
                       (assoc-delete-all seat-name maduin-repairer-pending-tasks)))
               (setq maduin-repairer-retries

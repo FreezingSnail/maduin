@@ -50,7 +50,8 @@
   "Function `(seat)' → t | `conflict' | nil.")
 
 (defvar maduin-dispatch--close-fn #'maduin-bd-close
-  "Function `(task output)' → boolean.")
+  "Function `(task output &optional dir)' → boolean.
+DIR is the seat worktree the close output should land in.")
 
 (defvar maduin-dispatch--claim-fn #'maduin-bd-claim
   "Function `(task)' → boolean.")
@@ -69,6 +70,10 @@
 
 (defvar maduin-dispatch--open-epics-fn #'maduin-bd-open-epics
   "Function `()' → list of open epic id strings | nil.")
+
+(defvar maduin-dispatch--in-progress-fn #'maduin-bd-in-progress-tasks
+  "Function `()' → list of in_progress task id strings | nil.
+Recovery seam: detects tasks orphaned by an Emacs quit mid-task.")
 
 (defvar maduin-dispatch--epic-children-fn #'maduin-bd-epic-children
   "Function `(epic)' → list of child id strings | nil.")
@@ -268,7 +273,8 @@ close: the epic stays open until its children are implemented."
     (cond
      ((eq land t)
       (unless (eq role 'designer)
-        (funcall maduin-dispatch--close-fn task output)))
+        (funcall maduin-dispatch--close-fn
+                 task output (funcall maduin-dispatch--workdir-fn seat))))
      ((eq land 'conflict)
       (funcall maduin-dispatch--comment-fn task "merge conflict — repairer dispatched")
       (unless (eq role 'repairer)
@@ -322,6 +328,30 @@ given, overrides the default design plan (the designer owns the prompt)."
 Return a session handle, or nil when a repairer is already active."
   (maduin-dispatch--spawn task 'repairer seat))
 
+;;; Recovery — orphaned in_progress tasks
+
+(defun maduin-dispatch--orphaned-tasks ()
+  "Return in_progress task IDs with no active dispatch session.
+A task claimed (in_progress) but absent from `maduin-dispatch--active'
+was orphaned by an Emacs quit mid-task; `bd ready' never re-surfaces it."
+  (let ((active (mapcar (lambda (e) (plist-get e :task))
+                        maduin-dispatch--active)))
+    (cl-remove-if (lambda (task) (member task active))
+                  (or (funcall maduin-dispatch--in-progress-fn) nil))))
+
+(defun maduin-dispatch--recover ()
+  "Re-dispatch orphaned in_progress tasks.
+Each orphan is re-dispatched via `maduin-dispatch-implement'; re-claim
+is idempotent (`bd update --claim' on an already-claimed-by-us task) so
+the spawn proceeds without double-work.  Respects the concurrency cap:
+a full fleet no-ops and retries on a later tick.  Return the number of
+tasks re-dispatched."
+  (let ((n 0))
+    (dolist (task (maduin-dispatch--orphaned-tasks))
+      (when (maduin-dispatch-implement task)
+        (setq n (1+ n))))
+    n))
+
 ;;; Run loop
 
 (defun maduin-dispatch--undecomposed-epics ()
@@ -339,11 +369,12 @@ no-ops once the designer role is at its cap."
     (funcall maduin-dispatch--epic-decompose-fn epic)))
 
 (defun maduin-dispatch-run-loop ()
-  "One tick: poll ready bd tasks and dispatch implement for each, then
-dispatch Ramuh decomposition for open epics lacking decomposition.
-Stops spawning once the implementer concurrency cap is reached.
-No-op while draining (soft stop in progress)."
+  "One tick: recover orphaned in_progress tasks, poll ready bd tasks and
+dispatch implement for each, then dispatch Ramuh decomposition for open
+epics lacking decomposition.  Stops spawning once the implementer
+concurrency cap is reached.  No-op while draining (soft stop in progress)."
   (unless maduin-dispatch--draining
+    (maduin-dispatch--recover)
     (let ((ready (funcall maduin-dispatch--ready-fn)))
       (dolist (task ready)
         (maduin-dispatch-implement task)))
@@ -365,7 +396,9 @@ Tasks are left open; their worktree changes persist for the next run."
 
 (defun maduin-dispatch-start ()
   "Activate dispatchers: register the completion hook and start the
-run-loop timer.  Spawns NO sessions."
+run-loop timer.  Runs one recovery pass immediately so tasks orphaned
+by a prior mid-task quit are re-dispatched without waiting for the
+first timer tick."
   (maduin-dispatch--register-hook)
   (when maduin-dispatch--timer
     (cancel-timer maduin-dispatch--timer)
@@ -373,6 +406,7 @@ run-loop timer.  Spawns NO sessions."
   (let ((interval (or (maduin-dispatch--config-get 'fleet 'poll-interval) 30)))
     (setq maduin-dispatch--timer
           (run-at-time interval interval #'maduin-dispatch-run-loop)))
+  (maduin-dispatch--recover)
   t)
 
 (defun maduin-dispatch-stop (&optional hard)

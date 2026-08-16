@@ -28,6 +28,12 @@
 (defvar maduin-cockpit-buffer-name "*maduin-cockpit*"
   "Name of the cockpit dashboard buffer.")
 
+(defvar maduin-cockpit-refresh-interval 5
+  "Seconds between automatic cockpit refreshes while the buffer is visible.")
+
+(defvar maduin-cockpit--timer nil
+  "Timer driving periodic cockpit refresh, or nil when not running.")
+
 (defvar maduin-cockpit-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
@@ -113,7 +119,10 @@ Return the buffer."
     (switch-to-buffer buf)
     (tabulated-list-mode)
     (use-local-map maduin-cockpit-map)
+    (with-current-buffer buf
+      (add-hook 'kill-buffer-hook #'maduin-cockpit--stop-timer nil t))
     (maduin-cockpit-refresh)
+    (maduin-cockpit--start-timer)
     buf))
 
 (defun maduin-cockpit-refresh ()
@@ -131,6 +140,32 @@ Return the buffer."
   (let ((inhibit-read-only t))
     (insert (maduin-cockpit--pipeline-summary)))
   (goto-char (point-min)))
+
+(defun maduin-cockpit--start-timer ()
+  "Ensure the cockpit auto-refresh timer is running."
+  (unless (and maduin-cockpit--timer
+               (timerp maduin-cockpit--timer))
+    (setq maduin-cockpit--timer
+          (run-at-time maduin-cockpit-refresh-interval
+                       maduin-cockpit-refresh-interval
+                       #'maduin-cockpit--auto-refresh))))
+
+(defun maduin-cockpit--stop-timer ()
+  "Cancel the cockpit auto-refresh timer."
+  (when maduin-cockpit--timer
+    (cancel-timer maduin-cockpit--timer)
+    (setq maduin-cockpit--timer nil)))
+
+(defun maduin-cockpit--auto-refresh ()
+  "Refresh the cockpit while its buffer is visible.
+Self-cancelling: when the buffer is gone or no longer shown in any
+window, stop the timer.  Refresh is skipped while the buffer is buried
+(hidden but alive) so work in other buffers is not interrupted."
+  (let ((buf (get-buffer maduin-cockpit-buffer-name)))
+    (if (or (null buf) (null (get-buffer-window buf 'visible)))
+        (maduin-cockpit--stop-timer)
+      (with-current-buffer buf
+        (maduin-cockpit-refresh)))))
 
 (defun maduin-cockpit-attach ()
   "Switch to the agent buffer named by the row under point."
