@@ -451,6 +451,57 @@ Mimics an opencode subprocess so session tests need no real CLI."
     (error
      (ert-fail (format "land-branch errored: %s" (error-message-string err))))))
 
+(ert-deftest maduin-test-land-branch-nothing-to-land ()
+  :tags '(maduin)
+  ;; Nothing staged → `git diff --cached --quiet' exits 0 → returns t.
+  (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+        (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+        (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+        (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
+        (maduin-pipeline--git-output-fn
+         (lambda (_dir &rest _args) (cons 0 ""))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") t))))
+
+(ert-deftest maduin-test-land-branch-conflict ()
+  :tags '(maduin)
+  ;; Staged changes → commit succeeds → branch verifies → merge reports a
+  ;; conflict → returns `conflict'.
+  (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+        (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+        (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+        (maduin-pipeline--git-fn
+         (lambda (_dir &rest args) (if (member "diff" args) 1 0)))
+        (maduin-pipeline--git-output-fn
+         (lambda (_dir &rest args)
+           (cond
+            ((member "commit" args) (cons 0 ""))
+            ((member "rev-parse" args) (cons 0 "abc123\n"))
+            ((member "merge" args)
+             (cons 1 "CONFLICT (content): Merge conflict in foo.el\n"))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") 'conflict))))
+
+(ert-deftest maduin-test-land-branch-missing-branch ()
+  :tags '(maduin)
+  ;; Staged changes commit, but the seat branch does not exist → logs a
+  ;; warning naming the branch and returns nil (never merges).
+  (let ((logged nil)
+        (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+        (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+        (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+        (maduin-pipeline--git-fn
+         (lambda (_dir &rest args) (if (member "diff" args) 1 0)))
+        (maduin-pipeline--git-output-fn
+         (lambda (_dir &rest args)
+           (cond
+            ((member "commit" args) (cons 0 ""))
+            ((member "rev-parse" args)
+             (cons 128 "fatal: needed a single revision\n"))))))
+    (cl-letf (((symbol-function 'maduin-workspace--log-warning)
+               (lambda (msg) (setq logged msg))))
+      (should (null (maduin-pipeline-land-branch "test-seat")))
+      (should (stringp logged))
+      (should (string-match-p "seat-branch-xyz" logged)))))
+
 (ert-deftest maduin-test-config-workspaces-land-on-stop ()
   :tags '(maduin)
   (let ((ws (cdr (assq 'workspaces maduin-config))))

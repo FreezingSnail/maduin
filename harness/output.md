@@ -1,48 +1,52 @@
-# maduin-2rw.1 — worktree provisioning: create real git worktrees per seat
+# maduin-2rw.2 — reliable land-branch commit+merge+close
 
-## Goal
+## Problem
 
-`maduin-workspace-ensure` produced EMPTY directories under
-`harness/workspaces/` instead of real git worktrees. Root cause:
-`maduin-bootstrap` creates the per-seat dirs with `make-directory` first, then
-`maduin-workspace-ensure` saw `file-exists-p` → true and returned the empty
-dir without ever registering a git worktree. Implementer sessions therefore
-ran in empty dirs and their git/file ops resolved up to the main repo,
-breaking isolation.
+Completed implementer sessions left tasks `in_progress`: the worker edited
+files but no commit/merge/close happened. `maduin-pipeline-land-branch`
+committed the worktree and merged the seat branch, but on a missing seat
+branch (or other merge failure) it returned nil silently, so
+`maduin-dispatch--complete` left the task open with no clear signal.
 
 ## Changes
 
-- `harness/maduin-workspace.el` — rewrote `maduin-workspace-ensure`:
-  reuse only a REAL worktree (verified via `git -C <path> rev-parse
-  --show-toplevel`); remove a stale empty dir before (re)creating; verify the
-  result is a real worktree and return nil otherwise. Added helpers
-  `maduin-workspace--remove-stale` and `maduin-workspace--create`.
-- `harness/maduin-bd-bridge.el` — added `maduin-bd-worktree-real-p` (checks a
-  dir resolves `git -C <dir> rev-parse --show-toplevel` to itself, with
-  symlink resolution via `file-truename`). Added `maduin-bd-worktree-add`
-  (`git worktree add <path> -b <branch>`, falling back to checking out an
-  existing branch). `maduin-bd-worktree-create` now verifies bd's result is a
-  real worktree and falls back to `git worktree add` when bd fails or reports
-  success on a non-worktree path.
-- `.gitignore` — ignore `harness/workspaces/` so per-seat worktree checkouts
-  never surface as untracked files in the main repo (bd's `worktree create`
-  also skips its per-seat ignore entry once this broad rule exists).
-- `harness/maduin-test.el` — added
-  `maduin-test-workspace-ensure-real-worktree`: asserts
-  `maduin-workspace-ensure` returns a path where `maduin-workspace-exists-p`
-  is t and `git -C <path> rev-parse --show-toplevel` resolves inside the
-  worktree; cleans up the worktree and branch afterwards.
+### `harness/maduin-pipeline.el`
 
-## Interfaces (unchanged)
+- Added function-valued injection seams (defvars) so land-branch is
+  testable without a real git repo:
+  - `maduin-pipeline--worktree-path-fn`
+  - `maduin-pipeline--branch-fn`
+  - `maduin-pipeline--main-root-fn`
+  - `maduin-pipeline--git-fn`
+  - `maduin-pipeline--git-output-fn`
+- Hardened `maduin-pipeline-land-branch`:
+  - Kept the "nothing staged → return t" path (empty commit still lands).
+  - Kept commit-failure detection + logging.
+  - **Added** seat-branch verification before merge:
+    `git rev-parse --verify <branch>`; when it fails, logs a clear warning
+    naming the branch and returns nil (never forces a merge).
+  - Kept conflict vs other-merge-failure distinction (`'conflict` vs nil
+    with a warning).
 
-- `maduin-workspace-path`, `maduin-workspace-branch`,
-  `maduin-workspace-exists-p`, `maduin-workspace-ensure` keep the same
-  signatures. Dependents (`maduin-dispatch`, `maduin-pipeline`,
-  `maduin-agent`) are unaffected.
-- New public helpers: `maduin-bd-worktree-real-p`, `maduin-bd-worktree-add`
-  (both in `maduin-bd-bridge.el`).
+### `harness/maduin-dispatch.el`
+
+- No code change needed: verified `maduin-dispatch--complete` calls
+  `maduin-dispatch--close-fn` (default `maduin-bd-close`) on `(eq land t)`,
+  dispatches the repairer on `'conflict`, and leaves the task open + comments
+  on nil. End-to-end close wiring is correct.
+
+### `harness/maduin-test.el`
+
+Added 3 permanent ERT tests (all use the new injection seams; no Python,
+no temp files):
+
+- `maduin-test-land-branch-nothing-to-land` → returns `t`.
+- `maduin-test-land-branch-conflict` → returns `'conflict` on merge
+  conflict output.
+- `maduin-test-land-branch-missing-branch` → returns `nil` and logs a
+  warning naming the missing branch.
 
 ## Validation
 
-`harness/check.sh`: 96/96 tests pass, 0 unexpected, byte-compile clean, no
-warnings. `maduin-test-workspace-ensure-real-worktree` passes.
+`harness/check.sh` → green: 99 tests, 0 unexpected, 0 compile errors,
+0 compile warnings (STRICT=1).

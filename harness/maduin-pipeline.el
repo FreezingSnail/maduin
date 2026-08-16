@@ -133,28 +133,44 @@ Prefer the directory containing maduin.el, else
     (cons (call-process-shell-command cmd nil buf)
           (with-current-buffer buf (buffer-string)))))
 
+(defvar maduin-pipeline--worktree-path-fn #'maduin-workspace-path
+  "Function `(seat)' → worktree directory.  Injection seam for tests.")
+
+(defvar maduin-pipeline--branch-fn #'maduin-workspace-branch
+  "Function `(seat)' → seat branch name.  Injection seam for tests.")
+
+(defvar maduin-pipeline--main-root-fn #'maduin-pipeline--main-root
+  "Function `()' → main repo root.  Injection seam for tests.")
+
+(defvar maduin-pipeline--git-fn #'maduin-pipeline--git
+  "Function `(dir &rest args)' → exit status.  Injection seam for tests.")
+
+(defvar maduin-pipeline--git-output-fn #'maduin-pipeline--git-output
+  "Function `(dir &rest args)' → (STATUS . OUTPUT).  Injection seam for tests.")
+
 (defun maduin-pipeline-land-branch (seat-name)
   "Commit SEAT-NAME worktree changes and merge its branch into main.
 Return t on successful merge, \\='conflict when the merge failed and
 output indicates a conflict, nil on other failures (missing worktree,
-commit failure, non-conflict merge failure; logged, never forced).
-Steps: add -A in worktree; commit if staged (t if nothing to land);
-then `git merge --no-ff' the seat branch from the main repo."
-  (let* ((wt (maduin-workspace-path seat-name))
-         (branch (maduin-workspace-branch seat-name))
-         (main (maduin-pipeline--main-root)))
+commit failure, missing seat branch, non-conflict merge failure; logged,
+never forced).  Steps: add -A in worktree; commit if staged (t if nothing
+to land); verify the seat branch exists (`git rev-parse --verify'); then
+`git merge --no-ff' the seat branch from the main repo."
+  (let* ((wt (funcall maduin-pipeline--worktree-path-fn seat-name))
+         (branch (funcall maduin-pipeline--branch-fn seat-name))
+         (main (funcall maduin-pipeline--main-root-fn)))
     (if (not (file-directory-p wt))
         (progn
           (maduin-workspace--log-warning
            (format "land-branch: worktree %s missing for seat %s" wt seat-name))
           nil)
-      (maduin-pipeline--git wt "add" "-A")
-      (if (= 0 (maduin-pipeline--git wt "diff" "--cached" "--quiet"))
+      (funcall maduin-pipeline--git-fn wt "add" "-A")
+      (if (= 0 (funcall maduin-pipeline--git-fn wt "diff" "--cached" "--quiet"))
           ;; Nothing staged — nothing to land.
           t
-        (let ((res (maduin-pipeline--git-output
-                    wt "commit" "-m"
-                    (format "task complete (%s)" seat-name))))
+        (let ((res (funcall maduin-pipeline--git-output-fn
+                            wt "commit" "-m"
+                            (format "task complete (%s)" seat-name))))
           (if (and (/= 0 (car res))
                    (not (string-match-p "nothing to commit" (cdr res))))
               (progn
@@ -162,19 +178,29 @@ then `git merge --no-ff' the seat branch from the main repo."
                  (format "land-branch: commit failed (exit %d): %s"
                          (car res) (cdr res)))
                 nil)
-            (let ((res (maduin-pipeline--git-output
-                        main "merge" "--no-ff" branch
-                        "-m" (format "land %s" seat-name))))
-              (if (= 0 (car res))
-                  t
-                ;; Distinguish conflict from other merge failures:
-                ;; git prints "CONFLICT (content): ..." / "fix conflicts".
-                (if (string-match-p "conflict" (downcase (cdr res)))
-                    'conflict
-                   (maduin-workspace--log-warning
-                    (format "land-branch: merge of %s into main failed (exit %d): %s"
-                            branch (car res) (cdr res)))
-                   nil)))))))))
+            ;; Commit done (or nothing to commit).  Verify the seat branch
+            ;; exists before merging; log and bail when it doesn't.
+            (let ((verify (funcall maduin-pipeline--git-output-fn
+                                   main "rev-parse" "--verify" branch)))
+              (if (/= 0 (car verify))
+                  (progn
+                    (maduin-workspace--log-warning
+                     (format "land-branch: seat branch %s not found (exit %d): %s"
+                             branch (car verify) (cdr verify)))
+                    nil)
+                (let ((res (funcall maduin-pipeline--git-output-fn
+                                    main "merge" "--no-ff" branch
+                                    "-m" (format "land %s" seat-name))))
+                  (if (= 0 (car res))
+                      t
+                    ;; Distinguish conflict from other merge failures:
+                    ;; git prints "CONFLICT (content): ..." / "fix conflicts".
+                    (if (string-match-p "conflict" (downcase (cdr res)))
+                        'conflict
+                      (maduin-workspace--log-warning
+                       (format "land-branch: merge of %s into main failed (exit %d): %s"
+                               branch (car res) (cdr res)))
+                      nil)))))))))))
 
 (defun maduin-pipeline-start-fleet (seat-name)
   "Start fleet polling timer for SEAT-NAME.  Return the timer.
