@@ -25,7 +25,6 @@
 
 (require 'maduin)
 (require 'maduin-bd-bridge)
-(require 'maduin-gate)
 (require 'maduin-brain)
 (require 'maduin-session)
 (require 'maduin-agent)
@@ -604,7 +603,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
                   ".agents/handoff/root-seat-xyz.md"
                   (maduin-project-root)))))
 
-;;; 13. gate (approval gate)
+;;; 13. bd scratch helpers
 
 (defun maduin-test--bd-delete (id)
   "Force-delete scratch bead ID. Never errors."
@@ -612,99 +611,6 @@ Mimics an opencode subprocess so session tests need no real CLI."
       (call-process shell-file-name nil nil nil shell-command-switch
                     (format "bd delete %s --force" id))
     (error nil)))
-
-(defun maduin-test--gate-scratch (ts)
-  "Create a scratch epic + task for gate tests. Return (epic-id . task-id).
-Both nil if bd unavailable."
-  (let* ((epic (condition-case nil
-                   (maduin-bd-create-epic
-                    (format "ert-gate-epic-%s" ts) "scratch epic for ERT")
-                 (error nil)))
-         (task (and epic
-                    (condition-case nil
-                        (maduin-bd-create-task
-                         (format "ert-gate-task-%s" ts) "scratch task for ERT"
-                         epic)
-                      (error nil)))))
-    (cons epic task)))
-
-(ert-deftest maduin-test-gate-functions-exist ()
-  :tags '(maduin)
-  (dolist (f '(maduin-bd-defer
-               maduin-bd-undefer
-               maduin-bd-label
-               maduin-bd-label-remove
-               maduin-bd-query
-               maduin-bd-comment
-               maduin-bd-update-design-acceptance
-               maduin-gate-stage
-               maduin-gate-approve
-               maduin-gate-reject
-               maduin-gate-staged-list
-               maduin-gate-approve-epic))
-    (should (fboundp f))))
-
-(ert-deftest maduin-test-gate-stage-approve-list ()
-  :tags '(maduin)
-  (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
-         (pair (maduin-test--gate-scratch ts))
-         (epic (car pair))
-         (task (cdr pair)))
-    (unwind-protect
-        (when (and epic task)
-          (should (maduin-gate-stage task "design body" "acceptance body"))
-          (should (member task (maduin-gate-staged-list)))
-          (should (maduin-gate-approve task))
-          (should-not (member task (maduin-gate-staged-list))))
-      (maduin-test--bd-delete task)
-      (maduin-test--bd-delete epic))))
-
-(ert-deftest maduin-test-gate-reject-keeps-staged ()
-  :tags '(maduin)
-  (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
-         (pair (maduin-test--gate-scratch ts))
-         (epic (car pair))
-         (task (cdr pair)))
-    (unwind-protect
-        (when (and epic task)
-          (should (maduin-gate-stage task "design body" "acceptance body"))
-          (should (maduin-gate-reject task "needs rework"))
-          ;; still staged after reject
-          (should (member task (maduin-gate-staged-list))))
-      (maduin-test--bd-delete task)
-      (maduin-test--bd-delete epic))))
-
-(ert-deftest maduin-test-gate-approve-epic ()
-  :tags '(maduin)
-  (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
-         (epic (condition-case nil
-                   (maduin-bd-create-epic
-                    (format "ert-gate-epic2-%s" ts) "scratch epic for ERT")
-                 (error nil)))
-         (t1 (and epic
-                  (condition-case nil
-                      (maduin-bd-create-task
-                       (format "ert-gate-t1-%s" ts) "scratch" epic)
-                    (error nil))))
-         (t2 (and epic
-                  (condition-case nil
-                      (maduin-bd-create-task
-                       (format "ert-gate-t2-%s" ts) "scratch" epic)
-                    (error nil)))))
-    (unwind-protect
-        (when (and epic t1 t2)
-          (should (maduin-gate-stage t1 "d1" "a1"))
-          (should (maduin-gate-stage t2 "d2" "a2"))
-          (should (member t1 (maduin-gate-staged-list)))
-          (should (member t2 (maduin-gate-staged-list)))
-          (let ((approved (maduin-gate-approve-epic epic)))
-            (should (member t1 approved))
-            (should (member t2 approved)))
-          (should-not (member t1 (maduin-gate-staged-list)))
-          (should-not (member t2 (maduin-gate-staged-list))))
-      (maduin-test--bd-delete t1)
-      (maduin-test--bd-delete t2)
-      (maduin-test--bd-delete epic))))
 
 ;;; 14. terminal (interactive substrate)
 
@@ -1241,9 +1147,6 @@ Both nil if bd unavailable."
   :tags '(maduin)
   (dolist (f '(maduin-concierge
                maduin-concierge-dismiss
-               maduin-gate-approve
-               maduin-gate-reject
-               maduin-gate-staged-list
                maduin-designer-drop-in
                maduin-designer-pending-tasks
                maduin-start
@@ -1255,10 +1158,7 @@ Both nil if bd unavailable."
   (dolist (pair '(("C-c s c" . maduin-concierge)
                   ("C-c s d" . maduin-concierge-dismiss)
                   ("C-c s n" . maduin-designer-drop-in)
-                  ("C-c s p" . maduin-designer-pending-tasks)
-                  ("C-c s g a" . maduin-gate-approve)
-                  ("C-c s g r" . maduin-gate-reject)
-                  ("C-c s g l" . maduin-gate-staged-list)))
+                  ("C-c s p" . maduin-designer-pending-tasks)))
     (should (eq (lookup-key maduin-mode-map (kbd (car pair))) (cdr pair)))))
 
 (ert-deftest maduin-test-main-start-zero-sessions ()
@@ -1310,11 +1210,9 @@ Both nil if bd unavailable."
           ;; 1. a deferred task is filed for the designer (Ramuh).
           (should (maduin-bd-defer task))
           ;; 2. designer fills design + stages (defer + staged label).
-          (should (maduin-gate-stage task "design body" "acceptance body"))
-          (should (member task (maduin-gate-staged-list)))
-          ;; 3. gate approves → undefer + remove staged label.
-          (should (maduin-gate-approve task))
-          (should-not (member task (maduin-gate-staged-list)))
+          (should (maduin-bd-update-design-acceptance task "design body" "acceptance body"))
+          ;; 3. approved work consumes via bd ready: undefer → ready.
+          (should (maduin-bd-undefer task))
           ;; 4. appears in ready.
           (should (member task (maduin-bd-ready-tasks)))
           ;; 5. run-loop → implement session → mock complete → land → close
