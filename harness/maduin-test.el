@@ -171,7 +171,9 @@ Mimics an opencode subprocess so session tests need no real CLI."
                maduin-bd-dep-add
                maduin-bd-show
                maduin-bd-remember
-               maduin-bd-prime))
+               maduin-bd-prime
+               maduin-bd-open-epics
+               maduin-bd-epic-children))
     (should (fboundp f))))
 
 (ert-deftest maduin-test-bd-remember-and-forget ()
@@ -911,7 +913,8 @@ Both nil if bd unavailable."
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
-         (maduin-dispatch--ready-fn (lambda () '("t1" "t2"))))
+         (maduin-dispatch--ready-fn (lambda () '("t1" "t2")))
+         (maduin-dispatch--open-epics-fn (lambda () nil)))
     (unwind-protect
         (progn
           (maduin-dispatch-run-loop)
@@ -989,14 +992,130 @@ Both nil if bd unavailable."
           (should-not maduin-dispatch--draining))
       (delete-directory dir t))))
 
+(ert-deftest maduin-test-dispatch-undecomposed-epics ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--open-epics-fn
+         (lambda () '("epic-a" "epic-b" "epic-c")))
+        (maduin-dispatch--epic-children-fn
+         (lambda (epic)
+           (cond ((string= epic "epic-a") '("t1" "t2"))
+                 ((string= epic "epic-b") '("t3"))
+                 (t nil)))))
+    (should (equal (maduin-dispatch--undecomposed-epics)
+                   '("epic-c")))))
+
+(ert-deftest maduin-test-dispatch-undecomposed-epics-none-open ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--open-epics-fn (lambda () nil)))
+    (should-not (maduin-dispatch--undecomposed-epics))))
+
+(ert-deftest maduin-test-dispatch-run-loop-decomposes-epics ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (decomposed '())
+         (run-count 0)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn
+          (lambda (_w _m _a _p)
+            (setq run-count (1+ run-count))
+            (format "s-%d" run-count)))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--ready-fn (lambda () '("t1")))
+         (maduin-dispatch--open-epics-fn
+          (lambda () '("epic-x" "epic-y")))
+         (maduin-dispatch--epic-children-fn
+          (lambda (epic)
+            (when (string= epic "epic-x") '("c1"))))
+         (maduin-dispatch--epic-decompose-fn
+          (lambda (epic) (push epic decomposed)
+            (maduin-dispatch-design epic))))
+    (unwind-protect
+        (progn
+          ;; epic-x has children → skipped; epic-y lacks decomposition.
+          (maduin-dispatch-run-loop)
+          (should (equal decomposed '("epic-y")))
+          ;; 1 implementer + 1 designer session.
+          (should (= run-count 2))
+          (should (= (length maduin-dispatch--active) 2)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-designer-completion-does-not-close ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (landed nil)
+         (closed nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-des-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
+         (maduin-dispatch--close-fn (lambda (task _out) (setq closed task) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-design "epic-z")
+          (should (= (length maduin-dispatch--active) 1))
+          (maduin-dispatch--on-complete "s-des-1" 'completed)
+          ;; designer session: lands but does NOT close the epic.
+          (should (equal landed "ramuh"))
+          (should-not closed)
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
 ;;; 16. designer (Ramuh)
 
 (ert-deftest maduin-test-designer-functions-exist ()
   :tags '(maduin)
   (dolist (f '(maduin-designer-design
+               maduin-designer-decompose-epic
                maduin-designer-drop-in
                maduin-designer-pending-tasks))
     (should (fboundp f))))
+
+(ert-deftest maduin-test-designer-epic-prompt-template ()
+  :tags '(maduin)
+  (let ((tmpl (maduin-designer--epic-template)))
+    (should (stringp tmpl))
+    (should (string-match-p "{id}" tmpl))
+    (should (string-match-p "decompos" (downcase tmpl)))
+    (should (string-match-p "--parent" tmpl))
+    (should (string-match-p "staged" (downcase tmpl)))
+    (should (string-match-p "--design" tmpl))
+    (should (string-match-p "--acceptance" tmpl))
+    (should (string-match-p "--deps" tmpl))
+    (should (string-match-p "implementation instructions" (downcase tmpl)))
+    (should (string-match-p "files" (downcase tmpl)))
+    (should (string-match-p "interfaces" (downcase tmpl)))
+    (should (string-match-p "bd show" tmpl))
+    (should (string-match-p "do not implement" (downcase tmpl)))
+    (should (string-match-p "do not close" (downcase tmpl)))))
+
+(ert-deftest maduin-test-designer-decompose-epic-dispatches ()
+  :tags '(maduin)
+  (let* ((captured-task nil)
+         (captured-plan nil)
+         (maduin-designer--show-fn
+          (lambda (_t) (list :title "E-Body" :desc "E-Desc")))
+         (maduin-designer--dispatch-fn
+          (lambda (task plan)
+            (setq captured-task task)
+            (setq captured-plan plan)
+            "s-epic-1")))
+    (should (equal (maduin-designer-decompose-epic "maduin-ep1") "s-epic-1"))
+    (should (equal captured-task "maduin-ep1"))
+    (should (string-match-p "maduin-ep1" captured-plan))
+    (should (string-match-p "E-Body" captured-plan))
+    (should (string-match-p "E-Desc" captured-plan))
+    (should (string-match-p "decompos" (downcase captured-plan)))
+    (should (string-match-p "--parent" captured-plan))
+    ;; placeholders fully substituted.
+    (should-not (string-match-p "{id}" captured-plan))
+    (should-not (string-match-p "{title}" captured-plan))
+    (should-not (string-match-p "{desc}" captured-plan))))
 
 (ert-deftest maduin-test-designer-prompt-template ()
   :tags '(maduin)
@@ -1206,6 +1325,7 @@ Both nil if bd unavailable."
                  (deleted '())
                  (maduin-dispatch--active nil)
                  (maduin-dispatch--ready-fn (lambda () (list task)))
+                 (maduin-dispatch--open-epics-fn (lambda () nil))
                  (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-loop-1"))
                  (maduin-dispatch--claim-fn (lambda (_t) t))
                  (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
@@ -1273,15 +1393,48 @@ Both nil if bd unavailable."
   (should (eq (maduin-review--verdict "no marker here") 'error))
   (should (eq (maduin-review--verdict nil) 'error)))
 
-(ert-deftest maduin-test-review-note-land-batch-trigger ()
+(ert-deftest maduin-test-review-epic-children-closed-p ()
   :tags '(maduin)
-  (let ((maduin-review--checkpoint '(:start-sha "abc" :landed 0)))
-    (should-not (maduin-review--note-land))
-    (should-not (maduin-review--note-land))
-    (should (maduin-review--note-land))
-    (should (= (plist-get maduin-review--checkpoint :landed) 3)))
-  ;; No checkpoint → no-op.
-  (should-not (maduin-review--note-land)))
+  (let ((maduin-review--query-fn (lambda (_q) '("t1" "t2")))
+        (maduin-review--show-fn (lambda (_id) (list :status "closed"))))
+    (should (maduin-review--epic-children-closed-p "epic-x")))
+  (let ((maduin-review--query-fn (lambda (_q) '("t1" "t2")))
+        (maduin-review--show-fn
+         (lambda (id)
+           (list :status (if (string= id "t2") "in_progress" "closed")))))
+    (should-not (maduin-review--epic-children-closed-p "epic-x")))
+  ;; no children → not complete.
+  (let ((maduin-review--query-fn (lambda (_q) nil))
+        (maduin-review--show-fn (lambda (_id) (list :status "closed"))))
+    (should-not (maduin-review--epic-children-closed-p "epic-x"))))
+
+(ert-deftest maduin-test-review-note-epic-land-records-once ()
+  :tags '(maduin)
+  (let ((maduin-review--epic-starts nil)
+        (maduin-review--main-root-fn (lambda () "/repo"))
+        (maduin-review--git-output-fn
+         (lambda (_dir &rest _args) (cons 0 "sha-pre-first\n"))))
+    (should (maduin-review--note-epic-land "epic-x"))
+    (should (equal (cdr (assoc "epic-x" maduin-review--epic-starts))
+                   "sha-pre-first"))
+    ;; later lands keep the original start.
+    (should-not (maduin-review--note-epic-land "epic-x"))))
+
+(ert-deftest maduin-test-review-epic-diff ()
+  :tags '(maduin)
+  (let ((maduin-review--epic-starts '(("epic-x" . "abc")))
+        (maduin-review--main-root-fn (lambda () "/repo"))
+        (maduin-review--git-output-fn
+         (lambda (_dir &rest args)
+           (cons 0 (mapconcat #'identity args " ")))))
+    (should (string-match-p "abc\\.\\.HEAD" (maduin-review--epic-diff "epic-x"))))
+  ;; missing start → fall back to last-land parent HEAD~1.
+  (let ((maduin-review--epic-starts nil)
+        (maduin-review--main-root-fn (lambda () "/repo"))
+        (maduin-review--git-output-fn
+         (lambda (_dir &rest args)
+           (cons 0 (mapconcat #'identity args " ")))))
+    (should (string-match-p "HEAD~1\\.\\.HEAD" (maduin-review--epic-diff "epic-x")))))
 
 (ert-deftest maduin-test-review-blocked-p ()
   :tags '(maduin)
@@ -1290,48 +1443,93 @@ Both nil if bd unavailable."
   (let ((maduin-review--query-fn (lambda (_q) nil)))
     (should-not (maduin-review--blocked-p))))
 
-(ert-deftest maduin-test-review-gate-approved-resets-checkpoint ()
+(ert-deftest maduin-test-review-gate-approved-closes-epic ()
   :tags '(maduin)
-  (let* ((maduin-review--checkpoint nil)
+  (let* ((maduin-review--epic-starts '(("epic-x" . "abc")))
+         (cmds nil)
          (maduin-review--main-root-fn (lambda () "/repo"))
          (maduin-review--git-output-fn
           (lambda (_dir &rest args)
-            (if (member "rev-parse" args)
-                (cons 0 "abc123\n")
-              (cons 0 "+fake diff\n"))))
+            (if (member "diff" args)
+                (cons 0 "+fake diff\n")
+              (cons 0 "abc\n"))))
          (maduin-review--query-fn (lambda (_q) nil))
          (maduin-review--session-run-fn (lambda (_w _m _a _p) "sid-1"))
          (maduin-review--complete-p-fn (lambda (_sid) 'completed))
-         (maduin-review--session-output-fn (lambda (_sid) "REVIEW: APPROVED\n")))
-    (should (eq (maduin-review-gate) 'approved))
-    (should (equal (plist-get maduin-review--checkpoint :start-sha) "abc123"))
-    (should (zerop (plist-get maduin-review--checkpoint :landed)))))
+         (maduin-review--session-output-fn (lambda (_sid) "REVIEW: APPROVED\n"))
+         (maduin-review--run-fn (lambda (cmd) (push cmd cmds) (cons 0 "")))
+         (maduin-review--comment-fn (lambda (_id _text) t)))
+    (should (eq (maduin-review-gate "epic-x") 'approved))
+    ;; goal met → epic closed.
+    (should (cl-find-if (lambda (c) (string-match-p "bd close epic-x" c)) cmds))
+    ;; approved → recorded start dropped.
+    (should-not (assoc "epic-x" maduin-review--epic-starts))))
 
 (ert-deftest maduin-test-review-gate-drift-creates-drift-fix ()
   :tags '(maduin)
-  (let* ((maduin-review--checkpoint '(:start-sha "old" :landed 5))
-         (created-cmd nil)
+  (let* ((maduin-review--epic-starts '(("epic-x" . "abc")))
+         (cmds nil)
          (maduin-review--main-root-fn (lambda () "/repo"))
-         (maduin-review--git-output-fn (lambda (_dir &rest _args) (cons 0 "diff")))
+         (maduin-review--git-output-fn
+          (lambda (_dir &rest _args) (cons 0 "diff")))
          (maduin-review--query-fn (lambda (_q) nil))
          (maduin-review--session-run-fn (lambda (_w _m _a _p) "sid-1"))
          (maduin-review--complete-p-fn (lambda (_sid) 'completed))
          (maduin-review--session-output-fn
           (lambda (_sid) "REVIEW: DRIFT fix the widget\n"))
-         (maduin-review--run-fn
-          (lambda (cmd) (setq created-cmd cmd) (cons 0 "drift-task-1\n")))
+         (maduin-review--run-fn (lambda (cmd) (push cmd cmds) (cons 0 "drift-task-1\n")))
          (maduin-review--comment-fn (lambda (_id _text) t)))
-    (should (eq (maduin-review-gate) 'drift))
-    (should (string-match-p "drift-fix" created-cmd))
-    (should (string-match-p "widget" created-cmd))
-    ;; checkpoint NOT reset on drift.
-    (should (equal (plist-get maduin-review--checkpoint :start-sha) "old"))
-    (should (= (plist-get maduin-review--checkpoint :landed) 5))))
+    (should (eq (maduin-review-gate "epic-x") 'drift))
+    (should (cl-find-if (lambda (c) (string-match-p "drift-fix" c)) cmds))
+    (should (cl-find-if (lambda (c) (string-match-p "widget" c)) cmds))
+    ;; drift → epic stays open: no close, recorded start preserved.
+    (should-not (cl-find-if (lambda (c) (string-match-p "bd close epic-x" c)) cmds))
+    (should (equal (cdr (assoc "epic-x" maduin-review--epic-starts)) "abc"))))
 
 (ert-deftest maduin-test-review-gate-disabled ()
   :tags '(maduin)
   (let ((maduin-config '((reviewer (enabled . nil)))))
-    (should (null (maduin-review-gate)))))
+    (should (null (maduin-review-gate "epic-x")))))
+
+(ert-deftest maduin-test-review-maybe-review-epic-when-complete ()
+  :tags '(maduin)
+  (let* ((gate-called nil)
+         (maduin-review--epic-starts nil)
+         (maduin-review--show-fn
+          (lambda (_id) (list :parent "epic-x" :status "closed")))
+         (maduin-review--query-fn (lambda (_q) '("t1")))
+         (maduin-review--main-root-fn (lambda () "/repo"))
+         (maduin-review--git-output-fn
+          (lambda (_dir &rest _args) (cons 0 "sha\n"))))
+    (cl-letf (((symbol-function 'maduin-review-gate)
+               (lambda (epic) (setq gate-called epic) 'approved)))
+      (should (eq (maduin-review--maybe-review-epic "t1") 'approved))
+      (should (string= gate-called "epic-x"))
+      ;; start recorded before the gate ran.
+      (should (equal (cdr (assoc "epic-x" maduin-review--epic-starts)) "sha")))))
+
+(ert-deftest maduin-test-review-maybe-review-epic-not-complete ()
+  :tags '(maduin)
+  (let* ((gate-called nil)
+         (maduin-review--show-fn
+          (lambda (id)
+            (if (string= id "t1")
+                (list :parent "epic-x" :status "in_progress")
+              (list :status "in_progress"))))
+         (maduin-review--query-fn (lambda (_q) '("t1" "t2"))))
+    (cl-letf (((symbol-function 'maduin-review-gate)
+               (lambda (_epic) (setq gate-called t) 'approved)))
+      (should (null (maduin-review--maybe-review-epic "t1")))
+      (should-not gate-called))))
+
+(ert-deftest maduin-test-review-maybe-review-epic-no-parent ()
+  :tags '(maduin)
+  (let* ((gate-called nil)
+         (maduin-review--show-fn (lambda (_id) (list :status "closed" :parent nil))))
+    (cl-letf (((symbol-function 'maduin-review-gate)
+               (lambda (_epic) (setq gate-called t) 'approved)))
+      (should (null (maduin-review--maybe-review-epic "orphan")))
+      (should-not gate-called))))
 
 (provide 'maduin-test)
 

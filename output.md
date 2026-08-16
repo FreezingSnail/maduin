@@ -1,137 +1,26 @@
-# Spike: opencode session substrate (run vs serve vs acp)
+# maduin-d17.5 — review node: run on epic completion, not batch-N
 
-opencode version: **1.18.15** · model probed: `opencode-go/deepseek-v4-pro`
+## What changed
 
-## 1. `opencode run` — one-shot, best fit for ephemeral tasks
+1. **`harness/maduin-review.el`** — batched drift-review → per-epic completion review:
+   - **Deprecated** the batch checkpoint (`:start-sha`/`:landed`), `maduin-review--mark-start`, `maduin-review--note-land`, the batch diff, `maduin-review--landed-context`, and the `batch-size` config trigger.
+   - **New per-epic trigger** `maduin-review--maybe-review-epic`: after a task lands+closes, resolve its parent epic; when ALL children of that epic are closed, run Odin once for THAT epic.
+   - **New per-epic diff scope**: `maduin-review--epic-starts` alist records the pre-land main SHA (`HEAD~1`) at the epic's first child land; later lands keep the original start so `maduin-review--epic-diff` returns the epic's full change set since its tasks began (`git diff START..HEAD`). Falls back to `HEAD~1` (last land) with a warning if the in-memory start is missing after a pipeline restart.
+   - **New completion check** `maduin-review--epic-children-closed-p`: every child `parent=<epic>` is closed; an epic with zero children is NOT complete.
+   - **Goal context** = the epic's `--design`/`--acceptance` (`maduin-review--design-acceptance`, parsed from `bd show`).
+   - **Verdict semantics** (plan text updated to "goal met vs goal not met"):
+     - `APPROVED` → goal met → epic closed (`bd close <epic> --reason "review gate: goal met (Odin approved)"`), recorded start dropped.
+     - `DRIFT` → goal not met → drift-fix task created under the epic + comments; epic stays open, start preserved so the next gate sees the full change set.
+     - `error` → comment on the epic, stays open (never silent-fail).
+   - `maduin-review-gate` now requires `EPIC-ID` (the review subject).
 
-```
-opencode run [message..]
-  --model, -m      provider/model
-  --agent          agent (e.g. slugineer)
-  --dir            directory to run in (PER-SESSION cwd → worktree isolation) ★
-  --format         default | json   (json = raw NDJSON events)
-  --file, -f       attach file(s) to message
-  --title          session title
-  --auto           auto-approve permissions not explicitly denied
-  --variant        model reasoning effort (high/max/minimal)
-  --attach <url>   attach to running `serve` (avoids MCP cold boot)
-  --command        run a command, message = args
-  --continue/-c, --session/-s, --fork, --share, --thinking, -i interactive
-```
+2. **`harness/maduin-pipeline.el`** — fleet sentinel now calls `maduin-review--maybe-review-epic task` after closing a landed task (replaces the `note-land`/batch-full gate).
 
-Probe (works, exit 0):
-```
-$ opencode run "say hi" --format json
-{"type":"step_start",...,"sessionID":"ses_...","part":{"type":"step-start"}}
-{"type":"text",...,"part":{"type":"text","text":"Hi."}}
-{"type":"step_finish",...,"part":{"reason":"stop","tokens":{...},"cost":...}}
-```
+3. **`harness/maduin-bd-bridge.el`** — `maduin-bd-show` plist now includes `:parent` (from `bd show --json`), needed to resolve a task's epic.
 
-File-edit probe (`--auto`) emits `tool_use` parts with full input/output:
-```
-{"type":"tool_use","part":{"type":"tool","tool":"write","state":{"status":"completed",
-  "input":{"filePath":"...","content":"hello-world"},"output":"Wrote file successfully."}}}
-```
+4. **`harness/config.el`** — removed `(batch-size . 3)` from the reviewer section.
 
-### Exit code is NOT a success signal
-Without `--auto`, a permission-gated edit is **auto-rejected but still exits 0**:
-```
-! permission requested: bash (...); auto-rejecting
-{"type":"tool_use","part":{"state":{"status":"error","error":"The user rejected permission..."}}}
-EXIT: 0
-```
-→ Must parse events (`step_finish.reason`, `tool_use.state.status`) for success/failure, never trust `$?`.
+## Validation
 
-## 2. `opencode serve` — headless HTTP server (full session lifecycle)
-
-```
-opencode serve [--port] [--hostname] [--cors] [--mdns]
-  --port 0 = random   (auth: OPENCODE_SERVER_PASSWORD / OPENCODE_SERVER_USERNAME)
-```
-No `--cwd` flag — cwd fixed at server startup. OpenAPI spec at `GET /doc`.
-
-Key endpoints (verified live):
-```
-GET  /global/health                     → {"healthy":true,"version":"1.18.15"}
-POST /session                           → Session {id, directory, title,...}
-POST /session/:id/message               → {info:{finish:"stop"}, parts:[...]}  (synchronous, waits)
-GET  /session/:id/diff                  → FileDiff[]  (structured, review-before-land)
-DELETE /session/:id                     → true (destroy)
-GET  /session/:id/message               → {info, parts}[]
-POST /session/:id/abort                 → abort running session
-POST /session/:id/fork, /revert, /permissions/:pid
-GET  /event (SSE) · GET /session (list) · GET /session/status
-```
-
-Live session create + message:
-```
-$ curl -s -X POST localhost:4199/session -d '{"title":"probe"}'
-{"id":"ses_...","directory":"/Users/connorfranc/code/maduin",...}
-$ curl -s -X POST localhost:4199/session/ses_.../message \
-    -d '{"parts":[{"type":"text","text":"say hi"}],
-         "model":{"providerID":"opencode-go","modelID":"deepseek-v4-pro"}}'
-{"info":{"finish":"stop",...,"cost":0.000089204},"parts":[{"type":"text","text":"Hi."},...]}
-```
-
-## 3. `opencode acp` — Agent Client Protocol (JSON-RPC over stdio)
-
-```
-opencode acp [--cwd <dir>] [--port] [--hostname] [--cors] [--mdns]
-```
-Has `--cwd` flag. Communicates JSON-RPC 2.0 via stdin/stdout (nd-JSON) — or over HTTP/SSE with `--port`.
-Designed for **editor integration** (Zed, JetBrains, Neovim). Session lifecycle is protocol methods
-(`session/new`, `session/load`, `session/prompt`, `session/cancel`, permission negotiation `session/request_permission`).
-Full feature parity with TUI (tools, MCP, AGENTS.md, permissions). Editor-oriented — not a task-orchestrator surface.
-
-## 4. `opencode session` / `opencode export`
-
-```
-opencode session list [--format table|json] [--max-count/-n]
-opencode session delete <sessionID>
-opencode export [sessionID] [--sanitize]
-```
-
-`export` = full structured JSON, includes **per-message diffs with unified patches**:
-```
-"info": {"summary": {"additions":1,"deletions":0,"files":1}, ...}
-"messages": [{"info": {"summary": {"diffs": [
-  {"file":"probe.txt","patch":"--- probe.txt\n+++ probe.txt\n@@ -0,0 +1 @@\n+hello-world\n",
-   "additions":1,"deletions":0,"status":"added"}]}}, "parts":[...]}]
-```
-
-## Key question answers
-
-| Question | Answer |
-|---|---|
-| Per-session working dir (worktree isolation)? | **YES** — `run --dir <path>`. `acp --cwd`. `serve` fixed dir; for warm server + isolation use `run --attach <url> --dir <worktree>`, or one serve per worktree. |
-| Structured completion signal? | `run --format json` NDJSON (`step_finish.reason` = stop/tool-calls/error; `tool_use.state.status`). `serve` `POST /message` → `info.finish`. **Exit code unreliable** (0 on rejection). |
-| Structured diffs for review-before-land? | **YES** — `export` → per-message `diffs[]` w/ unified `patch`; `serve` `GET /session/:id/diff` → `FileDiff[]`. Output is NOT free-text-only. |
-| Minimal invocation? | See below. |
-
-## Minimal invocation: "run plan in dir X, model M, give result + diffs"
-
-```bash
-# spawn-on-demand, kill after (no persistent server)
-opencode run --dir "$WORKTREE" -m opencode-go/deepseek-v4-pro \
-    --agent slugineer --format json --auto "$PLAN" > events.ndjson
-# structured result: parse events.ndjson for step_finish.reason + tool_use
-# structured diffs:
-opencode export "$SESSION_ID"   # per-message diffs[] with patches
-# cleanup:
-opencode session delete "$SESSION_ID"
-```
-
-## Recommendation
-
-**Use `opencode run` (one-shot, `--format json`, `--dir` for worktree isolation) as the primary substrate**
-for ephemeral task-scoped sessions. Matches "spawn → context-complete input → kill" exactly; no server to
-manage, per-session cwd, NDJSON events + `export` give structured result & diffs.
-
-**Upgrade to `opencode serve` when** you want a warm pooled backend (avoid per-task MCP/LSP cold boot) or
-need synchronous `POST /session/:id/message` + `GET /session/:id/diff` in-process: run one `serve` per
-worktree (or `run --attach <serve> --dir <worktree>` for isolation against a shared warm server).
-
-**`acp` only** if the harness already speaks the Agent Client Protocol (editor-class clients). A task
-orchestrator does not need it.
-
-**Caveat:** exit code is not a completion/quality signal — always parse JSON events.
+- `harness/check.sh`: 107/107 tests passed, exit 0.
+- Tests updated/replaced: children-closed detection, per-epic start recorded once, epic diff (recorded start + fallback), gate-approved closes epic, gate-drift creates drift-fix and keeps epic open, gate disabled, maybe-review complete / not-complete / no-parent.

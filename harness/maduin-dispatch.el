@@ -67,6 +67,18 @@
 (defvar maduin-dispatch--workdir-fn #'maduin-dispatch--ensure-workdir
   "Function `(seat)' → worktree directory string.")
 
+(defvar maduin-dispatch--open-epics-fn #'maduin-bd-open-epics
+  "Function `()' → list of open epic id strings | nil.")
+
+(defvar maduin-dispatch--epic-children-fn #'maduin-bd-epic-children
+  "Function `(epic)' → list of child id strings | nil.")
+
+(defvar maduin-dispatch--epic-decompose-fn #'maduin-designer-decompose-epic
+  "Function `(epic)' → session handle | nil.
+Reuses maduin-designer machinery (Ramuh decomposition session).")
+
+(declare-function maduin-designer-decompose-epic "maduin-designer.el")
+
 ;;; Active-session registry (concurrency tracking).
 
 (defvar maduin-dispatch--active nil
@@ -243,7 +255,8 @@ PLAN overrides the role's default plan string (designer owns its prompt)."
   "Handle successful completion of session for ENTRY (plist) with SID.
 Land the branch, then close the task only on a successful land.  On
 conflict dispatch a repairer (unless already repairing); on other land
-failure leave the task open."
+failure leave the task open.  Designer (decomposition) sessions never
+close: the epic stays open until its children are implemented."
   (let* ((seat (plist-get entry :seat))
          (task (plist-get entry :task))
          (role (plist-get entry :role))
@@ -254,7 +267,8 @@ failure leave the task open."
                  (error nil))))
     (cond
      ((eq land t)
-      (funcall maduin-dispatch--close-fn task output))
+      (unless (eq role 'designer)
+        (funcall maduin-dispatch--close-fn task output)))
      ((eq land 'conflict)
       (funcall maduin-dispatch--comment-fn task "merge conflict — repairer dispatched")
       (unless (eq role 'repairer)
@@ -310,14 +324,30 @@ Return a session handle, or nil when a repairer is already active."
 
 ;;; Run loop
 
+(defun maduin-dispatch--undecomposed-epics ()
+  "Return open epic IDs lacking decomposition (no child issues)."
+  (let ((epics (or (funcall maduin-dispatch--open-epics-fn) nil)))
+    (cl-remove-if (lambda (epic)
+                    (funcall maduin-dispatch--epic-children-fn epic))
+                  epics)))
+
+(defun maduin-dispatch--decompose-epics ()
+  "Dispatch a Ramuh decomposition session per undecomposed open epic.
+Respects the designer concurrency cap (1 seat): `maduin-dispatch--spawn'
+no-ops once the designer role is at its cap."
+  (dolist (epic (maduin-dispatch--undecomposed-epics))
+    (funcall maduin-dispatch--epic-decompose-fn epic)))
+
 (defun maduin-dispatch-run-loop ()
-  "One tick: poll ready bd tasks and dispatch implement for each.
+  "One tick: poll ready bd tasks and dispatch implement for each, then
+dispatch Ramuh decomposition for open epics lacking decomposition.
 Stops spawning once the implementer concurrency cap is reached.
 No-op while draining (soft stop in progress)."
   (unless maduin-dispatch--draining
     (let ((ready (funcall maduin-dispatch--ready-fn)))
       (dolist (task ready)
-        (maduin-dispatch-implement task)))))
+        (maduin-dispatch-implement task)))
+    (maduin-dispatch--decompose-epics)))
 
 ;;; Lifecycle
 

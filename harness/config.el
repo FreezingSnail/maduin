@@ -22,7 +22,7 @@
               (poll-interval . 30) (max-concurrent . 1)))
     (reviewer . ((enabled . t) (agent . "slugineer-reviewer")
                  (esper . "odin") (model . "opencode-go/deepseek-v4-pro")
-                 (batch-size . 3) (max-retries . 3)))
+                 (max-retries . 3)))
     (repairer . ((enabled . t) (agent . "slugineer-repairer")
                  (esper . "phoenix") (model . "opencode-go/deepseek-v4-pro")
                  (max-retries . 3)))

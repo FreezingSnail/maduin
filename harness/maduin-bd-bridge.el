@@ -138,7 +138,7 @@ Return t on success."
       nil)))
 
 (defun maduin-bd-show (task-id)
-  "Return plist (:title :desc :status :deps) for TASK-ID, or nil."
+  "Return plist (:title :desc :status :deps :parent) for TASK-ID, or nil."
   (let ((res (maduin-bd--run
               (format "bd show %s --json" task-id))))
     (if (/= 0 (car res))
@@ -152,7 +152,8 @@ Return t on success."
           (list :title (alist-get 'title (car data))
                 :desc (alist-get 'description (car data))
                 :status (alist-get 'status (car data))
-                :deps (maduin-bd--deps task-id)))))))
+                :deps (maduin-bd--deps task-id)
+                :parent (alist-get 'parent (car data))))))))
 
 (defun maduin-bd-remember (fact)
   "Store FACT as persistent memory via `bd remember'. Return t on success."
@@ -235,6 +236,16 @@ Return nil on failure."
                    q (car res) (cdr res)))
           nil)
       (maduin-bd--json-ids (cdr res)))))
+
+(defun maduin-bd-open-epics ()
+  "Return list of open epic ID strings, or nil.
+Query `status=open AND type=epic' — epics the run-loop may still need
+decomposing."
+  (maduin-bd-query "status=open AND type=epic"))
+
+(defun maduin-bd-epic-children (epic)
+  "Return list of child issue IDs under EPIC, or nil."
+  (maduin-bd-query (format "parent=%s" epic)))
 
 (defun maduin-bd-comment (id text)
   "Add TEXT as a comment on ID via `bd comment ID TEXT'. Return t on success."

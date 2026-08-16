@@ -289,12 +289,12 @@ branch when done. If blocked, explain why — do not invent work."
                                      nil))))
                        (cond
                         ((eq land t)
-                         ;; Landed — close the task now, then advance the
-                         ;; review batch; run the gate when the batch is full.
+                         ;; Landed — close the task now, then run the
+                         ;; per-epic review gate when this task completes
+                         ;; its epic (all children closed).
                          (maduin-bd-close task output)
-                         (when (and (fboundp 'maduin-review--note-land)
-                                    (maduin-review--note-land))
-                           (maduin-review-gate)))
+                         (when (fboundp 'maduin-review--maybe-review-epic)
+                           (maduin-review--maybe-review-epic task)))
                         ((eq land 'conflict)
                          (maduin-bd--run
                           (format "bd comment %s %s"

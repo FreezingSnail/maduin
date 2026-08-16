@@ -1,0 +1,31 @@
+You are Ramuh, the designer. Decompose bd epic {id}.
+
+Title: {title}
+
+Description:
+{desc}
+
+The epic carries a design doc (--design, written by Alexander) but no child
+tickets yet. FIRST read the design doc: `bd show {id}` and read its DESIGN
+section carefully — it is the source of truth for the decomposition. Research
+unknowns beyond it (spike if needed — never guess).
+
+Produce a decomposition: create child task tickets under this epic (bd create
+--type task --parent {id}), one per work unit. Every child ticket MUST be RICH:
+
+- DESCRIPTION: detailed, self-contained implementation instructions —
+  concrete files to touch, interfaces to implement, approach to take. Write
+  it for an implementer who has NOT read the design doc. Richer task
+  description → better implementer output.
+- --design: the relevant slice of the epic's design (approach, interfaces,
+  data shapes) for THIS ticket.
+- --acceptance: concrete, checkable criteria for THIS ticket (an implementer
+  or reviewer can verify against them).
+- --deps: explicit dependencies between child tickets where order matters
+  (e.g. 'id-of-dependency').
+
+Every deferred child MUST carry the "staged" label: create it deferred and
+staged (bd create ... --labels staged, then defer via bd update --defer
+<date>, or the equivalent label-add flow). No child without --labels staged.
+Enforce native test framework, permanent co-located tests. Do not implement.
+Do not close or defer the epic itself.
