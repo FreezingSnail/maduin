@@ -1,17 +1,25 @@
-;;; maduin-review.el --- batched drift-review gate (Odin)  -*- lexical-binding: t; -*-
+;;; maduin-review.el --- per-epic drift-review gate (Odin)  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Post-merge drift review.  Land first; after a batch of N tasks lands
-;; (or an epic's task group completes), an on-demand reviewer session
-;; (Odin: slugineer-reviewer) compares the merged diff against the
-;; group's design + acceptance and emits a single verdict line:
+;; Per-epic drift review.  Land first; when an epic's last child task
+;; lands and closes (all children closed), an on-demand reviewer
+;; session (Odin: slugineer-reviewer) runs once for THAT epic: it
+;; compares the epic's full change set (diff from the recorded start of
+;; its task group to HEAD) against the epic's goal (--design/--acceptance)
+;; and emits a single verdict line:
 ;;
-;;     REVIEW: APPROVED
-;;     REVIEW: DRIFT <feedback...>
+;;     REVIEW: APPROVED        (goal met)
+;;     REVIEW: DRIFT <feedback> (goal not met)
 ;;
-;; Deterministic gating (checkpoint, diff, blocking, verdict parsing)
-;; stays in elisp here.  The reviewer only supplies the verdict marker.
+;; APPROVED → the epic is closed (goal met).  DRIFT → a drift-fix task
+;; is created under the epic and the epic stays open; the fleet blocks
+;; on open drift-fix tasks until repaired.
+;;
+;; Deterministic gating (per-epic start, diff, blocking, verdict
+;; parsing) stays in elisp here.  The reviewer only supplies the
+;; verdict marker.  The old batched checkpoint (:start-sha/:landed) and
+;; batch-size trigger are deprecated.
 
 ;;; Code:
 
@@ -31,12 +39,14 @@
 (require 'maduin-session nil t)
 (require 'maduin-pipeline nil t)
 
-;;; Checkpoint
+;;; Per-epic diff start
 
-(defvar maduin-review--checkpoint nil
-  "Plist (:start-sha :landed) for the current review batch.
-:start-sha is the main HEAD SHA recorded at the start of the batch;
-:landed is the count of tasks landed since then.")
+(defvar maduin-review--epic-starts nil
+  "Alist ((EPIC-ID . START-SHA) ...) of per-epic diff start SHAs.
+START-SHA is the main HEAD recorded at the first land of a child of
+EPIC-ID (the pre-land parent of the first `land' merge commit).
+Kept in memory for the lifetime of the pipeline process; later lands
+keep the original start so the epic diff spans its full change set.")
 
 ;;; Logging
 
@@ -120,38 +130,67 @@ Reads the session's hidden run buffer via `maduin-session--run-buffer'."
 (defvar maduin-review--main-root-fn #'maduin-review--main-root
   "Function `()' → main repo root directory string.")
 
-;;; Checkpoint operations
+;;; Per-epic operations
 
-(defun maduin-review--mark-start ()
-  "Record current main HEAD SHA as :start-sha and reset :landed to 0.
-Return the checkpoint plist on success, nil when git fails."
-  (let* ((root (funcall maduin-review--main-root-fn))
-         (res (funcall maduin-review--git-output-fn root "rev-parse" "HEAD")))
-    (if (and res (= 0 (car res)))
-        (setq maduin-review--checkpoint
-              (list :start-sha (string-trim (cdr res)) :landed 0))
-      nil)))
+(defun maduin-review--note-epic-land (epic-id)
+  "Record the per-epic diff start for EPIC-ID on its first land.
+After a land merge, HEAD~1 is the pre-land main state; record it the
+first time a child of EPIC-ID lands (later lands keep the original
+start).  Return t when a new start was recorded, nil when already
+known or git failed."
+  (if (assoc epic-id maduin-review--epic-starts)
+      nil
+    (let* ((root (funcall maduin-review--main-root-fn))
+           (res (funcall maduin-review--git-output-fn root "rev-parse" "HEAD~1")))
+      (if (and res (= 0 (car res)))
+          (progn
+            (push (cons epic-id (string-trim (cdr res)))
+                  maduin-review--epic-starts)
+            t)
+        nil))))
 
-(defun maduin-review--note-land ()
-  "Increment :landed in the checkpoint.  Return t when the batch is full.
-Return nil (no-op) when review is disabled or the checkpoint is missing."
-  (when (and (maduin-review--enabled-p) maduin-review--checkpoint)
-    (let* ((n (1+ (or (plist-get maduin-review--checkpoint :landed) 0)))
-           (batch (or (maduin-review--config-get 'batch-size 3) 3)))
-      (setq maduin-review--checkpoint
-            (plist-put maduin-review--checkpoint :landed n))
-      (>= n batch))))
+(defun maduin-review--epic-diff (epic-id)
+  "Return EPIC-ID's full change set `git diff START..HEAD', or nil.
+START is the recorded per-epic start; when missing (e.g. after a
+pipeline restart) fall back to the last land's parent (HEAD~1) and log
+a warning."
+  (let* ((start (or (cdr (assoc epic-id maduin-review--epic-starts))
+                    (progn
+                      (maduin-review--log
+                       "epic %s: no recorded start SHA; diff limited to last land"
+                       epic-id)
+                      "HEAD~1")))
+         (root (funcall maduin-review--main-root-fn))
+         (res (funcall maduin-review--git-output-fn
+                       root "diff" (concat start "..HEAD"))))
+    (and res (= 0 (car res)) (cdr res))))
 
-(defun maduin-review--diff ()
-  "Return the batch diff text `git diff <start-sha>..HEAD', or nil.
-Requires a checkpoint with a non-nil :start-sha."
-  (let ((start (and maduin-review--checkpoint
-                    (plist-get maduin-review--checkpoint :start-sha))))
-    (when start
-      (let* ((root (funcall maduin-review--main-root-fn))
-             (res (funcall maduin-review--git-output-fn
-                           root "diff" (concat start "..HEAD"))))
-        (and res (= 0 (car res)) (cdr res))))))
+(defun maduin-review--epic-children-closed-p (epic-id)
+  "Return t when every child task of EPIC-ID is closed.
+An epic with no children is NOT complete (nil)."
+  (let ((children (funcall maduin-review--query-fn
+                           (format "parent=%s" epic-id))))
+    (and children
+         (cl-every (lambda (id)
+                     (let ((spec (condition-case nil
+                                     (funcall maduin-review--show-fn id)
+                                   (error nil))))
+                       (string= (or (plist-get spec :status) "") "closed")))
+                   children))))
+
+(defun maduin-review--maybe-review-epic (task-id)
+  "Run the per-epic review gate when closing TASK-ID completes its epic.
+Resolve TASK-ID's parent epic; when all children of that epic are now
+closed, record the epic's diff start if new, then run Odin once for
+the epic.  Return the gate verdict, or nil when the task has no epic,
+the epic is not complete, or review is disabled."
+  (let* ((spec (condition-case nil
+                   (funcall maduin-review--show-fn task-id)
+                 (error nil)))
+         (epic (and spec (plist-get spec :parent))))
+    (when (and epic (maduin-review--epic-children-closed-p epic))
+      (maduin-review--note-epic-land epic)
+      (maduin-review-gate epic))))
 
 ;;; Verdict parsing
 
@@ -207,10 +246,11 @@ Return the new task ID or nil."
                             (and res (car res)) (and res (cdr res)))
         nil))))
 
-;;; Landed-task design/acceptance context
+;;; Epic goal context
 
 (defun maduin-review--design-acceptance (id)
   "Return the DESIGN/ACCEPTANCE section text from `bd show ID', or nil.
+This is the epic's goal: its --design/--acceptance as set at creation.
 `bd show --json' does not expose design, so parse the human-readable
 output from the DESIGN section header onward."
   (let ((res (funcall maduin-review--run-fn
@@ -220,39 +260,24 @@ output from the DESIGN section header onward."
            (and (string-match "DESIGN[ \t]*\n" out)
                 (substring out (match-beginning 0)))))))
 
-(defun maduin-review--landed-context ()
-  "Gather design/acceptance context for landed tasks in the batch.
-Query closed tasks, then for each build a block from `maduin-bd-show'
-(title + description) plus the human-readable DESIGN/ACCEPTANCE section.
-Return a string, or nil when no landed tasks are found."
-  (let ((ids (funcall maduin-review--query-fn "status=closed AND type=task")))
-    (when ids
-      (mapconcat
-       (lambda (id)
-         (let ((spec (condition-case nil
-                         (funcall maduin-review--show-fn id)
-                       (error nil))))
-           (format "== %s: %s ==\n%s\n%s"
-                   id
-                   (or (plist-get spec :title) "")
-                   (or (plist-get spec :desc) "")
-                   (or (maduin-review--design-acceptance id) ""))))
-       ids "\n\n"))))
-
 ;;; Reviewer plan + wait
 
 (defun maduin-review--plan (diff context)
-  "Build the Odin reviewer plan from batch DIFF and design/acceptance CONTEXT."
+  "Build the Odin reviewer plan from EPIC-DIFF and goal CONTEXT.
+CONTEXT is the epic's goal (its --design/--acceptance section)."
   (format
    (concat
-    "You are Odin, the drift reviewer. Compare the merged diff below "
-    "against the group's design and acceptance criteria. Emit exactly one "
+    "You are Odin, the drift reviewer. An epic's task group has fully "
+    "landed and merged to main. Compare the merged diff below against "
+    "the epic's goal (design + acceptance criteria). Emit exactly one "
     "verdict line and stop:\n\n"
     "REVIEW: APPROVED\n"
     "or\n"
     "REVIEW: DRIFT <feedback...>\n\n"
-    "Batch diff:\n```\n%s\n```\n\n"
-    "Group design/acceptance:\n```\n%s\n```\n")
+    "APPROVED = the epic's goal is met. DRIFT = goal not met; the "
+    "feedback must say why and what to fix.\n\n"
+    "Epic diff:\n```\n%s\n```\n\n"
+    "Epic goal (design/acceptance):\n```\n%s\n```\n")
    (or diff "") (or context "")))
 
 (defun maduin-review--wait (sid)
@@ -266,57 +291,69 @@ Return the terminal status (`completed' or `failed')."
 
 ;;; Verdict dispatch
 
+(defun maduin-review--close-epic (epic-id)
+  "Close EPIC-ID with the review approval reason (goal met).
+Log and continue on failure — the epic stays open then."
+  (let ((res (funcall maduin-review--run-fn
+                      (format "bd close %s --reason %s"
+                              (shell-quote-argument epic-id)
+                              (shell-quote-argument
+                               "review gate: goal met (Odin approved)")))))
+    (unless (and res (= 0 (car res)))
+      (maduin-review--log "epic close failed (exit %s): %s"
+                          (and res (car res)) (and res (cdr res))))))
+
+(defun maduin-review--drop-epic-start (epic-id)
+  "Forget EPIC-ID's recorded diff start (after the epic closes)."
+  (setq maduin-review--epic-starts
+        (cl-remove-if (lambda (entry)
+                        (string= (car entry) epic-id))
+                      maduin-review--epic-starts)))
+
 (defun maduin-review--dispatch-verdict (verdict epic-id)
-  "Handle VERDICT from `maduin-review--verdict'.
-EPIC-ID, when given, is the batch's parent epic (comment target).
-Return `approved' (checkpoint reset), `drift' (drift-fix task + comment)
-or `error' (comment; never silent-fail).  The checkpoint is NOT reset for
-`drift' or `error'."
+  "Handle VERDICT from `maduin-review--verdict' for EPIC-ID.
+Return `approved' (epic closed, goal met), `drift' (drift-fix task +
+comments, epic stays open) or `error' (comment; never silent-fail)."
   (pcase verdict
     ('approved
-     (maduin-review--mark-start)
+     (maduin-review--close-epic epic-id)
+     (maduin-review--drop-epic-start epic-id)
      'approved)
     (`(drift . ,feedback)
      (let ((task (maduin-review--create-drift-fix feedback epic-id)))
        (when task
          (funcall maduin-review--comment-fn
                   task (format "drift detected by review gate: %s" feedback)))
-       (when epic-id
-         (funcall maduin-review--comment-fn
-                  epic-id (format "drift detected by review gate: %s" feedback)))
+       (funcall maduin-review--comment-fn
+                epic-id (format "drift detected by review gate: %s" feedback))
        'drift))
     (_
-     (if epic-id
-         (funcall maduin-review--comment-fn
-                  epic-id "review gate: no verdict marker in reviewer output (error)")
-       (maduin-review--log "gate error: no verdict marker; no epic id to comment"))
+     (funcall maduin-review--comment-fn
+              epic-id "review gate: no verdict marker in reviewer output (error)")
      'error)))
 
 ;;; Gate
 
-(defun maduin-review-gate (&optional epic-id)
-  "Run the batched drift-review gate (Odin).
-Mark the checkpoint start when empty, gather the batch diff plus the
-landed tasks' design/acceptance, spawn a reviewer session
-(`(maduin-session-run root model agent plan)'), wait for completion, read
-its output and parse the verdict.
+(defun maduin-review-gate (epic-id)
+  "Run the per-epic drift-review gate (Odin) for EPIC-ID.
+Gather the epic's full change set (recorded start .. HEAD) plus its
+design/acceptance goal, spawn a reviewer session
+(`(maduin-session-run root model agent plan)'), wait for completion,
+read its output and parse the verdict.
 
-EPIC-ID, when given, is the batch's parent epic (used as drift-fix parent
-and comment target).
+EPIC-ID is required — it is the review subject: its --design/--acceptance
+is the goal context and its recorded start bounds the diff.
 
 Return:
-  `approved'  → checkpoint reset (mark-start)
-  `drift'     → drift-fix task created + comment; checkpoint NOT reset
-  `error'     → comment; checkpoint NOT reset (never silent-fail)
+  `approved'  → goal met; EPIC-ID closed, recorded start dropped
+  `drift'     → goal not met; drift-fix task created + comments; EPIC-ID open
+  `error'     → comment on EPIC-ID; stays open (never silent-fail)
   nil         → review disabled"
   (if (not (maduin-review--enabled-p))
       nil
-    (when (or (null maduin-review--checkpoint)
-              (null (plist-get maduin-review--checkpoint :start-sha)))
-      (maduin-review--mark-start))
     (let* ((root (funcall maduin-review--main-root-fn))
-           (diff (maduin-review--diff))
-           (context (maduin-review--landed-context))
+           (diff (maduin-review--epic-diff epic-id))
+           (context (or (maduin-review--design-acceptance epic-id) ""))
            (plan (maduin-review--plan diff context))
            (model (or (maduin-review--config-get
                        'model "opencode-go/deepseek-v4-pro")
@@ -326,10 +363,8 @@ Return:
            (sid (funcall maduin-review--session-run-fn root model agent plan)))
       (if (not sid)
           (progn
-            (if epic-id
-                (funcall maduin-review--comment-fn
-                         epic-id "review gate: failed to spawn reviewer session (error)")
-              (maduin-review--log "gate error: failed to spawn reviewer session"))
+            (funcall maduin-review--comment-fn
+                     epic-id "review gate: failed to spawn reviewer session (error)")
             'error)
         (let ((status (maduin-review--wait sid))
               (output (funcall maduin-review--session-output-fn sid)))

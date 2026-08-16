@@ -138,7 +138,7 @@ Return t on success."
       nil)))
 
 (defun maduin-bd-show (task-id)
-  "Return plist (:title :desc :status :deps) for TASK-ID, or nil."
+  "Return plist (:title :desc :status :deps :parent) for TASK-ID, or nil."
   (let ((res (maduin-bd--run
               (format "bd show %s --json" task-id))))
     (if (/= 0 (car res))
@@ -152,7 +152,8 @@ Return t on success."
           (list :title (alist-get 'title (car data))
                 :desc (alist-get 'description (car data))
                 :status (alist-get 'status (car data))
-                :deps (maduin-bd--deps task-id)))))))
+                :deps (maduin-bd--deps task-id)
+                :parent (alist-get 'parent (car data))))))))
 
 (defun maduin-bd-remember (fact)
   "Store FACT as persistent memory via `bd remember'. Return t on success."

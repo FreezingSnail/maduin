@@ -1272,15 +1272,48 @@ Both nil if bd unavailable."
   (should (eq (maduin-review--verdict "no marker here") 'error))
   (should (eq (maduin-review--verdict nil) 'error)))
 
-(ert-deftest maduin-test-review-note-land-batch-trigger ()
+(ert-deftest maduin-test-review-epic-children-closed-p ()
   :tags '(maduin)
-  (let ((maduin-review--checkpoint '(:start-sha "abc" :landed 0)))
-    (should-not (maduin-review--note-land))
-    (should-not (maduin-review--note-land))
-    (should (maduin-review--note-land))
-    (should (= (plist-get maduin-review--checkpoint :landed) 3)))
-  ;; No checkpoint → no-op.
-  (should-not (maduin-review--note-land)))
+  (let ((maduin-review--query-fn (lambda (_q) '("t1" "t2")))
+        (maduin-review--show-fn (lambda (_id) (list :status "closed"))))
+    (should (maduin-review--epic-children-closed-p "epic-x")))
+  (let ((maduin-review--query-fn (lambda (_q) '("t1" "t2")))
+        (maduin-review--show-fn
+         (lambda (id)
+           (list :status (if (string= id "t2") "in_progress" "closed")))))
+    (should-not (maduin-review--epic-children-closed-p "epic-x")))
+  ;; no children → not complete.
+  (let ((maduin-review--query-fn (lambda (_q) nil))
+        (maduin-review--show-fn (lambda (_id) (list :status "closed"))))
+    (should-not (maduin-review--epic-children-closed-p "epic-x"))))
+
+(ert-deftest maduin-test-review-note-epic-land-records-once ()
+  :tags '(maduin)
+  (let ((maduin-review--epic-starts nil)
+        (maduin-review--main-root-fn (lambda () "/repo"))
+        (maduin-review--git-output-fn
+         (lambda (_dir &rest _args) (cons 0 "sha-pre-first\n"))))
+    (should (maduin-review--note-epic-land "epic-x"))
+    (should (equal (cdr (assoc "epic-x" maduin-review--epic-starts))
+                   "sha-pre-first"))
+    ;; later lands keep the original start.
+    (should-not (maduin-review--note-epic-land "epic-x"))))
+
+(ert-deftest maduin-test-review-epic-diff ()
+  :tags '(maduin)
+  (let ((maduin-review--epic-starts '(("epic-x" . "abc")))
+        (maduin-review--main-root-fn (lambda () "/repo"))
+        (maduin-review--git-output-fn
+         (lambda (_dir &rest args)
+           (cons 0 (mapconcat #'identity args " ")))))
+    (should (string-match-p "abc\\.\\.HEAD" (maduin-review--epic-diff "epic-x"))))
+  ;; missing start → fall back to last-land parent HEAD~1.
+  (let ((maduin-review--epic-starts nil)
+        (maduin-review--main-root-fn (lambda () "/repo"))
+        (maduin-review--git-output-fn
+         (lambda (_dir &rest args)
+           (cons 0 (mapconcat #'identity args " ")))))
+    (should (string-match-p "HEAD~1\\.\\.HEAD" (maduin-review--epic-diff "epic-x")))))
 
 (ert-deftest maduin-test-review-blocked-p ()
   :tags '(maduin)
@@ -1289,48 +1322,93 @@ Both nil if bd unavailable."
   (let ((maduin-review--query-fn (lambda (_q) nil)))
     (should-not (maduin-review--blocked-p))))
 
-(ert-deftest maduin-test-review-gate-approved-resets-checkpoint ()
+(ert-deftest maduin-test-review-gate-approved-closes-epic ()
   :tags '(maduin)
-  (let* ((maduin-review--checkpoint nil)
+  (let* ((maduin-review--epic-starts '(("epic-x" . "abc")))
+         (cmds nil)
          (maduin-review--main-root-fn (lambda () "/repo"))
          (maduin-review--git-output-fn
           (lambda (_dir &rest args)
-            (if (member "rev-parse" args)
-                (cons 0 "abc123\n")
-              (cons 0 "+fake diff\n"))))
+            (if (member "diff" args)
+                (cons 0 "+fake diff\n")
+              (cons 0 "abc\n"))))
          (maduin-review--query-fn (lambda (_q) nil))
          (maduin-review--session-run-fn (lambda (_w _m _a _p) "sid-1"))
          (maduin-review--complete-p-fn (lambda (_sid) 'completed))
-         (maduin-review--session-output-fn (lambda (_sid) "REVIEW: APPROVED\n")))
-    (should (eq (maduin-review-gate) 'approved))
-    (should (equal (plist-get maduin-review--checkpoint :start-sha) "abc123"))
-    (should (zerop (plist-get maduin-review--checkpoint :landed)))))
+         (maduin-review--session-output-fn (lambda (_sid) "REVIEW: APPROVED\n"))
+         (maduin-review--run-fn (lambda (cmd) (push cmd cmds) (cons 0 "")))
+         (maduin-review--comment-fn (lambda (_id _text) t)))
+    (should (eq (maduin-review-gate "epic-x") 'approved))
+    ;; goal met → epic closed.
+    (should (cl-find-if (lambda (c) (string-match-p "bd close epic-x" c)) cmds))
+    ;; approved → recorded start dropped.
+    (should-not (assoc "epic-x" maduin-review--epic-starts))))
 
 (ert-deftest maduin-test-review-gate-drift-creates-drift-fix ()
   :tags '(maduin)
-  (let* ((maduin-review--checkpoint '(:start-sha "old" :landed 5))
-         (created-cmd nil)
+  (let* ((maduin-review--epic-starts '(("epic-x" . "abc")))
+         (cmds nil)
          (maduin-review--main-root-fn (lambda () "/repo"))
-         (maduin-review--git-output-fn (lambda (_dir &rest _args) (cons 0 "diff")))
+         (maduin-review--git-output-fn
+          (lambda (_dir &rest _args) (cons 0 "diff")))
          (maduin-review--query-fn (lambda (_q) nil))
          (maduin-review--session-run-fn (lambda (_w _m _a _p) "sid-1"))
          (maduin-review--complete-p-fn (lambda (_sid) 'completed))
          (maduin-review--session-output-fn
           (lambda (_sid) "REVIEW: DRIFT fix the widget\n"))
-         (maduin-review--run-fn
-          (lambda (cmd) (setq created-cmd cmd) (cons 0 "drift-task-1\n")))
+         (maduin-review--run-fn (lambda (cmd) (push cmd cmds) (cons 0 "drift-task-1\n")))
          (maduin-review--comment-fn (lambda (_id _text) t)))
-    (should (eq (maduin-review-gate) 'drift))
-    (should (string-match-p "drift-fix" created-cmd))
-    (should (string-match-p "widget" created-cmd))
-    ;; checkpoint NOT reset on drift.
-    (should (equal (plist-get maduin-review--checkpoint :start-sha) "old"))
-    (should (= (plist-get maduin-review--checkpoint :landed) 5))))
+    (should (eq (maduin-review-gate "epic-x") 'drift))
+    (should (cl-find-if (lambda (c) (string-match-p "drift-fix" c)) cmds))
+    (should (cl-find-if (lambda (c) (string-match-p "widget" c)) cmds))
+    ;; drift → epic stays open: no close, recorded start preserved.
+    (should-not (cl-find-if (lambda (c) (string-match-p "bd close epic-x" c)) cmds))
+    (should (equal (cdr (assoc "epic-x" maduin-review--epic-starts)) "abc"))))
 
 (ert-deftest maduin-test-review-gate-disabled ()
   :tags '(maduin)
   (let ((maduin-config '((reviewer (enabled . nil)))))
-    (should (null (maduin-review-gate)))))
+    (should (null (maduin-review-gate "epic-x")))))
+
+(ert-deftest maduin-test-review-maybe-review-epic-when-complete ()
+  :tags '(maduin)
+  (let* ((gate-called nil)
+         (maduin-review--epic-starts nil)
+         (maduin-review--show-fn
+          (lambda (_id) (list :parent "epic-x" :status "closed")))
+         (maduin-review--query-fn (lambda (_q) '("t1")))
+         (maduin-review--main-root-fn (lambda () "/repo"))
+         (maduin-review--git-output-fn
+          (lambda (_dir &rest _args) (cons 0 "sha\n"))))
+    (cl-letf (((symbol-function 'maduin-review-gate)
+               (lambda (epic) (setq gate-called epic) 'approved)))
+      (should (eq (maduin-review--maybe-review-epic "t1") 'approved))
+      (should (string= gate-called "epic-x"))
+      ;; start recorded before the gate ran.
+      (should (equal (cdr (assoc "epic-x" maduin-review--epic-starts)) "sha")))))
+
+(ert-deftest maduin-test-review-maybe-review-epic-not-complete ()
+  :tags '(maduin)
+  (let* ((gate-called nil)
+         (maduin-review--show-fn
+          (lambda (id)
+            (if (string= id "t1")
+                (list :parent "epic-x" :status "in_progress")
+              (list :status "in_progress"))))
+         (maduin-review--query-fn (lambda (_q) '("t1" "t2"))))
+    (cl-letf (((symbol-function 'maduin-review-gate)
+               (lambda (_epic) (setq gate-called t) 'approved)))
+      (should (null (maduin-review--maybe-review-epic "t1")))
+      (should-not gate-called))))
+
+(ert-deftest maduin-test-review-maybe-review-epic-no-parent ()
+  :tags '(maduin)
+  (let* ((gate-called nil)
+         (maduin-review--show-fn (lambda (_id) (list :status "closed" :parent nil))))
+    (cl-letf (((symbol-function 'maduin-review-gate)
+               (lambda (_epic) (setq gate-called t) 'approved)))
+      (should (null (maduin-review--maybe-review-epic "orphan")))
+      (should-not gate-called))))
 
 (provide 'maduin-test)
 
