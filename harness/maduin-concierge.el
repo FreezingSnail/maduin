@@ -4,14 +4,14 @@
 
 ;; Concierge role (Alexander) — the Summoner's single point of contact.
 ;; Summoned on demand per epic discussion via the interactive opencode TUI
-;; (maduin-terminal.el); dismissed after the epic is hashed out.  The
+;; (maduin-terminal.el); dismissed after the epic design doc is filed.  The
 ;; session is NOT persistent — continuity flows through the export →
 ;; handoff note written by `maduin-terminal-dismiss'.
 ;;
-;; The concierge captures the Summoner's idea into an epic and files it
-;; plus HIGH-LEVEL (deferred) tasks in bd — via its own bd calls inside
-;; the TUI, not here.  This module only opens/prises the TUI and dismisses
-;; it.  Detailed design is Ramuh's job, later.
+;; The concierge captures the Summoner's idea into an epic and WRITES the
+;; design doc on it (bd update <epic> --design) — via its own bd calls
+;; inside the TUI, not here.  This module only opens/prises the TUI and
+;; dismisses it.  Task decomposition is Ramuh's job, later.
 
 ;;; Code:
 
@@ -59,7 +59,7 @@
 (defun maduin-concierge ()
   "Summon the concierge (Alexander) in an interactive opencode TUI.
 Opens the terminal buffer primed with the concierge role template so the
-Summoner can hash out an epic into HIGH-LEVEL (deferred) bd tasks.
+Summoner can turn an idea into an epic with a design doc written on it.
 Return the terminal buffer."
   (interactive)
   (funcall maduin-concierge--terminal-open-fn
@@ -69,7 +69,7 @@ Return the terminal buffer."
 (defun maduin-concierge-dismiss ()
   "Dismiss the concierge session for `maduin-concierge--seat'.
 Export the conversation to a handoff note and kill the TUI buffer (via
-`maduin-terminal-dismiss').  The epic + high-level tasks are filed in bd
+`maduin-terminal-dismiss').  The epic + design doc are filed in bd
 by the concierge during the session.  Return the handoff note, or nil."
   (interactive)
   (let ((note (funcall maduin-concierge--terminal-dismiss-fn

@@ -958,9 +958,9 @@ Both nil if bd unavailable."
   (let ((tmpl (maduin-terminal--template "concierge")))
     (should (stringp tmpl))
     (should (string-match-p "epic" tmpl))
-    (should (string-match-p "HIGH-LEVEL" tmpl))
-    (should (string-match-p "--defer" tmpl))
-    (should (string-match-p "Do not design" tmpl))
+    (should (string-match-p "--design" tmpl))
+    (should (string-match-p "design doc" tmpl))
+    (should (string-match-p "Do not decompose" tmpl))
     (should (string-match-p "Do not implement" tmpl))))
 
 ;;; 18. integration (entry point wiring)
@@ -1035,7 +1035,7 @@ Both nil if bd unavailable."
                       (error nil)))))
     (unwind-protect
         (when (and epic task)
-          ;; 1. concierge files a HIGH-LEVEL (deferred) task.
+          ;; 1. a deferred task is filed for the designer (Ramuh).
           (should (maduin-bd-defer task))
           ;; 2. designer fills design + stages (defer + staged label).
           (should (maduin-gate-stage task "design body" "acceptance body"))
