@@ -964,6 +964,12 @@ Both nil if bd unavailable."
     (should (string-match-p "--parent" tmpl))
     (should (string-match-p "staged" (downcase tmpl)))
     (should (string-match-p "--design" tmpl))
+    (should (string-match-p "--acceptance" tmpl))
+    (should (string-match-p "--deps" tmpl))
+    (should (string-match-p "implementation instructions" (downcase tmpl)))
+    (should (string-match-p "files" (downcase tmpl)))
+    (should (string-match-p "interfaces" (downcase tmpl)))
+    (should (string-match-p "bd show" tmpl))
     (should (string-match-p "do not implement" (downcase tmpl)))
     (should (string-match-p "do not close" (downcase tmpl)))))
 
