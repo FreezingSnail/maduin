@@ -12,8 +12,8 @@
 ;;   - maduin-dispatch OWNS spawn/concurrency (claim, seat pick, session run).
 ;;
 ;; Staging is NOT reimplemented here: the design session performs it via
-;; bd CLI (defer + label staged), mirroring `maduin-gate-stage' (which
-;; remains the deterministic elisp API used by the approval gate).
+;; bd CLI (defer + label staged). Review UI lives in chaplet (separate
+;; repo); the consume path for approved work is `bd ready`.
 ;;
 ;; Drop-in: `maduin-designer-drop-in' opens a live TUI on the Ramuh seat
 ;; so the Summoner can clarify a design mid-flight.

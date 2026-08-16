@@ -30,7 +30,6 @@
 (require 'maduin-concierge)
 (require 'maduin-designer)
 (require 'maduin-cockpit)
-(require 'maduin-gate)
 
 ;;; Minor mode
 
@@ -42,9 +41,6 @@
     (define-key map (kbd "C-c s d") #'maduin-concierge-dismiss)
     (define-key map (kbd "C-c s n") #'maduin-designer-drop-in)
     (define-key map (kbd "C-c s p") #'maduin-designer-pending-tasks)
-    (define-key map (kbd "C-c s g a") #'maduin-gate-approve)
-    (define-key map (kbd "C-c s g r") #'maduin-gate-reject)
-    (define-key map (kbd "C-c s g l") #'maduin-gate-staged-list)
     map)
   "Keymap for `maduin-mode'.")
 
@@ -186,7 +182,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 ;;; Dev reload — edit-then-reload loop for developing the harness itself.
 
 (defvar maduin--feature-list
-  '(maduin-designer maduin-gate maduin-dispatch
+  '(maduin-designer maduin-dispatch
     maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline maduin-handoff
     maduin-agent maduin-session maduin-brain
     maduin-bd-bridge maduin-config)

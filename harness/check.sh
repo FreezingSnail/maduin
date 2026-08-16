@@ -33,7 +33,6 @@ FILES=(
   "maduin-brain.el"
   "maduin-workspace.el"
   "maduin-terminal.el"
-  "maduin-gate.el"
   "maduin-agent.el"
   "maduin-pipeline.el"
   "maduin-review.el"
