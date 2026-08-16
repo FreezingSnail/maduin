@@ -141,7 +141,7 @@ harness/
 
 - **Exit codes lie.** `opencode run` exits 0 even on permission rejection.
   maduin parses NDJSON events (`step_finish.reason`, `tool_use.state.status`)
-  for the real completion signal. See `output.md` for the substrate spike.
+  for the real completion signal (see the session substrate in `maduin-session.el`).
 - **Buffers, not tmux.** Each seat is an Emacs buffer named
   `*maduin/{role}-{seat}*`.
 - **Shared state only via bd + brain.** Per-seat workspaces are isolated;

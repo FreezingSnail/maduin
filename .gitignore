@@ -24,3 +24,8 @@ austen/
 
 # Per-seat worktrees (real git worktrees; never track in main)
 harness/workspaces/
+
+# Agent working files / legacy
+output.md
+claude.md
+CLAUDE.md
