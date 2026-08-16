@@ -403,6 +403,38 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (should-not (maduin-workspace-exists-p "no-such-seat-xyz")))
 
+(ert-deftest maduin-test-workspace-ensure-real-worktree ()
+  :tags '(maduin)
+  (let ((seat "maduin-ws-probe")
+        (wt nil))
+    (unwind-protect
+        (progn
+          (setq wt (maduin-workspace-ensure seat))
+          (should wt)
+          (should (file-directory-p wt))
+          (should (maduin-workspace-exists-p seat))
+          (should (maduin-bd-worktree-real-p wt))
+          ;; `git -C WT rev-parse --show-toplevel' must resolve INSIDE the
+          ;; worktree (not the main repo), proving it is a real git worktree.
+          (let ((top (string-trim
+                      (with-temp-buffer
+                        (call-process shell-file-name nil t nil
+                                      shell-command-switch
+                                      (format "git -C %s rev-parse --show-toplevel"
+                                              (shell-quote-argument wt)))
+                        (buffer-string)))))
+            (should (string= (directory-file-name (file-truename top))
+                             (directory-file-name (file-truename wt))))))
+      ;; Cleanup: remove the worktree registration and its branch.
+      (ignore-errors
+        (when (and wt (maduin-bd-worktree-real-p wt))
+          (call-process shell-file-name nil nil nil shell-command-switch
+                        (format "git worktree remove --force %s"
+                                (shell-quote-argument wt)))
+          (call-process shell-file-name nil nil nil shell-command-switch
+                        (format "git branch -D %s"
+                                (shell-quote-argument seat))))))))
+
 (ert-deftest maduin-test-bootstrap-no-error ()
   :tags '(maduin)
   (condition-case err

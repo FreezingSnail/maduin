@@ -298,21 +298,65 @@ Handle detached worktrees (no branch line)."
   (when (string-match "Created worktree: \\([^\n]+\\)" output)
     (string-trim (match-string 1 output))))
 
-(defun maduin-bd-worktree-create (path &optional branch)
-  "Create worktree at PATH via `bd worktree create PATH --branch BRANCH'.
-BRANCH defaults to the basename of PATH.  Return worktree path string or nil."
+(defun maduin-bd-worktree-real-p (dir)
+  "Return non-nil if DIR is a registered git worktree.
+A real worktree resolves `git -C DIR rev-parse --show-toplevel' to DIR
+itself (an empty or stale directory resolves to the main repo instead).
+Symlinks are resolved via `file-truename' on both sides so path aliases
+(e.g. a symlinked project root) do not yield false negatives."
+  (let* ((d (directory-file-name (file-truename dir)))
+         (res (maduin-bd--run
+               (format "git -C %s rev-parse --show-toplevel"
+                       (shell-quote-argument d)))))
+    (and (= 0 (car res))
+         (string= (directory-file-name
+                   (file-truename (string-trim (cdr res))))
+                  d))))
+
+(defun maduin-bd-worktree-add (path &optional branch)
+  "Create git worktree at PATH on new branch BRANCH via `git worktree add'.
+BRANCH defaults to the basename of PATH.  Falls back to checking out an
+existing BRANCH when creating a new one fails (branch may already exist).
+Return PATH on success, nil on failure."
   (let* ((branch (or branch (file-name-nondirectory (directory-file-name path))))
          (res (maduin-bd--run
-               (format "bd worktree create %s --branch %s"
+               (format "git worktree add %s -b %s"
                        (shell-quote-argument path)
                        (shell-quote-argument branch)))))
     (if (= 0 (car res))
-        (or (maduin-bd-worktree--parse-created-path (cdr res))
-            path)
-      (maduin-bd--log-error
-       (format "bd worktree create %s failed (exit %d): %s"
-               path (car res) (cdr res)))
-      nil)))
+        path
+      ;; Branch may already exist from a prior attempt: check it out directly.
+      (let ((res2 (maduin-bd--run
+                   (format "git worktree add %s %s"
+                           (shell-quote-argument path)
+                           (shell-quote-argument branch)))))
+        (if (= 0 (car res2))
+            path
+          (maduin-bd--log-error
+           (format "git worktree add %s failed (exit %d): %s"
+                   path (car res2) (cdr res2)))
+          nil)))))
+
+(defun maduin-bd-worktree-create (path &optional branch)
+  "Create worktree at PATH via `bd worktree create PATH --branch BRANCH'.
+BRANCH defaults to the basename of PATH.  Fall back to `git worktree add'
+when bd fails or the result is not a real worktree.
+Return worktree path string or nil."
+  (let* ((branch (or branch (file-name-nondirectory (directory-file-name path))))
+         (res (maduin-bd--run
+                (format "bd worktree create %s --branch %s"
+                        (shell-quote-argument path)
+                        (shell-quote-argument branch)))))
+    (if (= 0 (car res))
+        (let ((created (or (maduin-bd-worktree--parse-created-path (cdr res))
+                           path)))
+          (if (maduin-bd-worktree-real-p created)
+              created
+            (maduin-bd--log-error
+             (format "bd worktree create reported success but %s is not a real worktree; falling back to git"
+                     created))
+            (maduin-bd-worktree-add path branch)))
+      (maduin-bd-worktree-add path branch))))
 
 (defun maduin-bd-worktree-list ()
   "Return alist ((name . path) ...) from `bd worktree list'.

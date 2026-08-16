@@ -36,23 +36,49 @@ Resolved under the current project root."
   "Return non-nil if a worktree for SEAT-NAME exists (per bd worktree list)."
   (not (null (cdr (assoc seat-name (maduin-bd-worktree-list))))))
 
+(defun maduin-workspace--remove-stale (dir)
+  "Remove stale worktree DIR when it is an empty (non-worktree) directory.
+Return t when DIR is gone (removed or never existed), nil when DIR exists
+but cannot be safely removed (non-empty)."
+  (cond
+   ((not (file-exists-p dir)) t)
+   ((not (file-directory-p dir)) nil)
+   ((directory-empty-p dir)
+    (condition-case nil
+        (progn (delete-directory dir) t)
+      (error nil)))
+   (t nil)))
+
+(defun maduin-workspace--create (seat-name target)
+  "Create a REAL git worktree for SEAT-NAME at TARGET.
+Return worktree path on success, nil otherwise."
+  (make-directory (maduin-workspace--root) t)
+  (let ((created (maduin-bd-worktree-create
+                  target (maduin-workspace-branch seat-name))))
+    (if (and created (maduin-bd-worktree-real-p created))
+        created
+      (maduin-workspace--log-warning
+       (format "worktree create failed for seat %s" seat-name))
+      nil)))
+
 (defun maduin-workspace-ensure (seat-name)
-  "Return worktree path for SEAT-NAME, creating it if missing.
-Reuse existing worktree when present.  Return nil if creation fails."
-  (let ((existing (cdr (assoc seat-name (maduin-bd-worktree-list)))))
-    (if existing
-        existing
-      (make-directory (maduin-workspace--root) t)
-      ;; bd worktree create accepts a path; pass full path under
-      ;; workspaces root so `workspace-path' and actual location agree.
-      (let ((target (maduin-workspace-path seat-name)))
-        (if (file-exists-p target)
-            target
-          (or (maduin-bd-worktree-create target)
-              (progn
-                (maduin-workspace--log-warning
-                 (format "worktree create failed for seat %s" seat-name))
-                nil)))))))
+  "Return worktree path for SEAT-NAME, creating a REAL git worktree if missing.
+Reuse an existing real worktree when present.  A stale directory (e.g. an
+empty dir left by a prior bootstrap) is removed before creating the
+worktree.  Return nil if creation fails."
+  (let ((target (maduin-workspace-path seat-name)))
+    (cond
+     ;; Already a real, registered worktree → reuse.
+     ((maduin-bd-worktree-real-p target) target)
+     ;; Stale path (empty dir, not a worktree) → clear then create.
+     ((file-exists-p target)
+      (if (maduin-workspace--remove-stale target)
+          (maduin-workspace--create seat-name target)
+        (maduin-workspace--log-warning
+         (format "worktree path %s exists but is not a worktree and not empty; refusing to replace"
+                 target))
+        nil))
+     (t (maduin-workspace--create seat-name target)))))
 
 (provide 'maduin-workspace)
 

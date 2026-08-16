@@ -21,3 +21,6 @@ austen/
 # Local agent tooling (not shared)
 .claude/
 .codex/
+
+# Per-seat worktrees (real git worktrees; never track in main)
+harness/workspaces/
