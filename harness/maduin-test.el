@@ -932,6 +932,63 @@ Both nil if bd unavailable."
           (should-not maduin-dispatch--timer))
       (maduin-dispatch-stop))))
 
+(ert-deftest maduin-test-dispatch-soft-stop-drains ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (deleted '())
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--draining nil)
+         (maduin-dispatch--timer nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--land-fn (lambda (_seat) t))
+         (maduin-dispatch--close-fn (lambda (_t _o) t))
+         (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-implement "t1")
+          (should (= (length maduin-dispatch--active) 1))
+          ;; Soft stop: draining set, in-flight session NOT deleted.
+          (maduin-dispatch-stop)
+          (should maduin-dispatch--draining)
+          (should (= (length maduin-dispatch--active) 1))
+          (should-not deleted)
+          ;; Run-loop is a no-op while draining (no new picks).
+          (let ((maduin-dispatch--ready-fn (lambda () '("t2"))))
+            (maduin-dispatch-run-loop)
+            (should (= (length maduin-dispatch--active) 1)))
+          ;; Last session completes → drained + deleted.
+          (maduin-dispatch--on-complete "s-1" 'completed)
+          (should-not maduin-dispatch--draining)
+          (should-not maduin-dispatch--active)
+          (should (member "s-1" deleted)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-hard-stop-deletes ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (deleted '())
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--draining nil)
+         (maduin-dispatch--timer nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-implement "t1")
+          (should (= (length maduin-dispatch--active) 1))
+          (maduin-dispatch-stop t)          ; hard
+          (should-not maduin-dispatch--active)
+          (should (member "s-1" deleted))
+          (should-not maduin-dispatch--draining))
+      (delete-directory dir t))))
+
 ;;; 16. designer (Ramuh)
 
 (ert-deftest maduin-test-designer-functions-exist ()
@@ -1108,11 +1165,11 @@ Both nil if bd unavailable."
          (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
     (unwind-protect
         (progn
-          (maduin-stop)
+          (maduin-stop t)                  ; hard stop tears down live sessions
           (should-not maduin-dispatch--timer)
           (should-not maduin-dispatch--active)
           (should (member "s-stop-1" deleted)))
-      (maduin-dispatch-stop))))
+      (maduin-dispatch-stop t))))
 
 ;;; 19. full-loop integration (mock opencode, chained seams)
 

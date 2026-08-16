@@ -76,6 +76,10 @@ ROLE is a symbol: `implementer', `designer' or `repairer'.")
 (defvar maduin-dispatch--timer nil
   "Run-loop timer, or nil when dispatchers are inactive.")
 
+(defvar maduin-dispatch--draining nil
+  "Non-nil while a soft stop is draining in-flight sessions.
+The run-loop picks up no new work while draining.")
+
 ;;; Config access
 
 (defun maduin-dispatch--config-section (section)
@@ -277,7 +281,14 @@ while work is in flight)."
           (if (eq status 'completed)
               (maduin-dispatch--complete entry sid)
             (maduin-dispatch--fail entry))
-        (funcall maduin-dispatch--session-delete-fn sid)))))
+        (funcall maduin-dispatch--session-delete-fn sid))
+      (maduin-dispatch--maybe-drained))))
+
+(defun maduin-dispatch--maybe-drained ()
+  "Signal soft-stop completion when draining and no sessions remain."
+  (when (and maduin-dispatch--draining (null maduin-dispatch--active))
+    (setq maduin-dispatch--draining nil)
+    (message "maduin stopped (drained)")))
 
 ;;; Public API
 
@@ -301,10 +312,12 @@ Return a session handle, or nil when a repairer is already active."
 
 (defun maduin-dispatch-run-loop ()
   "One tick: poll ready bd tasks and dispatch implement for each.
-Stops spawning once the implementer concurrency cap is reached."
-  (let ((ready (funcall maduin-dispatch--ready-fn)))
-    (dolist (task ready)
-      (maduin-dispatch-implement task))))
+Stops spawning once the implementer concurrency cap is reached.
+No-op while draining (soft stop in progress)."
+  (unless maduin-dispatch--draining
+    (let ((ready (funcall maduin-dispatch--ready-fn)))
+      (dolist (task ready)
+        (maduin-dispatch-implement task)))))
 
 ;;; Lifecycle
 
@@ -332,13 +345,24 @@ run-loop timer.  Spawns NO sessions."
           (run-at-time interval interval #'maduin-dispatch-run-loop)))
   t)
 
-(defun maduin-dispatch-stop ()
-  "Deactivate dispatchers: cancel the run-loop timer and hand off any
-live sessions (delete them; tasks stay open)."
+(defun maduin-dispatch-stop (&optional hard)
+  "Deactivate dispatchers.  Cancel the run-loop timer.
+Without HARD (default): soft stop — stop picking up new work and let
+in-flight sessions drain; `maduin-dispatch--on-complete' signals
+\"drained\" when the last session finishes.  With HARD non-nil:
+immediately delete any live sessions (tasks stay open)."
   (when maduin-dispatch--timer
     (cancel-timer maduin-dispatch--timer)
     (setq maduin-dispatch--timer nil))
-  (maduin-dispatch--handoff-live))
+  (if hard
+      (maduin-dispatch--handoff-live)
+    (if maduin-dispatch--active
+        (progn
+          (setq maduin-dispatch--draining t)
+          (message "maduin: draining %d session(s)..."
+                   (length maduin-dispatch--active)))
+      (setq maduin-dispatch--draining nil)
+      (message "maduin stopped"))))
 
 (maduin-dispatch--register-hook)
 

@@ -113,14 +113,17 @@ concurrency cap).  Idle = zero sessions."
   (message "maduin started (dispatchers active, 0 sessions)"))
 
 ;;;###autoload
-(defun maduin-stop ()
+(defun maduin-stop (&optional hard)
   "Stop dispatchers and tear down any live sessions.
-Calls `maduin-dispatch-stop' (cancels the run-loop timer and hands off
-in-flight sessions), then gracefully stops any remaining legacy agent
-sessions via `maduin-handoff-stop-all'.  Never aborts on error."
-  (interactive)
+
+Soft stop by default: stop picking up new work and let in-flight
+sessions finish (drain).  With a prefix argument (\\[universal-argument]),
+HARD is non-nil and live sessions are deleted immediately.  Then
+gracefully stops any remaining legacy agent sessions via
+`maduin-handoff-stop-all'.  Never aborts on error."
+  (interactive "P")
   (condition-case err
-      (maduin-dispatch-stop)
+      (maduin-dispatch-stop hard)
     (error
      (message "maduin: dispatch-stop error (continuing): %s"
               (error-message-string err))))
@@ -130,7 +133,8 @@ sessions via `maduin-handoff-stop-all'.  Never aborts on error."
     (error
      (message "maduin: handoff error (continuing): %s"
               (error-message-string err))))
-  (message "maduin stopped"))
+  (when (and hard (null maduin-dispatch--active))
+    (message "maduin stopped")))
 
 ;;;###autoload
 (defun maduin-status ()
@@ -143,9 +147,9 @@ sessions via `maduin-handoff-stop-all'.  Never aborts on error."
 
 ;;;###autoload
 (defun maduin-restart ()
-  "Stop then start all agents."
+  "Hard-stop then start all agents."
   (interactive)
-  (maduin-stop)
+  (maduin-stop t)
   (maduin-start))
 
 ;;;###autoload
@@ -181,7 +185,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 
 ;;; Shutdown hook
 
-(add-hook 'kill-emacs-hook #'maduin-stop)
+(add-hook 'kill-emacs-hook (lambda () (maduin-stop t)))
 
 ;;; Dev reload — edit-then-reload loop for developing the harness itself.
 
@@ -200,7 +204,7 @@ Gracefully stops agents first, preserving handoff caches."
   (interactive)
   (when (or (not (called-interactively-p 'interactive))
             (y-or-n-p "Stop running agents and reload maduin? "))
-    (maduin-stop)
+    (maduin-stop t)
     (dolist (feat maduin--feature-list)
       (unload-feature feat 'force))
     (let ((dir (file-name-directory (locate-library "maduin"))))
