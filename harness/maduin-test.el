@@ -372,6 +372,19 @@ Mimics an opencode subprocess so session tests need no real CLI."
             (error (should t))))
       (kill-buffer buf))))
 
+(ert-deftest maduin-test-cockpit-seat-status-dispatch ()
+  :tags '(maduin)
+  ;; Demand-driven mode: seat status must come from the dispatch active
+  ;; registry, not the (absent) legacy seat buffers.
+  (let ((maduin-dispatch--active
+         '((:handle "h1" :seat "ifrit" :role implementer :task "bd-1"))))
+    (let ((status (maduin-cockpit--seat-status "ifrit")))
+      (should (eq (plist-get status :status) 'working))
+      (should (equal (plist-get status :task) "bd-1"))))
+  ;; Idle seat with no dispatch entry falls back to legacy (nil → dead).
+  (let ((maduin-dispatch--active nil))
+    (should (null (maduin-cockpit--seat-status "ifrit")))))
+
 ;;; 9. main
 
 (ert-deftest maduin-test-main-commands-exist ()

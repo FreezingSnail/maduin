@@ -18,6 +18,7 @@
 (require 'maduin-agent)
 (require 'maduin-pipeline)
 (require 'maduin-config)
+(require 'maduin-dispatch nil t) ; guarded: dispatch may not exist standalone
 
 ;; maduin-handoff.el may not exist yet; guard the require.
 (condition-case nil
@@ -60,10 +61,30 @@
   (let ((uptime (and status (plist-get status :uptime))))
     (if uptime (number-to-string (round uptime)) "—")))
 
+(defun maduin-cockpit--dispatch-entry (seat)
+  "Return the dispatch active entry for SEAT, or nil.
+An active entry is a plist (:handle :seat :role :task) from
+`maduin-dispatch--active'.  Demand-driven dispatch has no persistent
+seat buffers, so this registry is the source of truth for in-flight work."
+  (when (boundp 'maduin-dispatch--active)
+    (cl-find-if (lambda (e) (string= (plist-get e :seat) seat))
+                maduin-dispatch--active)))
+
+(defun maduin-cockpit--seat-status (seat)
+  "Return a status plist for SEAT, preferring dispatch-active state.
+Falls back to `maduin-agent-status' (legacy seat-buffer model) when no
+dispatch entry is in flight."
+  (let ((entry (maduin-cockpit--dispatch-entry seat)))
+    (if entry
+        (list :status 'working
+              :task (plist-get entry :task)
+              :uptime nil)
+      (maduin-agent-status seat))))
+
 (defun maduin-cockpit--rows ()
   "Return tabulated-list rows for all configured seats."
   (cl-loop for (seat . role) in (maduin-cockpit--seats)
-           for status = (maduin-agent-status seat)
+           for status = (maduin-cockpit--seat-status seat)
            collect (list seat
                          (vector seat role
                                  (maduin-cockpit--status-string
