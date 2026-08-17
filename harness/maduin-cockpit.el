@@ -15,17 +15,11 @@
 (add-to-list 'load-path (file-name-directory (or load-file-name buffer-file-name)))
 
 (require 'maduin-session)
-(require 'maduin-agent)
 (require 'maduin-pipeline)
 (require 'maduin-config)
 (require 'maduin-bd-bridge)
 (require 'maduin-dispatch)
 (require 'maduin-cockpit-face)
-
-;; maduin-handoff.el may not exist yet; guard the require.
-(condition-case nil
-    (require 'maduin-handoff)
-  (error nil))
 
 ;; chaplet (optional) — embedded inbox.  Symbols are fboundp-guarded at
 ;; runtime and declared here so this file byte-compiles without chaplet.
@@ -61,10 +55,8 @@ timer and only happens while the cockpit buffer is visible.")
   "Keymap for the cockpit buffer.")
 
 (defconst maduin-cockpit--bindings
-  '(("RET" . maduin-cockpit-attach)
-    ("r"   . maduin-cockpit-refresh)
+  '(("r"   . maduin-cockpit-refresh)
     ("q"   . quit-window)
-    ("k"   . maduin-cockpit-kill)
     ("i"   . maduin-cockpit-inbox))
   "Cockpit keybindings as ((KEY . DEF) ...), KEY a `kbd' string.
 Single source of truth; mirrored into evil normal/motion states when
@@ -75,7 +67,7 @@ evil is available.")
   "Single-char motions suppressed in evil states only.
 In the read-only cockpit these would leak into visual/change state;
 they are bound to nil in evil normal/motion states while the plain map
-keeps only the shared RET/r/q/k/i bindings.")
+keeps only the shared r/q/i bindings.")
 
 (defun maduin-cockpit--bind (key def)
   "Bind KEY (a `kbd' string) to DEF in the plain cockpit map and, when
@@ -157,27 +149,19 @@ nil statuses render as plain text (\"dead\" when nil)."
 (defun maduin-cockpit--seat-status (seat)
   "Return rich plist for SEAT:
 \(:seat :role :status :task-id :task-title :model :uptime :phase).
-A dispatch entry wins for :role/:status/:task-id; absent fields fall
-back to `maduin-agent-status'.  :phase stays nil until sessions expose
-it.  Never signals."
+Fields come solely from the dispatch entry (`maduin-dispatch--active');
+no entry → idle row.  :phase stays nil until sessions expose it.
+Never signals."
   (let* ((entry (cl-find-if (lambda (e) (equal (plist-get e :seat) seat))
-                            maduin-dispatch--active))
-         (agent (maduin-agent-status seat)))
+                            maduin-dispatch--active)))
     (list :seat seat
-          :role (or (and entry (plist-get entry :role))
-                    (and agent (plist-get agent :role)))
-          :status (or (and entry (plist-get entry :status))
-                      (and entry 'working)
-                      (and agent (plist-get agent :status)))
-          :task-id (or (and entry (plist-get entry :task))
-                       (and agent (plist-get agent :task)))
+          :role (and entry (plist-get entry :role))
+          :status (and entry (or (plist-get entry :status) 'working))
+          :task-id (and entry (plist-get entry :task))
           :task-title (maduin-cockpit--task-title
-                       (or (and entry (plist-get entry :task))
-                           (and agent (plist-get agent :task))))
-          :model (or (and entry (plist-get entry :model))
-                     (and agent (plist-get agent :model)))
-          :uptime (or (and entry (plist-get entry :uptime))
-                      (and agent (plist-get agent :uptime)))
+                       (and entry (plist-get entry :task)))
+          :model (and entry (plist-get entry :model))
+          :uptime (and entry (plist-get entry :uptime))
           :phase nil)))
 
 (defun maduin-cockpit--task-string (status)
@@ -390,22 +374,6 @@ older Emacs falls back to the timer-only poll)."
     (add-hook 'maduin-session-on-complete-hook #'maduin-cockpit--on-complete))
   (when (boundp 'window-buffer-change-functions)
     (add-hook 'window-buffer-change-functions #'maduin-cockpit--on-window-change)))
-
-(defun maduin-cockpit-attach ()
-  "Switch to the agent buffer named by the row under point."
-  (interactive)
-  (let ((id (tabulated-list-get-id)))
-    (unless id
-      (error "maduin-cockpit: no agent on this line"))
-    (maduin-session-switch id)))
-
-(defun maduin-cockpit-kill ()
-  "Kill the agent under point."
-  (interactive)
-  (let ((id (tabulated-list-get-id)))
-    (unless id
-      (error "maduin-cockpit: no agent on this line"))
-    (maduin-agent-kill id)))
 
 (provide 'maduin-cockpit)
 

@@ -20,8 +20,6 @@
 
 (require 'maduin-config)
 (require 'maduin-session)
-(require 'maduin-agent)
-(require 'maduin-handoff)
 (require 'maduin-pipeline)
 (require 'maduin-workspace)
 (require 'maduin-terminal)
@@ -36,7 +34,6 @@
 (defvar maduin-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c s s") #'maduin-status)
-    (define-key map (kbd "C-c s a") #'maduin-attach)
     (define-key map (kbd "C-c s c") #'maduin-concierge)
     (define-key map (kbd "C-c s d") #'maduin-concierge-dismiss)
     (define-key map (kbd "C-c s n") #'maduin-designer-drop-in)
@@ -131,7 +128,7 @@ aborts on error."
   (interactive)
   (maduin-cockpit-refresh)
   (message "maduin: %d sessions | %s"
-           (length (maduin-session-list))
+           (length maduin-dispatch--active)
            (maduin-cockpit--pipeline-summary)))
 
 ;;;###autoload
@@ -140,16 +137,6 @@ aborts on error."
   (interactive)
   (maduin-stop t)
   (maduin-start))
-
-;;;###autoload
-(defun maduin-attach (seat)
-  "Attach to SEAT's session buffer.
-SEAT is chosen by completing-read from configured seats."
-  (interactive
-   (list (completing-read "Attach to seat: "
-                          (mapcar #'car (maduin--seats))
-                          nil t)))
-  (maduin-session-switch seat))
 
 ;;;###autoload
 (defun maduin-bootstrap ()
@@ -180,8 +167,8 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 
 (defvar maduin--feature-list
   '(maduin-designer maduin-dispatch
-    maduin-cockpit-face maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline maduin-handoff
-    maduin-agent maduin-session maduin-brain
+    maduin-cockpit-face maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline
+    maduin-session
     maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")
 

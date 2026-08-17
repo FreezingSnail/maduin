@@ -1,22 +1,14 @@
-;;; maduin-session.el --- autonomous one-shot sessions + legacy seat buffers  -*- lexical-binding: t; -*-
+;;; maduin-session.el --- autonomous one-shot sessions  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Two substrates share this file.
-;;
-;; 1. AUTONOMOUS (one-shot) substrate — the current interface:
-;;    `maduin-session-run' spawns `opencode run --format json --auto'
-;;    in a worktree, parses the NDJSON event stream for a structured
-;;    completion signal (`step_finish.reason` + `tool_use.state.status`),
-;;    and exposes diff/delete via `opencode export` / `opencode session
-;;    delete`.  The process exit code is deliberately NOT trusted —
-;;    permission denials can exit 0 — completion is parsed from events.
-;;
-;; 2. LEGACY seat-buffer substrate (compat shims) — kept so pipeline /
-;;    agent / resolver / cockpit keep working until the dispatch
-;;    machinery (bd .5) rebuilds orchestration on top of the new
-;;    interface.  Each seat lives in one buffer backed by a long-lived
-;;    opencode TUI subprocess driven by `process-send-string'.
+;; AUTONOMOUS (one-shot) substrate — the current interface:
+;; `maduin-session-run' spawns `opencode run --format json --auto'
+;; in a worktree, parses the NDJSON event stream for a structured
+;; completion signal (`step_finish.reason` + `tool_use.state.status`),
+;; and exposes diff/delete via `opencode export` / `opencode session
+;; delete`.  The process exit code is deliberately NOT trusted —
+;; permission denials can exit 0 — completion is parsed from events.
 
 ;;; Code:
 
@@ -320,129 +312,6 @@ when the opencode session was deleted, nil otherwise."
                       (list maduin-opencode-command "session" "delete" real))))
             (and res (= 0 (car res))))
         nil))))
-
-;;; ====================================================================
-;;; Legacy seat-buffer substrate (compat shims — superseded by .5)
-;;; ====================================================================
-
-(defvar maduin-session-on-exit-hook nil
-  "Hooks run when an agent process exits.")
-
-;; Buffer-local seat state.
-(defvar maduin-seat nil)
-(defvar maduin-role nil)
-(defvar maduin-model nil)
-(defvar maduin-agent nil)
-(defvar maduin-status nil)
-(defvar maduin-started-at nil)
-(defvar maduin-current-task nil)
-(defvar maduin-intent nil
-  "Intended opencode command (list) when no process could be spawned.")
-(defvar maduin-workdir nil)
-
-(defun maduin-session--buffer-name (role seat)
-  "Buffer name for ROLE seat SEAT."
-  (format "*maduin/%s-%s*" role seat))
-
-(defun maduin-session--buffer (seat-name)
-  "Find agent buffer whose `maduin-seat' is SEAT-NAME."
-  (cl-find-if
-   (lambda (buf)
-     (and (buffer-live-p buf)
-          (local-variable-p 'maduin-seat buf)
-          (string= (buffer-local-value 'maduin-seat buf) seat-name)))
-   (buffer-list)))
-
-(defun maduin-session--sentinel (proc event)
-  "Sentinel for agent process PROC.  EVENT is the exit string."
-  (let ((buf (process-buffer proc)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (setq maduin-status 'dead)
-        (setq maduin-current-task nil)
-        (message "maduin: session %s exited (%s)"
-                 maduin-seat event))
-      (run-hooks 'maduin-session-on-exit-hook))))
-
-(defun maduin-session-create (seat-name role model &optional workdir agent)
-  "Create session buffer for SEAT-NAME with ROLE, MODEL and AGENT in WORKDIR.
-WORKDIR defaults to the project root (via `maduin-project-root',
-falling back to `default-directory') when omitted.  AGENT is the opencode
-agent name passed via `--agent' after `--model'; it is omitted from the
-spawned command and intent when nil or empty.
-
-Return the buffer.  Launches opencode as subprocess when the CLI is
-available; otherwise still returns a buffer holding the spawn intent
-in `maduin-intent' with status `dead'."
-  (let* ((buf (get-buffer-create (maduin-session--buffer-name role seat-name)))
-         (workdir (or workdir
-                      (if (fboundp 'maduin-project-root)
-                          (maduin-project-root)
-                        default-directory)))
-         (exe (executable-find maduin-opencode-command)))
-    (with-current-buffer buf
-      (when (fboundp 'compilation-mode)
-        (compilation-mode))
-      (setq-local maduin-seat seat-name)
-      (setq-local maduin-role role)
-      (setq-local maduin-model model)
-      (setq-local maduin-agent agent)
-      (setq-local maduin-status 'running)
-      (setq-local maduin-started-at (float-time))
-      (setq-local maduin-current-task nil)
-      (setq-local maduin-workdir workdir)
-      (setq-local maduin-intent
-                  (append (list maduin-opencode-command "--model" model)
-                          (when (and agent (not (string-empty-p agent)))
-                            (list "--agent" agent))))
-      (if exe
-          (progn
-            (make-process
-             :name (format "maduin-%s-%s" role seat-name)
-             :buffer buf
-             :command (append (list exe "--model" model)
-                              (when (and agent (not (string-empty-p agent)))
-                                (list "--agent" agent)))
-             :sentinel #'maduin-session--sentinel)
-            (set-process-query-on-exit-flag (get-buffer-process buf) nil))
-        (setq maduin-status 'dead)
-        (message "maduin: opencode not found; session %s created without process"
-                 seat-name)))
-    buf))
-
-(defun maduin-session-kill (seat-name)
-  "Kill process and buffer for SEAT-NAME.  Return non-nil if anything was killed."
-  (let* ((buf (maduin-session--buffer seat-name))
-         (proc (and buf (get-buffer-process buf)))
-         (had (or (and proc (process-live-p proc))
-                  (and buf (buffer-live-p buf)))))
-    (when (and proc (process-live-p proc))
-      (ignore-errors (kill-process proc)))
-    (when (and buf (buffer-live-p buf))
-      (ignore-errors (kill-buffer buf)))
-    (and had t)))
-
-(defun maduin-session-list ()
-  "Return alist ((SEAT-NAME . STATUS) ...) of all agent sessions."
-  (cl-loop for buf in (buffer-list)
-           when (and (buffer-live-p buf)
-                     (local-variable-p 'maduin-seat buf))
-           collect (cons (buffer-local-value 'maduin-seat buf)
-                         (buffer-local-value 'maduin-status buf))))
-
-(defun maduin-session-switch (seat-name)
-  "Switch to buffer of SEAT-NAME.  Signal error if missing."
-  (let ((buf (maduin-session--buffer seat-name)))
-    (unless buf
-      (error "maduin: no session for seat %s" seat-name))
-    (switch-to-buffer buf)))
-
-(defun maduin-session-alive-p (seat-name)
-  "Return t when SEAT-NAME has a live process and status not `dead'."
-  (let* ((buf (maduin-session--buffer seat-name))
-         (proc (and buf (get-buffer-process buf)))
-         (status (and buf (buffer-local-value 'maduin-status buf))))
-    (and proc (process-live-p proc) (not (eq status 'dead)))))
 
 (provide 'maduin-session)
 

@@ -188,8 +188,7 @@ otherwise verify the seat branch exists (`git rev-parse --verify') and
 (defun maduin-pipeline--fleet-busy-count ()
   "Return number of in-flight fleet (implementer) sessions.
 Reads `maduin-dispatch--active' — the demand-driven dispatch registry,
-the source of truth for in-flight work — instead of the legacy
-`maduin-agent-status' seat-buffer model.  Returns 0 when dispatch is
+the source of truth for in-flight work.  Returns 0 when dispatch is
 not loaded (pipeline may load standalone)."
   (if (boundp 'maduin-dispatch--active)
       (cl-count-if (lambda (e) (eq (plist-get e :role) 'implementer))

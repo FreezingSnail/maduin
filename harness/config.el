@@ -29,8 +29,7 @@
     (repairer . ((enabled . t) (agent . "slugineer-repairer")
                  (esper . "phoenix") (model . "opencode-go/deepseek-v4-pro")
                  (max-retries . 3)))
-    (brain . ((path . ".agents/brain") (prime-files . ("architecture.md" "conventions.md"))))
-    (welfare . ((handoff-enabled . t) (handoff-timeout . 120) (blameless . t)))
+    (welfare . ((handoff-timeout . 120)))
     (workspaces . ((path . "harness/workspaces") (land-on-stop . t)))))
 
 (provide 'maduin-config)

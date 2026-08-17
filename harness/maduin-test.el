@@ -2,8 +2,8 @@
 
 ;;; Commentary:
 
-;; ERT 測試覆蓋 harness 各組件：config、brain、bd-bridge、session、
-;; agent、handoff、pipeline、cockpit、main。全部標記
+;; ERT 測試覆蓋 harness 各組件：config、bd-bridge、session、
+;; handoff、pipeline、cockpit、main。全部標記
 ;; :tags '(maduin)。bd 實測以 condition-case 守護，
 ;; 環境無 bd 時測試仍通過。
 
@@ -25,9 +25,7 @@
 
 (require 'maduin)
 (require 'maduin-bd-bridge)
-(require 'maduin-brain)
 (require 'maduin-session)
-(require 'maduin-agent)
 (require 'maduin-handoff)
 (require 'maduin-pipeline)
 (require 'maduin-cockpit)
@@ -42,14 +40,6 @@
 (defun maduin-test--temp-dir ()
   "Return a new temporary directory path."
   (make-temp-file "sh-test-" t))
-
-(defun maduin-test--fake-opencode ()
-  "Create executable script that sleeps 60s; return its path.
-Mimics an opencode subprocess so session tests need no real CLI."
-  (let ((f (make-temp-file "sh-fake-opencode-" nil ".sh")))
-    (with-temp-file f (insert "#!/bin/sh\nsleep 60\n"))
-    (set-file-modes f #o755)
-    f))
 
 (defun maduin-test--bd-forget-matching (substr)
   "Forget all bd memories whose key contains SUBSTR.  Never errors."
@@ -120,48 +110,10 @@ Mimics an opencode subprocess so session tests need no real CLI."
                  "opencode-go/deepseek-v4-flash"))
   (should-not (maduin-dispatch--seat-fallback 'designer)))
 
-(ert-deftest maduin-test-config-welfare-handoff-enabled ()
-  :tags '(maduin)
-  (let ((welfare (cdr (assq 'welfare maduin-config))))
-    (should (eq (alist-get 'handoff-enabled welfare) t))))
-
 (ert-deftest maduin-test-config-poll-interval ()
   :tags '(maduin)
   (let ((fleet (cdr (assq 'fleet maduin-config))))
     (should (= (alist-get 'poll-interval fleet) 30))))
-
-;;; 2. brain
-
-(ert-deftest maduin-test-brain-write-read ()
-  :tags '(maduin)
-  (let* ((dir (maduin-test--temp-dir))
-         (maduin-config `((brain . ((path . ,dir))))))
-    (unwind-protect
-        (progn
-          (should (maduin-brain-write "notes/test.md" "# hello"))
-          (should (file-exists-p (expand-file-name "notes/test.md" dir)))
-          (should (string= (maduin-brain-read "notes/test.md") "# hello")))
-      (delete-directory dir t))))
-
-(ert-deftest maduin-test-brain-read-missing ()
-  :tags '(maduin)
-  (let* ((dir (maduin-test--temp-dir))
-         (maduin-config `((brain . ((path . ,dir))))))
-    (unwind-protect
-        (should (null (maduin-brain-read "ghost.md")))
-      (delete-directory dir t))))
-
-(ert-deftest maduin-test-brain-list ()
-  :tags '(maduin)
-  (let* ((dir (maduin-test--temp-dir))
-         (maduin-config `((brain . ((path . ,dir))))))
-    (unwind-protect
-        (progn
-          (maduin-brain-write "a.md" "A")
-          (maduin-brain-write "sub/b.md" "B")
-          (should (equal (sort (maduin-brain-list) #'string<)
-                         '("a.md" "sub/b.md"))))
-      (delete-directory dir t))))
 
 ;;; 3. bd-bridge
 
@@ -275,25 +227,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
       (should (string-match-p "t1" seen))
       (should (string-match-p "--status open" seen)))))
 
-;;; 4. session
-
-(ert-deftest maduin-test-session-create-kill ()
-  :tags '(maduin)
-  (let* ((script (maduin-test--fake-opencode))
-         (maduin-opencode-command script)
-         (buf (maduin-session-create "fake-seat" "crew" "test-model"
-                                            default-directory)))
-    (unwind-protect
-        (progn
-          (should (buffer-live-p buf))
-          (should (maduin-session-alive-p "fake-seat"))
-          (should (assoc "fake-seat" (maduin-session-list)))
-          (should (maduin-session-kill "fake-seat"))
-          (should-not (maduin-session-alive-p "fake-seat")))
-      (delete-file script)
-      (when (buffer-live-p buf) (kill-buffer buf)))))
-
-;;; 4b. autonomous session substrate (opencode run + NDJSON)
+;;; 4. autonomous session substrate (opencode run + NDJSON)
 
 (ert-deftest maduin-test-session-parse-step-finish-stop ()
   :tags '(maduin)
@@ -401,25 +335,6 @@ Mimics an opencode subprocess so session tests need no real CLI."
           (should (eq (maduin-session-complete-p sid) 'failed)))
       (ignore-errors (maduin-session-delete sid))
       (delete-directory dir t))))
-
-;;; 5. agent
-
-(ert-deftest maduin-test-agent-status-nonexistent ()
-  :tags '(maduin)
-  (should (null (maduin-agent-status "no-such-seat"))))
-
-(ert-deftest maduin-test-agent-prime-no-error ()
-  :tags '(maduin)
-  (let* ((maduin-opencode-command "no-such-opencode-cli-xyz")
-         (buf (maduin-session-create "prime-seat" "crew" "test-model"
-                                            default-directory)))
-    (unwind-protect
-        (progn
-          (condition-case nil
-              (progn (maduin-agent-prime "prime-seat") (should t))
-            (error (should t))))
-      (maduin-session-kill "prime-seat")
-      (when (buffer-live-p buf) (kill-buffer buf)))))
 
 ;;; 6. handoff
 
@@ -573,34 +488,17 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (cl-letf (((symbol-value 'maduin-dispatch--active)
              (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1")))
-            ((symbol-function 'maduin-agent-status)
-             (lambda (_seat) (list :status 'idle :task "t0" :uptime 42.0 :model "m0" :role 'designer)))
             ((symbol-function 'maduin-bd--run)
              (lambda (_cmd) (cons 0 "[{\"title\": \"T1 title\"}]"))))
     (let ((st (maduin-cockpit--seat-status "ifrit")))
       (should (equal (plist-get st :seat) "ifrit"))
-      (should (eq (plist-get st :role) 'implementer))    ; dispatch wins
+      (should (eq (plist-get st :role) 'implementer))
       (should (eq (plist-get st :status) 'working))      ; dispatch ⇒ working
-      (should (equal (plist-get st :task-id) "t1"))      ; dispatch wins
+      (should (equal (plist-get st :task-id) "t1"))
       (should (equal (plist-get st :task-title) "T1 title"))
-      (should (equal (plist-get st :model) "m0"))
-      (should (equal (plist-get st :uptime) 42.0))
-      (should (null (plist-get st :phase)))
-      (should (= (length st) 16)))))                      ; 8 keys
-
-(ert-deftest maduin-test-cockpit-seat-status-fallback ()
-  :tags '(maduin)
-  (cl-letf (((symbol-value 'maduin-dispatch--active) nil)
-            ((symbol-function 'maduin-agent-status)
-             (lambda (_seat) (list :status 'running :task "t9" :uptime 7.0 :model "m9" :role 'concierge)))
-            ((symbol-function 'maduin-bd--run)
-             (lambda (_cmd) (cons 0 "[{\"title\": \"T9 title\"}]"))))
-    (let ((st (maduin-cockpit--seat-status "shiva")))
-      (should (eq (plist-get st :status) 'running))
-      (should (equal (plist-get st :task-id) "t9"))
-      (should (equal (plist-get st :task-title) "T9 title"))
-      (should (equal (plist-get st :model) "m9"))
-      (should (equal (plist-get st :role) 'concierge)))))
+      (should (null (plist-get st :model)))              ; dispatch entry has none
+      (should (null (plist-get st :uptime)))
+      (should (null (plist-get st :phase))))))
 
 (ert-deftest maduin-test-cockpit-task-title-success ()
   :tags '(maduin)
@@ -937,17 +835,16 @@ Mimics an opencode subprocess so session tests need no real CLI."
 
 (ert-deftest maduin-test-cockpit-evil-plain-map-bindings ()
   :tags '(maduin)
-  ;; Plain map carries RET/r/q/k/i via the single-source-of-truth helper.
-  (should (eq (lookup-key maduin-cockpit-map (kbd "RET"))
-              'maduin-cockpit-attach))
+  ;; Plain map carries r/q/i via the single-source-of-truth helper.
   (should (eq (lookup-key maduin-cockpit-map (kbd "r"))
               'maduin-cockpit-refresh))
   (should (eq (lookup-key maduin-cockpit-map (kbd "q"))
               'quit-window))
-  (should (eq (lookup-key maduin-cockpit-map (kbd "k"))
-              'maduin-cockpit-kill))
   (should (eq (lookup-key maduin-cockpit-map (kbd "i"))
               'maduin-cockpit-inbox))
+  ;; Attach/kill removed: RET and k are unbound in the plain map.
+  (should-not (lookup-key maduin-cockpit-map (kbd "RET")))
+  (should-not (lookup-key maduin-cockpit-map (kbd "k")))
   ;; Leak suppression is evil-only: plain map must NOT bind "v".
   (should-not (lookup-key maduin-cockpit-map (kbd "v"))))
 
@@ -1020,7 +917,6 @@ Mimics an opencode subprocess so session tests need no real CLI."
                maduin-stop
                maduin-status
                maduin-restart
-                maduin-attach
                 maduin-concierge
                 maduin-concierge-dismiss
                 maduin-bootstrap))
@@ -2052,32 +1948,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
       (maduin-test--bd-delete task)
       (maduin-test--bd-delete epic))))
 
-;;; 20. v0.3 — agent resolution + batched review gate (Odin)
-
-(ert-deftest maduin-test-agent-for-role-mapping ()
-  :tags '(maduin)
-  (should (equal (maduin-agent--for-role 'implementer) "slugineer-worker"))
-  (should (equal (maduin-agent--for-role "implementer") "slugineer-worker"))
-  (should (equal (maduin-agent--for-role 'designer) "slugineer-planner-designer"))
-  (should (equal (maduin-agent--for-role "concierge") "slugineer-planner-concierge"))
-  (should (null (maduin-agent--for-role 'reviewer)))
-  (should (null (maduin-agent--for-role "unknown")))
-  (should (null (maduin-agent--for-role nil))))
-
-(ert-deftest maduin-test-session-create-agent-intent ()
-  :tags '(maduin)
-  (let ((maduin-opencode-command "no-such-opencode-cli-xyz"))
-    (let ((buf (maduin-session-create "agent-seat-xyz" 'implementer "test-model"
-                                      default-directory "slugineer-worker")))
-      (unwind-protect
-          (progn
-            (should (buffer-live-p buf))
-            (let ((intent (buffer-local-value 'maduin-intent buf)))
-              (should (member "--agent" intent))
-              (should (member "slugineer-worker" intent))
-              (should (member "--model" intent))))
-        (maduin-session-kill "agent-seat-xyz")
-        (when (buffer-live-p buf) (kill-buffer buf))))))
+;;; 20. v0.3 — batched review gate (Odin)
 
 (ert-deftest maduin-test-review-verdict-approved ()
   :tags '(maduin)
