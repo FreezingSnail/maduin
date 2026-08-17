@@ -374,6 +374,50 @@ Mimics an opencode subprocess so session tests need no real CLI."
             (error (should t))))
       (kill-buffer buf))))
 
+;;; 8b. cockpit-face
+
+(ert-deftest maduin-test-cockpit-face-state-face-known ()
+  :tags '(maduin)
+  (dolist (s '(dead idle working running repairing))
+    (should (facep (maduin-cockpit-state-face s))))
+  (should (null (maduin-cockpit-state-face 'unknown)))
+  (should (null (maduin-cockpit-state-face nil))))
+
+(ert-deftest maduin-test-cockpit-face-state-color-known ()
+  :tags '(maduin)
+  (dolist (s '(dead idle working running repairing))
+    (let ((c (maduin-cockpit-state-color s)))
+      (should (stringp c))
+      (should (> (length c) 0))))
+  (should (null (maduin-cockpit-state-color 'unknown)))
+  (should (null (maduin-cockpit-state-color nil))))
+
+(ert-deftest maduin-test-cockpit-face-chip-face-known ()
+  :tags '(maduin)
+  (dolist (k '(queued active completed blocked fleet-free fleet-busy))
+    (should (facep (maduin-cockpit-chip-face k))))
+  (should (null (maduin-cockpit-chip-face 'unknown))))
+
+(ert-deftest maduin-test-cockpit-face-setup-creates-all ()
+  :tags '(maduin)
+  (maduin-cockpit-face-setup)
+  (dolist (f maduin-cockpit-face--pill-faces)
+    (should (facep f))))
+
+(ert-deftest maduin-test-cockpit-face-adapt-batch-safe ()
+  :tags '(maduin)
+  (condition-case nil
+      (progn (maduin-cockpit-face-adapt) (should t))
+    (error (should nil))))
+
+(ert-deftest maduin-test-cockpit-face-adapt-pill-box ()
+  :tags '(maduin)
+  (maduin-cockpit-face-adapt)
+  (if (display-graphic-p)
+      (dolist (f maduin-cockpit-face--pill-faces)
+        (should (eq (face-attribute f :box nil 'default) t)))
+    (should t)))
+
 ;;; 9. main
 
 (ert-deftest maduin-test-main-commands-exist ()
