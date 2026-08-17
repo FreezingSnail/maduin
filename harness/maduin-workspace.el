@@ -18,6 +18,44 @@ Resolved under the current project root."
          (path (or (cdr (assq 'path workspaces)) "harness/workspaces")))
     (expand-file-name path (maduin-project-root))))
 
+(defun maduin-workspace--git (dir &rest args)
+  "Run `git -C DIR ARGS...' via shell; return exit status.
+Output is discarded.  Uses `call-process-shell-command' so the
+exit status is available programmatically."
+  (let ((default-directory dir)
+        (cmd (format "git -C %s %s"
+                     (shell-quote-argument dir)
+                     (mapconcat #'shell-quote-argument args " "))))
+    (call-process-shell-command cmd nil nil)))
+
+(defun maduin-workspace--git-output (dir &rest args)
+  "Run `git -C DIR ARGS...'; return (STATUS . OUTPUT)."
+  (let* ((default-directory dir)
+         (cmd (format "git -C %s %s"
+                      (shell-quote-argument dir)
+                      (mapconcat #'shell-quote-argument args " ")))
+         (buf (get-buffer-create " *maduin-workspace-git*")))
+    (with-current-buffer buf (erase-buffer))
+    (cons (call-process-shell-command cmd nil buf)
+          (with-current-buffer buf (buffer-string)))))
+
+(defun maduin-workspace--main-root ()
+  "Return main maduin repo root.
+Prefer the directory containing maduin.el, else
+`default-directory'."
+  (or (and (locate-library "maduin")
+           (file-name-directory (locate-library "maduin")))
+      (expand-file-name default-directory)))
+
+(defvar maduin-workspace--git-fn #'maduin-workspace--git
+  "Function `(dir &rest args)' → exit status.  Injection seam for tests.")
+
+(defvar maduin-workspace--git-output-fn #'maduin-workspace--git-output
+  "Function `(dir &rest args)' → (STATUS . OUTPUT).  Injection seam for tests.")
+
+(defvar maduin-workspace--main-root-fn #'maduin-workspace--main-root
+  "Function `()' → main repo root.  Injection seam for tests.")
+
 (defun maduin-workspace--log-warning (msg)
   "Log MSG as warning via maduin-log if available, else `message'."
   (if (fboundp 'maduin-log)
@@ -79,6 +117,51 @@ worktree.  Return nil if creation fails."
                  target))
         nil))
      (t (maduin-workspace--create seat-name target)))))
+
+(defun maduin-workspace-cleanup (seat-name)
+  "Remove SEAT-NAME worktree and branch; idempotent, never throws.
+Return t on success or when there is nothing to clean (worktree dir
+missing, branch already gone), nil when git operations fail.
+Steps: 1) worktree missing → t; 2) verify branch exists from main
+root; missing → t (skip delete); 3) `git worktree remove --force';
+failure → warning + nil; 4) `git branch -D' from main root; failure
+→ warning + nil; 5) `git worktree prune'; failure → warning only,
+still t."
+  (condition-case err
+      (let* ((wt (maduin-workspace-path seat-name))
+             (branch (maduin-workspace-branch seat-name))
+             (main (funcall maduin-workspace--main-root-fn)))
+        (if (not (file-directory-p wt))
+            t
+          (let ((verify (funcall maduin-workspace--git-output-fn
+                                 main "rev-parse" "--verify" branch)))
+            (if (/= 0 (car verify))
+                t
+              (if (/= 0 (funcall maduin-workspace--git-fn
+                                 wt "worktree" "remove" "--force" wt))
+                  (progn
+                    (maduin-workspace--log-warning
+                     (format "cleanup seat %s: worktree remove failed: %s"
+                             seat-name wt))
+                    nil)
+                (if (/= 0 (funcall maduin-workspace--git-fn
+                                   main "branch" "-D" branch))
+                    (progn
+                      (maduin-workspace--log-warning
+                       (format "cleanup seat %s: branch -D failed for %s"
+                               seat-name branch))
+                      nil)
+                  (progn
+                    (when (/= 0 (funcall maduin-workspace--git-fn
+                                         main "worktree" "prune"))
+                      (maduin-workspace--log-warning
+                       (format "cleanup seat %s: worktree prune failed (ignored)"
+                               seat-name)))
+                    t)))))))
+    (error
+     (maduin-workspace--log-warning
+      (format "cleanup seat %s: unexpected error: %s" seat-name err))
+     nil)))
 
 (provide 'maduin-workspace)
 

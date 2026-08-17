@@ -299,6 +299,14 @@ branch when done. If blocked, explain why — do not invent work."
                          ;; its epic (all children closed).
                          (maduin-bd-close task output
                                            (funcall maduin-pipeline--worktree-path-fn seat-name))
+                         ;; Landed and task closed — remove the seat
+                         ;; worktree + branch so the next task starts from a
+                         ;; fresh checkout of updated main.  Result is
+                         ;; log-only; never blocks or throws on close.
+                         (let ((cleanup (maduin-workspace-cleanup seat-name)))
+                           (unless cleanup
+                             (maduin-workspace--log-warning
+                              (format "workspace-cleanup failed for seat %s" seat-name))))
                          (when (fboundp 'maduin-review--maybe-review-epic)
                            (maduin-review--maybe-review-epic task)))
                         ((eq land 'conflict)

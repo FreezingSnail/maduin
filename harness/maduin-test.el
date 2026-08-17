@@ -534,6 +534,147 @@ Mimics an opencode subprocess so session tests need no real CLI."
                         (format "git branch -D %s"
                                 (shell-quote-argument seat))))))))
 
+(ert-deftest maduin-test-workspace-cleanup-removes-real-worktree ()
+  :tags '(maduin)
+  ;; Scratch repo: git init + seed commit off the harness dir, then a REAL
+  ;; worktree + branch, all under a temp dir.  Seams point cleanup at the
+  ;; scratch repo; after cleanup the worktree is unregistered and the branch
+  ;; is gone.  Never touches the real main repo.
+  (let* ((dir (maduin-test--temp-dir))
+         (wt (expand-file-name "wt" dir))
+         (branch "cleanup-branch-xyz")
+         (result nil)
+         (maduin-workspace--main-root-fn (lambda () dir)))
+    (unwind-protect
+        (progn
+          (maduin-workspace--git dir "init" "-q")
+          (maduin-workspace--git dir "config" "user.email" "t@example.com")
+          (maduin-workspace--git dir "config" "user.name" "Test")
+          (write-region "seed\n" nil (expand-file-name "seed.txt" dir))
+          (maduin-workspace--git dir "add" "-A")
+          (maduin-workspace--git dir "commit" "-q" "-m" "seed")
+          (maduin-workspace--git dir "worktree" "add" wt "-b" branch)
+          (should (maduin-bd-worktree-real-p wt))
+          (cl-letf (((symbol-function 'maduin-workspace-path) (lambda (_s) wt))
+                    ((symbol-function 'maduin-workspace-branch) (lambda (_s) branch)))
+            (setq result (maduin-workspace-cleanup "test-seat")))
+          (should (eq result t))
+          (should-not (maduin-bd-worktree-real-p wt))
+          (should (/= 0 (car (maduin-workspace--git-output
+                              dir "rev-parse" "--verify" branch)))))
+      (ignore-errors (delete-directory wt t))
+      (ignore-errors (maduin-workspace--git dir "worktree" "prune"))
+      (ignore-errors (delete-directory dir t)))))
+
+(ert-deftest maduin-test-workspace-cleanup-missing-worktree ()
+  :tags '(maduin)
+  ;; Worktree dir missing → t immediately, no git calls at all.
+  (let* ((dir (maduin-test--temp-dir))
+         (maduin-workspace--main-root-fn (lambda () dir))
+         (maduin-workspace--git-fn (lambda (&rest _) (error "git-fn must not run")))
+         (maduin-workspace--git-output-fn
+          (lambda (&rest _) (error "git-output-fn must not run"))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-workspace-path)
+                   (lambda (_s) (expand-file-name "no-such-wt" dir)))
+                  ((symbol-function 'maduin-workspace-branch)
+                   (lambda (_s) "missing-branch-xyz")))
+          (should (eq (maduin-workspace-cleanup "test-seat") t)))
+      (ignore-errors (delete-directory dir t)))))
+
+(ert-deftest maduin-test-workspace-cleanup-remove-failure ()
+  :tags '(maduin)
+  ;; Branch verifies, but `git worktree remove' fails → nil + warning,
+  ;; tree left (no delete-directory fallback).
+  (let* ((dir (maduin-test--temp-dir))
+         (wt (expand-file-name "wt" dir))
+         (logged nil)
+         (maduin-workspace--main-root-fn (lambda () dir))
+         (maduin-workspace--git-fn
+          (lambda (_d &rest args) (if (member "remove" args) 1 0)))
+         (maduin-workspace--git-output-fn
+          (lambda (_d &rest _args) (cons 0 "abc123\n"))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-workspace-path) (lambda (_s) wt))
+                  ((symbol-function 'maduin-workspace-branch)
+                   (lambda (_s) "cleanup-branch-xyz"))
+                  ((symbol-function 'maduin-workspace--log-warning)
+                   (lambda (msg) (setq logged msg))))
+          (make-directory wt t)
+          (should (null (maduin-workspace-cleanup "test-seat")))
+          (should (stringp logged))
+          (should (file-directory-p wt)))
+      (ignore-errors (delete-directory dir t)))))
+
+(ert-deftest maduin-test-workspace-cleanup-missing-branch ()
+  :tags '(maduin)
+  ;; Worktree exists but branch no longer verifies → t without branch -D.
+  ;; git-fn errors on any "-D" call; reaching it would flip the result to nil.
+  (let* ((dir (maduin-test--temp-dir))
+         (wt (expand-file-name "wt" dir))
+         (maduin-workspace--main-root-fn (lambda () dir))
+         (maduin-workspace--git-fn
+          (lambda (_d &rest args)
+            (when (member "-D" args) (error "branch -D must not run"))
+            0))
+         (maduin-workspace--git-output-fn
+          (lambda (_d &rest _args) (cons 128 "fatal: needed a single revision\n"))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-workspace-path) (lambda (_s) wt))
+                  ((symbol-function 'maduin-workspace-branch)
+                   (lambda (_s) "ghost-branch-xyz")))
+          (make-directory wt t)
+          (should (eq (maduin-workspace-cleanup "test-seat") t)))
+      (ignore-errors (delete-directory dir t)))))
+
+(ert-deftest maduin-test-pipeline-poll-cleans-after-land ()
+  :tags '(maduin)
+  ;; Poll sentinel close path: land==t → maduin-bd-close then cleanup with
+  ;; the seat name.  Real short-lived process drives the sentinel; land
+  ;; path exercised through the pipeline git seams (branch already an
+  ;; ancestor → land t, no merge).
+  (let* ((proc (make-process
+                :name "maduin-test-poll-sentinel"
+                :command '("sh" "-c" "sleep 3")
+                :noquery t))
+         (closed nil)
+         (cleaned nil)
+         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+         (maduin-pipeline--branch-fn (lambda (_s) "test-seat"))
+         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+         (maduin-pipeline--git-fn
+          (lambda (_dir &rest args) (if (member "merge-base" args) 0 0)))
+         (maduin-pipeline--git-output-fn
+          (lambda (_dir &rest args)
+            (if (member "commit" args)
+                (cons 1 "nothing to commit, working tree clean\n")
+              (cons 0 "")))))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'maduin-agent-status) (lambda (_s) nil))
+                    ((symbol-function 'maduin-bd-ready-tasks) (lambda () '("t1")))
+                    ((symbol-function 'maduin-review--blocked-p) (lambda () nil))
+                    ((symbol-function 'maduin-bd-claim) (lambda (_t) t))
+                    ((symbol-function 'maduin-agent-spawn)
+                     (lambda (_s _r _m _w) proc))
+                    ((symbol-function 'maduin-bd-close)
+                     (lambda (task out &optional _dir) (setq closed (cons task out))))
+                    ((symbol-function 'maduin-workspace-cleanup)
+                     (lambda (seat) (setq cleaned seat) t))
+                    ((symbol-function 'maduin-review--maybe-review-epic)
+                     (lambda (_t) nil)))
+            (maduin-pipeline--poll "test-seat")
+            ;; Wait for the process to exit so the sentinel (and cleanup
+            ;; call) actually runs.  Blocking accept-process-output (no
+            ;; timeout) reliably delivers the sentinel on process exit;
+            ;; sit-for/sleep-for and timed accepts do not, in batch mode.
+            (while (process-live-p proc)
+              (accept-process-output proc)))
+          (should (equal cleaned "test-seat"))
+          (should (equal (car closed) "t1")))
+      (when (process-live-p proc) (delete-process proc))
+      (ignore-errors (kill-buffer (process-buffer proc))))))
+
 (ert-deftest maduin-test-bootstrap-no-error ()
   :tags '(maduin)
   (condition-case err
