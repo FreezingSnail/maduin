@@ -400,14 +400,12 @@ older Emacs falls back to the timer-only poll)."
     (maduin-session-switch id)))
 
 (defun maduin-cockpit-kill ()
-  "Kill (with handoff when available) the agent under point."
+  "Kill the agent under point."
   (interactive)
   (let ((id (tabulated-list-get-id)))
     (unless id
       (error "maduin-cockpit: no agent on this line"))
-    (if (fboundp 'maduin-handoff-restart)
-        (maduin-handoff-restart id)
-      (maduin-agent-kill id))))
+    (maduin-agent-kill id)))
 
 (provide 'maduin-cockpit)
 
