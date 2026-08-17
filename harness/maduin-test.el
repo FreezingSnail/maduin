@@ -31,7 +31,6 @@
 (require 'maduin-handoff)
 (require 'maduin-pipeline)
 (require 'maduin-cockpit)
-(require 'maduin-repairer)
 (require 'maduin-review)
 (require 'maduin-terminal)
 (require 'maduin-dispatch)
@@ -111,9 +110,15 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (should (equal (maduin--seat-model "alexander") "opencode-go/deepseek-v4-pro"))
   (should (equal (maduin--seat-model "ramuh") "opencode-go/deepseek-v4-pro"))
-  (should (equal (maduin--seat-model "ifrit") "opencode-go/deepseek-v4-flash"))
-  (should (equal (maduin--seat-model "shiva") "opencode-go/deepseek-v4-flash"))
-  (should (equal (maduin--seat-model "titan") "opencode-go/deepseek-v4-flash")))
+  (should (equal (maduin--seat-model "ifrit") "opencode/deepseek-v4-flash-free"))
+  (should (equal (maduin--seat-model "shiva") "opencode/deepseek-v4-flash-free"))
+  (should (equal (maduin--seat-model "titan") "opencode/deepseek-v4-flash-free")))
+
+(ert-deftest maduin-test-config-fleet-fallback ()
+  :tags '(maduin)
+  (should (equal (maduin-dispatch--seat-fallback 'implementer)
+                 "opencode-go/deepseek-v4-flash"))
+  (should-not (maduin-dispatch--seat-fallback 'designer)))
 
 (ert-deftest maduin-test-config-welfare-handoff-enabled ()
   :tags '(maduin)
@@ -325,6 +330,21 @@ Mimics an opencode subprocess so session tests need no real CLI."
 (ert-deftest maduin-test-session-parse-garbage ()
   :tags '(maduin)
   (should-not (maduin-session--parse-line "not json at all")))
+
+(ert-deftest maduin-test-session-usage-limit-line ()
+  :tags '(maduin)
+  (should (maduin-session--usage-limit-line-p
+           "{\"type\":\"message.updated\",\"info\":{\"error\":{\"name\":\"APIError\",\"data\":{\"statusCode\":429,\"message\":\"usage limit exceeded\"}}}}"))
+  (should (maduin-session--usage-limit-line-p
+           "{\"type\":\"session.error\",\"error\":\"rate limit reached\"}"))
+  (should (maduin-session--usage-limit-line-p
+           "{\"type\":\"message.updated\",\"info\":{\"error\":{\"data\":{\"message\":\"429 Too Many Requests\"}}}}"))
+  ;; Model text mentioning 429/error in ordinary output is NOT a limit.
+  (should-not (maduin-session--usage-limit-line-p
+               "{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"handle HTTP 429 error responses\"}}"))
+  ;; Bare failure with no usage/limit signal is NOT a limit.
+  (should-not (maduin-session--usage-limit-line-p
+               "{\"type\":\"step_finish\",\"part\":{\"reason\":\"error\"}}")))
 
 (ert-deftest maduin-test-session-run-missing-cli ()
   :tags '(maduin)
@@ -1147,54 +1167,6 @@ Mimics an opencode subprocess so session tests need no real CLI."
           (should (eq (maduin-workspace-cleanup "test-seat") t)))
       (ignore-errors (delete-directory dir t)))))
 
-(ert-deftest maduin-test-pipeline-poll-cleans-after-land ()
-  :tags '(maduin)
-  ;; Poll sentinel close path: land==t → maduin-bd-close then cleanup with
-  ;; the seat name.  Real short-lived process drives the sentinel; land
-  ;; path exercised through the pipeline git seams (branch already an
-  ;; ancestor → land t, no merge).
-  (let* ((proc (make-process
-                :name "maduin-test-poll-sentinel"
-                :command '("sh" "-c" "sleep 3")
-                :noquery t))
-         (closed nil)
-         (cleaned nil)
-         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
-         (maduin-pipeline--branch-fn (lambda (_s) "test-seat"))
-         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
-         (maduin-pipeline--git-fn
-          (lambda (_dir &rest args) (if (member "merge-base" args) 0 0)))
-         (maduin-pipeline--git-output-fn
-          (lambda (_dir &rest args)
-            (if (member "commit" args)
-                (cons 1 "nothing to commit, working tree clean\n")
-              (cons 0 "")))))
-    (unwind-protect
-        (progn
-          (cl-letf (((symbol-function 'maduin-agent-status) (lambda (_s) nil))
-                    ((symbol-function 'maduin-bd-ready-tasks) (lambda () '("t1")))
-                    ((symbol-function 'maduin-review--blocked-p) (lambda () nil))
-                    ((symbol-function 'maduin-bd-claim) (lambda (_t) t))
-                    ((symbol-function 'maduin-agent-spawn)
-                     (lambda (_s _r _m _w) proc))
-                    ((symbol-function 'maduin-bd-close)
-                     (lambda (task out &optional _dir) (setq closed (cons task out))))
-                    ((symbol-function 'maduin-workspace-cleanup)
-                     (lambda (seat) (setq cleaned seat) t))
-                    ((symbol-function 'maduin-review--maybe-review-epic)
-                     (lambda (_t) nil)))
-            (maduin-pipeline--poll "test-seat")
-            ;; Wait for the process to exit so the sentinel (and cleanup
-            ;; call) actually runs.  Blocking accept-process-output (no
-            ;; timeout) reliably delivers the sentinel on process exit;
-            ;; sit-for/sleep-for and timed accepts do not, in batch mode.
-            (while (process-live-p proc)
-              (accept-process-output proc)))
-          (should (equal cleaned "test-seat"))
-          (should (equal (car closed) "t1")))
-      (when (process-live-p proc) (delete-process proc))
-      (ignore-errors (kill-buffer (process-buffer proc))))))
-
 (ert-deftest maduin-test-bootstrap-no-error ()
   :tags '(maduin)
   (condition-case err
@@ -1298,7 +1270,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
   (let ((ws (cdr (assq 'workspaces maduin-config))))
     (should (eq (alist-get 'land-on-stop ws) t))))
 
-;;; 11. repairer
+;;; 11. repairer config
 
 (ert-deftest maduin-test-config-repairer-keys ()
   :tags '(maduin)
@@ -1306,55 +1278,6 @@ Mimics an opencode subprocess so session tests need no real CLI."
     (should (eq (alist-get 'enabled repairer) t))
     (should (string= (alist-get 'model repairer) "opencode-go/deepseek-v4-pro"))
     (should (= (alist-get 'max-retries repairer) 3))))
-
-(ert-deftest maduin-test-repairer-active-p-bogus ()
-  :tags '(maduin)
-  (should-not (maduin-repairer-active-p "bogus-seat-xyz")))
-
-(ert-deftest maduin-test-repairer-prompt ()
-  :tags '(maduin)
-  (let ((prompt (maduin-repairer--prompt "prompt-seat-xyz" 'merge-conflict)))
-    (should (string-match-p "prompt-seat-xyz" prompt))
-    (should (string-match-p "RESOLVED_DONE" prompt))))
-
-(ert-deftest maduin-test-repairer-start-degraded ()
-  :tags '(maduin)
-  (let ((seat "degraded-seat-xyz")
-        (maduin-opencode-command "no-such-opencode-cli-xyz"))
-    (unwind-protect
-        (progn
-          (should-not (maduin-repairer-start seat))
-          (should-not (maduin-repairer-active-p seat))
-          (should (get-buffer "*maduin/repairer-degraded-seat-xyz*")))
-      (maduin-repairer-stop seat)
-      (when (get-buffer "*maduin/repairer-degraded-seat-xyz*")
-        (kill-buffer "*maduin/repairer-degraded-seat-xyz*")))))
-
-(ert-deftest maduin-test-repairer-start-fake-process ()
-  :tags '(maduin)
-  (let* ((script (maduin-test--fake-opencode))
-         (seat "fake-repairer-seat-xyz")
-         (workdir (maduin-workspace-path seat))
-         (maduin-opencode-command script))
-    (unwind-protect
-        (progn
-          (make-directory workdir t)
-          (maduin-repairer-start seat)
-          (should (maduin-repairer-active-p seat))
-          (maduin-repairer-stop seat)
-          (should-not (maduin-repairer-active-p seat)))
-      (delete-file script)
-      (maduin-repairer-stop seat)
-      (ignore-errors (delete-directory workdir t)))))
-
-(ert-deftest maduin-test-repairer-stop-inactive ()
-  :tags '(maduin)
-  (should
-   (condition-case nil
-       (progn
-         (maduin-repairer-stop "ghost-seat-xyz")
-         t)
-     (error nil))))
 
 ;;; 12. project root
 
@@ -1556,6 +1479,47 @@ Mimics an opencode subprocess so session tests need no real CLI."
           ;; Failed session must release the claim (status → open).
           (should (equal released "t1"))
           (should-not closed)
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-usage-limit-falls-back ()
+  :tags '(maduin)
+  ;; A usage-limited implementer session re-dispatches on the fallback
+  ;; (go flash) model, holding the claim; a second failure releases it.
+  (let* ((dir (maduin-test--temp-dir))
+         (run-count 0)
+         (last-model nil)
+         (commented nil)
+         (released nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn
+          (lambda (_w m _a _p)
+            (setq run-count (1+ run-count))
+            (setq last-model m)
+            (format "s-%d" run-count)))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-session-usage-limited-p)
+                   (lambda (_sid) t)))
+          (maduin-dispatch-implement "t1")
+          (should (string= last-model "opencode/deepseek-v4-flash-free"))
+          ;; Usage limit → fallback re-dispatch (go flash), claim held.
+          (maduin-dispatch--on-complete "s-1" 'failed)
+          (should (= run-count 2))
+          (should (string= last-model "opencode-go/deepseek-v4-flash"))
+          (should (equal commented
+                         '("t1" . "usage limit — retrying with fallback model")))
+          (should-not released)
+          (should (= (length maduin-dispatch--active) 1))
+          ;; Fallback already attempted → second failure releases.
+          (maduin-dispatch--on-complete "s-2" 'failed)
+          (should (= run-count 2))
+          (should (equal released "t1"))
           (should-not maduin-dispatch--active))
       (delete-directory dir t))))
 
