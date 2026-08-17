@@ -49,6 +49,10 @@
 (defvar maduin-dispatch--land-fn #'maduin-pipeline-land-branch
   "Function `(seat)' → t | `conflict' | nil.")
 
+(defvar maduin-dispatch--landed-fn #'maduin-pipeline-landed-p
+  "Function `(seat)' → non-nil when the seat's branch tip is an ancestor
+of main.")
+
 (defvar maduin-dispatch--close-fn #'maduin-bd-close
   "Function `(task output &optional dir)' → boolean.
 DIR is the seat worktree the close output should land in.")
@@ -292,8 +296,12 @@ close: the epic stays open until its children are implemented."
     (cond
      ((eq land t)
       (unless (eq role 'designer)
-        (funcall maduin-dispatch--close-fn
-                 task output (funcall maduin-dispatch--workdir-fn seat))))
+        (if (funcall maduin-dispatch--landed-fn seat)
+            (funcall maduin-dispatch--close-fn
+                     task output (funcall maduin-dispatch--workdir-fn seat))
+          (funcall maduin-dispatch--comment-fn task
+                   "land reported success but branch not in main — left open")
+          (funcall maduin-dispatch--release-fn task))))
      ((eq land 'conflict)
       (funcall maduin-dispatch--comment-fn task "merge conflict — repairer dispatched")
       (unless (eq role 'repairer)

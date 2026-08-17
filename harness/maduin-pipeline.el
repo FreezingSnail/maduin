@@ -111,16 +111,19 @@ Prefer the directory containing maduin.el, else
   "Function `(dir &rest args)' → (STATUS . OUTPUT).  Injection seam for tests.")
 
 (defun maduin-pipeline-land-branch (seat-name)
-  "Commit SEAT-NAME worktree changes and merge its branch into main.
-Return t on successful merge (or when the seat branch is already an
-ancestor of main), \\='conflict when the merge failed and output
+  "Commit SEAT-NAME worktree changes, rebase its branch onto main, then
+fast-forward main to the rebased branch tip.
+Return t on success, \\='conflict when the rebase failed and output
 indicates a conflict, nil on other failures (missing worktree, commit
-failure, missing seat branch, non-conflict merge failure; logged, never
-forced).  Steps: add -A in worktree; commit staged changes (\"nothing to
-commit\" is not a failure); skip the merge only when the seat branch is
-already an ancestor of main (`git merge-base --is-ancestor HEAD main');
-otherwise verify the seat branch exists (`git rev-parse --verify') and
-`git merge --no-ff' the seat branch from the main repo."
+failure, missing seat branch, non-conflict rebase failure, failed
+fast-forward; logged, never forced).  Rebasing onto the current main
+guarantees the branch contains all of main's latest, so the merge can
+only add — never revert.  Conflicts are detected at the rebase step
+(not the merge step).  Steps: add -A in worktree; commit staged changes
+(\"nothing to commit\" is not a failure); verify the seat branch exists
+(`git rev-parse --verify'); `git rebase main <branch>' from the main
+repo (aborting and returning \\='conflict on a conflict); then
+`git merge --ff-only <branch>' from the main repo."
   (let* ((wt (funcall maduin-pipeline--worktree-path-fn seat-name))
          (branch (funcall maduin-pipeline--branch-fn seat-name))
          (main (funcall maduin-pipeline--main-root-fn)))
@@ -140,40 +143,52 @@ otherwise verify the seat branch exists (`git rev-parse --verify') and
                (format "land-branch: commit failed (exit %d): %s"
                        (car res) (cdr res)))
               nil)
-          ;; Commit done (or nothing to commit).  Skip the merge only when
-          ;; the seat branch (worktree HEAD) is already an ancestor of main.
-          (if (= 0 (funcall maduin-pipeline--git-fn
-                            wt "merge-base" "--is-ancestor" "HEAD" "main"))
-              t
-            ;; Verify the seat branch exists before merging; log and bail
-            ;; when it doesn't.
-            (let ((verify (funcall maduin-pipeline--git-output-fn
-                                   main "rev-parse" "--verify" branch)))
-              (if (/= 0 (car verify))
-                  (progn
-                    (maduin-workspace--log-warning
-                     (format "land-branch: seat branch %s not found (exit %d): %s"
-                             branch (car verify) (cdr verify)))
-                    nil)
-                (let ((res (funcall maduin-pipeline--git-output-fn
-                                    main "merge" "--no-ff" branch
-                                    "-m" (format "land %s" seat-name))))
-                  (if (= 0 (car res))
-                      t
-                    ;; Distinguish conflict from other merge failures:
-                    ;; git prints "CONFLICT (content): ..." / "fix conflicts".
-                    (if (string-match-p "conflict" (downcase (cdr res)))
-                        (progn
-                          ;; Abort the failed merge so main is left clean.
-                          ;; Otherwise main stays on a conflicted MERGE_HEAD
-                          ;; and a later land (or the repairer's own merge)
-                          ;; jams against the half-finished merge.
-                          (funcall maduin-pipeline--git-fn main "merge" "--abort")
-                          'conflict)
+          ;; Commit done (or nothing to commit).  Verify the seat branch
+          ;; exists before rebasing; log and bail when it doesn't.
+          (let ((verify (funcall maduin-pipeline--git-output-fn
+                                 main "rev-parse" "--verify" branch)))
+            (if (/= 0 (car verify))
+                (progn
+                  (maduin-workspace--log-warning
+                   (format "land-branch: seat branch %s not found (exit %d): %s"
+                           branch (car verify) (cdr verify)))
+                  nil)
+              ;; Rebase the branch onto current main so it contains all of
+              ;; main's latest; its merge can only add, never revert.
+              (let ((res (funcall maduin-pipeline--git-output-fn
+                                  main "rebase" "main" branch)))
+                (cond
+                 ((= 0 (car res))
+                  ;; Rebase clean (a branch already containing main is a
+                  ;; no-op rebase that still exits 0).  Fast-forward main.
+                  (let ((ff (funcall maduin-pipeline--git-output-fn
+                                     main "merge" "--ff-only" branch)))
+                    (if (= 0 (car ff))
+                        t
                       (maduin-workspace--log-warning
-                       (format "land-branch: merge of %s into main failed (exit %d): %s"
-                               branch (car res) (cdr res)))
-                      nil)))))))))))
+                       (format "land-branch: merge --ff-only %s failed (exit %d): %s"
+                               branch (car ff) (cdr ff)))
+                      nil)))
+                 ((string-match-p "conflict" (downcase (cdr res)))
+                  ;; Rebase conflict: abort so main is left clean and the
+                  ;; branch is back to its pre-rebase state.
+                  (funcall maduin-pipeline--git-fn main "rebase" "--abort")
+                  'conflict)
+                 (t
+                  (maduin-workspace--log-warning
+                   (format "land-branch: rebase of %s onto main failed (exit %d): %s"
+                           branch (car res) (cdr res)))
+                  nil))))))))))
+
+(defun maduin-pipeline-landed-p (seat-name)
+  "Return non-nil when SEAT-NAME's branch tip is an ancestor of main.
+Uses `git merge-base --is-ancestor <branch> main` from the main repo."
+  (let* ((branch (funcall maduin-pipeline--branch-fn seat-name))
+         (main (funcall maduin-pipeline--main-root-fn)))
+    (condition-case nil
+        (= 0 (funcall maduin-pipeline--git-fn
+                      main "merge-base" "--is-ancestor" branch "main"))
+      (error nil))))
 
 ;;; Status
 

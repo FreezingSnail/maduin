@@ -117,6 +117,24 @@
 
 ;;; 3. bd-bridge
 
+(ert-deftest maduin-test-bd-json-data-array ()
+  :tags '(maduin)
+  (should (equal (maduin-bd--json-data "[{\"id\":\"t1\"}]")
+                 '(((id . "t1"))))))
+
+(ert-deftest maduin-test-bd-json-data-non-json ()
+  :tags '(maduin)
+  (should-not (maduin-bd--json-data "Error: no issue")))
+
+(ert-deftest maduin-test-bd-json-data-empty ()
+  :tags '(maduin)
+  (should-not (maduin-bd--json-data ""))
+  (should-not (maduin-bd--json-data nil)))
+
+(ert-deftest maduin-test-bd-json-data-object ()
+  :tags '(maduin)
+  (should-not (maduin-bd--json-data "{\"error\":\"x\"}")))
+
 (ert-deftest maduin-test-bd-bridge-functions-exist ()
   :tags '(maduin)
   (dolist (f '(maduin-bd-ready-tasks
@@ -1079,76 +1097,129 @@
     (error
      (ert-fail (format "land-branch errored: %s" (error-message-string err))))))
 
-(ert-deftest maduin-test-land-branch-already-ancestor ()
+(ert-deftest maduin-test-land-branch-success ()
   :tags '(maduin)
-  ;; Seat branch (worktree HEAD) already an ancestor of main → skip the
-  ;; merge entirely and return t.  The git-output mock errors on any
-  ;; "merge" call, so reaching merge would fail the test.
+  ;; Commit → verify branch → rebase onto main → fast-forward main.  Rebase
+  ;; of a branch already containing main is a no-op that still exits 0, so
+  ;; this subsumes the old `merge-base --is-ancestor' shortcut.
+  (let* ((calls nil)
+         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+         (maduin-pipeline--git-fn
+          (lambda (_dir &rest args) (push args calls) 0))
+         (maduin-pipeline--git-output-fn
+          (lambda (_dir &rest args)
+            (push args calls)
+           (cond
+            ((member "commit" args) (cons 0 ""))
+            ((member "rev-parse" args) (cons 0 "abc123\n"))
+            ((member "rebase" args) (cons 0 ""))
+            ((member "merge" args) (cons 0 ""))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") t))
+    ;; Both the rebase and the ff-only merge must run, with exact args.
+    (should (cl-some (lambda (a)
+                       (equal a '("rebase" "main" "seat-branch-xyz")))
+                     calls))
+    (should (cl-some (lambda (a)
+                       (equal a '("merge" "--ff-only" "seat-branch-xyz")))
+                     calls))))
+
+(ert-deftest maduin-test-land-branch-nothing-to-commit-still-merges ()
+  :tags '(maduin)
+  ;; Worker pre-committed → `git commit' reports "nothing to commit" (exit
+  ;; 1), but the branch still gets rebased onto main and fast-forwarded,
+  ;; returning t on success.
   (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
         (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
         (maduin-pipeline--git-output-fn
          (lambda (_dir &rest args)
-           (when (member "merge" args)
-             (error "land-branch: merge must not run when already ancestor"))
-           (cons 0 ""))))
-    (should (eq (maduin-pipeline-land-branch "test-seat") t))))
-
-(ert-deftest maduin-test-land-branch-nothing-to-commit-still-merges ()
-  :tags '(maduin)
-  ;; Worker pre-committed → `git commit' reports "nothing to commit" (exit
-  ;; 1), but the seat branch is not yet an ancestor of main → still merge,
-  ;; and return t on a clean merge.
-  (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
-        (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
-        (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
-        (maduin-pipeline--git-fn
-         (lambda (_dir &rest args) (if (member "merge-base" args) 1 0)))
-        (maduin-pipeline--git-output-fn
-         (lambda (_dir &rest args)
            (cond
             ((member "commit" args)
              (cons 1 "nothing to commit, working tree clean\n"))
             ((member "rev-parse" args) (cons 0 "abc123\n"))
+            ((member "rebase" args) (cons 0 ""))
             ((member "merge" args) (cons 0 ""))))))
     (should (eq (maduin-pipeline-land-branch "test-seat") t))))
 
-(ert-deftest maduin-test-land-branch-conflict ()
+(ert-deftest maduin-test-land-branch-rebase-conflict ()
   :tags '(maduin)
-  ;; Commit succeeds (or nothing to commit) → branch not an ancestor →
-  ;; branch verifies → merge reports a conflict → abort the failed merge in
-  ;; main (leaving it clean, no jammed MERGE_HEAD) → returns `conflict'.
+  ;; Commit succeeds (or nothing to commit) → branch verifies → rebase
+  ;; reports a conflict → abort the failed rebase in main (leaving the
+  ;; branch at its pre-rebase state, no jammed rebase) → returns `conflict'.
   (let* ((calls nil)
          (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
          (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
          (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
          (maduin-pipeline--git-fn
-          (lambda (_dir &rest args)
-            (push args calls)
-            (if (member "merge-base" args) 1 0)))
+          (lambda (_dir &rest args) (push args calls) 0))
          (maduin-pipeline--git-output-fn
           (lambda (_dir &rest args)
             (cond
              ((member "commit" args) (cons 0 ""))
              ((member "rev-parse" args) (cons 0 "abc123\n"))
-             ((member "merge" args)
+             ((member "rebase" args)
               (cons 1 "CONFLICT (content): Merge conflict in foo.el\n"))))))
     (should (eq (maduin-pipeline-land-branch "test-seat") 'conflict))
-    ;; The failed merge must be aborted so main is left clean.
-    (should (cl-some (lambda (args) (equal args '("merge" "--abort"))) calls))))
+    ;; The failed rebase must be aborted so the branch isn't left mid-rebase.
+    (should (cl-some (lambda (args) (equal args '("rebase" "--abort"))) calls))))
 
-(ert-deftest maduin-test-land-branch-missing-branch ()
+(ert-deftest maduin-test-land-branch-rebase-failure ()
   :tags '(maduin)
-  ;; Commit done (or nothing to commit), branch not an ancestor, but the
-  ;; seat branch does not exist → logs a warning naming the branch and
-  ;; returns nil (never merges).
+  ;; Rebase fails for a non-conflict reason (e.g. a git error) → log a
+  ;; warning naming the branch → return nil.
   (let ((logged nil)
         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
-        (maduin-pipeline--git-fn
-         (lambda (_dir &rest args) (if (member "merge-base" args) 1 0)))
+        (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
+        (maduin-pipeline--git-output-fn
+         (lambda (_dir &rest args)
+           (cond
+            ((member "commit" args) (cons 0 ""))
+            ((member "rev-parse" args) (cons 0 "abc123\n"))
+            ((member "rebase" args)
+             (cons 128 "fatal: update_ref failed\n"))))))
+    (cl-letf (((symbol-function 'maduin-workspace--log-warning)
+               (lambda (msg) (setq logged msg))))
+      (should (null (maduin-pipeline-land-branch "test-seat")))
+      (should (stringp logged))
+      (should (string-match-p "rebase" logged)))))
+
+(ert-deftest maduin-test-land-branch-ff-only-fail ()
+  :tags '(maduin)
+  ;; Rebase ok, but the fast-forward merge fails (e.g. main moved
+  ;; concurrently) → log a warning naming the branch → return nil.
+  (let ((logged nil)
+        (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+        (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+        (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+        (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
+        (maduin-pipeline--git-output-fn
+         (lambda (_dir &rest args)
+           (cond
+            ((member "commit" args) (cons 0 ""))
+            ((member "rev-parse" args) (cons 0 "abc123\n"))
+            ((member "rebase" args) (cons 0 ""))
+            ((member "merge" args)
+             (cons 1 "fatal: Not possible to fast-forward, aborting.\n"))))))
+    (cl-letf (((symbol-function 'maduin-workspace--log-warning)
+               (lambda (msg) (setq logged msg))))
+      (should (null (maduin-pipeline-land-branch "test-seat")))
+      (should (stringp logged))
+      (should (string-match-p "ff-only" logged)))))
+
+(ert-deftest maduin-test-land-branch-missing-branch ()
+  :tags '(maduin)
+  ;; Commit done (or nothing to commit), but the seat branch does not exist
+  ;; → logs a warning naming the branch and returns nil (never rebases).
+  (let ((logged nil)
+        (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+        (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+        (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+        (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
         (maduin-pipeline--git-output-fn
          (lambda (_dir &rest args)
            (cond
@@ -1339,6 +1410,7 @@
          (maduin-dispatch--diff-fn
           (lambda (_sid) (list '((file . "a.el") (patch . "+x")))))
          (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
+         (maduin-dispatch--landed-fn (lambda (_seat) t))
          (maduin-dispatch--close-fn (lambda (task out &optional _dir) (setq closed (cons task out)) t))
          (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
     (unwind-protect
@@ -1375,6 +1447,38 @@
           ;; Failed session must release the claim (status → open).
           (should (equal released "t1"))
           (should-not closed)
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-land-not-in-main-releases ()
+  :tags '(maduin)
+  ;; Land reports success but the landed-fn gate says the branch never
+  ;; reached main (maduin-zxe incident) → comment + release, never close.
+  (let* ((dir (maduin-test--temp-dir))
+         (commented nil)
+         (released nil)
+         (closed nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-landed"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--diff-fn
+          (lambda (_sid) (list '((file . "a.el") (patch . "+x")))))
+         (maduin-dispatch--land-fn (lambda (_seat) t))
+         (maduin-dispatch--landed-fn (lambda (_seat) nil))
+         (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
+         (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
+         (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-implement "t1")
+          (maduin-dispatch--on-complete "s-landed" 'completed)
+          (should-not closed)
+          (should (equal (car commented) "t1"))
+          (should (string-match-p "not in main" (cdr commented)))
+          (should (equal released "t1"))
           (should-not maduin-dispatch--active))
       (delete-directory dir t))))
 
@@ -1894,59 +1998,60 @@
 
 (ert-deftest maduin-test-full-loop-epic-to-close ()
   :tags '(maduin)
-  (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
-         (epic (condition-case nil
-                   (maduin-bd-create-epic
-                    (format "ert-loop-epic-%s" ts) "scratch epic for ERT full-loop")
-                 (error nil)))
-         (task (and epic
-                    (condition-case nil
-                        (maduin-bd-create-task
-                         (format "ert-loop-task-%s" ts)
-                         "scratch task for ERT full-loop" epic)
-                      (error nil)))))
-    (unwind-protect
-        (when (and epic task)
-          ;; 1. a deferred task is filed for the designer (Ramuh).
-          (should (maduin-bd-defer task))
-          ;; 2. designer fills design + stages (defer + staged label).
-          (should (maduin-bd-update-design-acceptance task "design body" "acceptance body"))
-          ;; 3. approved work consumes via bd ready: undefer → ready.
-          (should (maduin-bd-undefer task))
-          ;; 4. appears in ready.
-          (should (member task (maduin-bd-ready-tasks)))
-          ;; 5. run-loop → implement session → mock complete → land → close
-          ;;    (session/land/close seams mocked; no real opencode).
-          (let* ((dir (maduin-test--temp-dir))
-                 (landed nil)
-                 (closed nil)
-                 (deleted '())
-                 (maduin-dispatch--active nil)
-                 (maduin-dispatch--ready-fn (lambda () (list task)))
-                 (maduin-dispatch--in-progress-fn (lambda () nil))
-                 (maduin-dispatch--open-epics-fn (lambda () nil))
-                 (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-loop-1"))
-                 (maduin-dispatch--claim-fn (lambda (_t) t))
-                 (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
-                 (maduin-dispatch--workdir-fn (lambda (_s) dir))
-                 (maduin-dispatch--diff-fn
-                  (lambda (_sid) (list '((file . "x.el") (patch . "+1")))))
-                 (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
-                 (maduin-dispatch--close-fn (lambda (t2 _out &optional _dir) (setq closed t2) t))
-                 (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
-            (unwind-protect
-                (progn
-                  (maduin-dispatch-run-loop)
-                  (should (= (length maduin-dispatch--active) 1))
-                  (should (equal (plist-get (car maduin-dispatch--active) :task) task))
-                  (maduin-dispatch--on-complete "s-loop-1" 'completed)
-                  (should (equal landed "ifrit"))
-                  (should (equal closed task))
-                  (should (member "s-loop-1" deleted))
-                  (should-not maduin-dispatch--active))
-              (delete-directory dir t))))
-      (maduin-test--bd-delete task)
-      (maduin-test--bd-delete epic))))
+  (let* ((epic "ert-epic-fake")
+         (task "ert-epic-fake.1"))
+    (cl-letf (((symbol-function 'maduin-bd-create-epic)
+               (lambda (_title _desc) "ert-epic-fake"))
+              ((symbol-function 'maduin-bd-create-task)
+               (lambda (_title _desc _parent) "ert-epic-fake.1"))
+              ((symbol-function 'maduin-bd-defer)
+               (lambda (_id) t))
+              ((symbol-function 'maduin-bd-update-design-acceptance)
+               (lambda (_id _design _acceptance) t))
+              ((symbol-function 'maduin-bd-undefer)
+               (lambda (_id) t))
+              ((symbol-function 'maduin-bd-ready-tasks)
+               (lambda () (list "ert-epic-fake.1"))))
+      (ignore epic)
+      ;; 1. a deferred task is filed for the designer (Ramuh).
+      (should (maduin-bd-defer task))
+      ;; 2. designer fills design + stages (defer + staged label).
+      (should (maduin-bd-update-design-acceptance task "design body" "acceptance body"))
+      ;; 3. approved work consumes via bd ready: undefer → ready.
+      (should (maduin-bd-undefer task))
+      ;; 4. appears in ready.
+      (should (member task (maduin-bd-ready-tasks)))
+      ;; 5. run-loop → implement session → mock complete → land → close
+      ;;    (session/land/close seams mocked; no real opencode).
+      (let* ((dir (maduin-test--temp-dir))
+             (landed nil)
+             (closed nil)
+             (deleted '())
+             (maduin-dispatch--active nil)
+             (maduin-dispatch--ready-fn (lambda () (list task)))
+             (maduin-dispatch--in-progress-fn (lambda () nil))
+             (maduin-dispatch--open-epics-fn (lambda () nil))
+             (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-loop-1"))
+             (maduin-dispatch--claim-fn (lambda (_t) t))
+             (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+             (maduin-dispatch--workdir-fn (lambda (_s) dir))
+             (maduin-dispatch--diff-fn
+              (lambda (_sid) (list '((file . "x.el") (patch . "+1")))))
+             (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
+             (maduin-dispatch--landed-fn (lambda (_seat) t))
+             (maduin-dispatch--close-fn (lambda (t2 _out &optional _dir) (setq closed t2) t))
+             (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+        (unwind-protect
+            (progn
+              (maduin-dispatch-run-loop)
+              (should (= (length maduin-dispatch--active) 1))
+              (should (equal (plist-get (car maduin-dispatch--active) :task) task))
+              (maduin-dispatch--on-complete "s-loop-1" 'completed)
+              (should (equal landed "ifrit"))
+              (should (equal closed task))
+              (should (member "s-loop-1" deleted))
+              (should-not maduin-dispatch--active))
+          (delete-directory dir t))))))
 
 ;;; 20. v0.3 — batched review gate (Odin)
 

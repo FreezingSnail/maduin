@@ -25,22 +25,26 @@ clobbered."
     (message "[maduin-bd] ERROR: %s" msg)))
 
 (defun maduin-bd--run (cmd)
-  "Run CMD in shell. Return (exit-code . output-string)."
+  "Run CMD in shell. Return (exit-code . stdout-string).
+Stderr is discarded so human error text never contaminates stdout."
   (with-temp-buffer
-    (let ((code (call-process shell-file-name nil t nil
+    (let ((code (call-process shell-file-name nil
+                              (list (current-buffer) nil) nil
                               shell-command-switch cmd)))
       (cons code (buffer-string)))))
 
 (defun maduin-bd--json-data (output)
-  "Parse OUTPUT as JSON; return list of alists or nil on failure."
-  (let ((data (condition-case err
-                  (json-read-from-string output)
-                (error
-                 (maduin-bd--log-error
-                  (format "bd JSON parse failed: %s" err))
-                 nil))))
-    (when (vectorp data)
-      (append data nil))))
+  "Parse OUTPUT as a JSON array; return list of alists, or nil.
+Returns nil silently when OUTPUT is empty or not JSON (first
+non-whitespace character is not `[' or `{')."
+  (let ((s (string-trim (or output ""))))
+    (when (and (not (string-empty-p s))
+               (or (string-prefix-p "[" s) (string-prefix-p "{" s)))
+      (condition-case nil
+          (let ((data (json-read-from-string s)))
+            (when (vectorp data)
+              (append data nil)))
+        (error nil)))))
 
 (defun maduin-bd--json-ids (output)
   "Extract `id' fields from JSON array OUTPUT. Return list of strings."
