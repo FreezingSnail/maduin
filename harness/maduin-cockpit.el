@@ -105,7 +105,9 @@ read-only leak motions in those states only.  No-op when evil is absent."
 
 (defvar maduin-cockpit--title-cache nil
   "Alist ((TASK-ID . TITLE) ...) caching bd task titles.
-Cleared at the start of every `maduin-cockpit-refresh'.")
+Titles are immutable during a task lifetime, so the cache persists
+across refreshes; it is cleared on task completion via
+`maduin-cockpit--on-complete'.")
 
 (defun maduin-cockpit--task-title (task-id)
   "Return title string for TASK-ID via `bd show', or nil on failure.
@@ -229,9 +231,13 @@ Return the cockpit buffer."
     buf))
 
 (defun maduin-cockpit-refresh ()
-  "Rebuild cockpit rows, title cache, and pipeline chip summary."
+  "Rebuild cockpit rows and pipeline chip summary.
+The task-title cache persists across refreshes (titles are immutable
+during a task lifetime) and is only cleared on task completion.
+Records the refresh time in `maduin-cockpit--last-refresh' so the
+focus-driven path can throttle rapid window switches."
   (interactive)
-  (setq maduin-cockpit--title-cache nil)
+  (setq maduin-cockpit--last-refresh (float-time))
   (setq tabulated-list-format
         (vector '("Seat" 13 t)
                 '("Role" 9 t)

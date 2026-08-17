@@ -137,7 +137,9 @@
 
 (ert-deftest maduin-test-bd-bridge-functions-exist ()
   :tags '(maduin)
-  (dolist (f '(maduin-bd-ready-tasks
+  (dolist (f '(maduin-bd--call
+               maduin-bd-list-all
+               maduin-bd-ready-tasks
                maduin-bd-claim
                maduin-bd-release
                maduin-bd-close
@@ -691,8 +693,37 @@
           (should (equal (elt (aref tabulated-list-format 4) 0) "Model"))
           (should (equal (elt (aref tabulated-list-format 5) 0) "Uptime(s)"))
           (should (equal (elt (aref tabulated-list-format 6) 0) "Activity"))
-          (should (null maduin-cockpit--title-cache)))
+          (should (equal maduin-cockpit--title-cache
+                         (list (cons "stale" "old")))))
       (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-refresh-keeps-title-cache ()
+  :tags '(maduin)
+  ;; Repeated refreshes with unchanged dispatch entries must NOT re-run
+  ;; bd show: the title cache persists across refreshes.
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (calls 0)
+        (maduin-dispatch--active
+         (list (list :handle "s-1" :seat "ifrit" :role "implementer" :task "t1")
+               (list :handle "s-2" :seat "shiva" :role "designer" :task "t2"))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-bd--call)
+                   (lambda (&rest args)
+                     ;; Count only bd show title fetches; pipeline
+                     ;; summary also calls bd ready/list.
+                     (when (member "show" args) (cl-incf calls))
+                     (cons 0 "[{\"title\": \"T\"}]"))))
+          (with-current-buffer buf (tabulated-list-mode))
+          (setq maduin-cockpit--title-cache nil)
+          (maduin-cockpit-refresh)
+          (should (= calls 2))                  ; one bd show per task id
+          (should (= (length maduin-cockpit--title-cache) 2))
+          (maduin-cockpit-refresh)
+          (maduin-cockpit-refresh)
+          (should (= calls 2))                  ; zero new bd show calls
+          (should (= (length maduin-cockpit--title-cache) 2)))
+      (kill-buffer buf)
+      (setq maduin-cockpit--title-cache nil))))
 
 ;;; 8d. cockpit-live
 
