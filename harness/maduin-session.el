@@ -69,6 +69,24 @@ or `failed'.  Run from the process sentinel once per session.")
 (defvar maduin-session--done-p nil
   "Non-nil once the completion hook has fired for this session.")
 
+(defvar maduin-session--usage-limited nil
+  "Non-nil when the run hit a provider usage/rate limit.")
+
+(defconst maduin-session--usage-limit-re
+  (regexp-opt '("usage limit" "rate limit" "rate-limit" "too many requests"
+                "429" "quota" "insufficient")
+              t)
+  "Regexp matching provider usage/rate-limit error text.")
+
+(defun maduin-session--usage-limit-line-p (line)
+  "Non-nil when NDJSON LINE reports a provider usage/rate limit.
+Only error-carrying events (an `error' field or a session.error type)
+are considered, so model text mentioning quota/429 in ordinary output
+does not set the flag."
+  (and (stringp line)
+       (string-match-p "\\\(\"error\"\\|session\\.error\\\)" line)
+       (string-match-p maduin-session--usage-limit-re line)))
+
 (defun maduin-session--parse-line (line)
   "Parse one NDJSON LINE emitted by `opencode run --format json'.
 Return a plist (:type TYPE :session-id SID :terminal TERMINAL) where
@@ -99,6 +117,8 @@ Return nil when LINE is not valid JSON or lacks a `type'."
 
 (defun maduin-session--consume-line (line)
   "Parse one NDJSON LINE and update buffer-local session state."
+  (when (maduin-session--usage-limit-line-p line)
+    (setq maduin-session--usage-limited t))
   (let ((evt (maduin-session--parse-line line)))
     (when evt
       (let ((sid (plist-get evt :session-id))
@@ -210,7 +230,8 @@ opencode CLI is unavailable or the process cannot be spawned."
           (setq-local maduin-session--status 'running)
           (setq-local maduin-session--pending "")
           (setq-local maduin-session--session-id nil)
-          (setq-local maduin-session--done-p nil))
+          (setq-local maduin-session--done-p nil)
+          (setq-local maduin-session--usage-limited nil))
         (puthash handle buf maduin-session--registry)
         handle))))
 
@@ -225,10 +246,17 @@ a session whose process died without a terminal event is `failed'."
         (cond
          ((eq maduin-session--status 'completed) 'completed)
          ((eq maduin-session--status 'failed) 'failed)
-         (t (let ((proc (get-buffer-process buf)))
-              (if (and proc (process-live-p proc))
-                  'running
-                'failed))))))))
+          (t (let ((proc (get-buffer-process buf)))
+               (if (and proc (process-live-p proc))
+                   'running
+                 'failed))))))))
+
+(defun maduin-session-usage-limited-p (sid)
+  "Return non-nil when run session SID hit a provider usage/rate limit."
+  (let ((buf (maduin-session--run-buffer sid)))
+    (and buf
+         (buffer-live-p buf)
+         (buffer-local-value 'maduin-session--usage-limited buf))))
 
 (defun maduin-session--call (cmd)
   "Run CMD (list of strings) synchronously.  Return (STATUS . OUTPUT),

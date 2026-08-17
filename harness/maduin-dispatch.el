@@ -150,6 +150,12 @@ The run-loop picks up no new work while draining.")
     ('repairer (maduin-dispatch--config-get 'repairer 'agent))
     (_ nil)))
 
+(defun maduin-dispatch--seat-fallback (role)
+  "Return fallback model for ROLE, or nil.
+Only the fleet (implementer) role has a fallback (free-flash → go flash)."
+  (and (eq role 'implementer)
+       (maduin-dispatch--config-get 'fleet 'fallback)))
+
 ;;; Concurrency
 
 (defun maduin-dispatch--role-cap (role)
@@ -237,17 +243,25 @@ PLAN overrides the role's default plan string (designer owns its prompt)."
               (maduin-dispatch--role-cap role))
     (let ((seat (or seat (maduin-dispatch--free-seat role))))
       (when (and seat (funcall maduin-dispatch--claim-fn task))
-        (let* ((model (or model (maduin-dispatch--seat-model-for role seat)))
-               (agent (maduin-dispatch--seat-agent-for role))
-               (workdir (funcall maduin-dispatch--workdir-fn seat))
-               (plan (or plan (maduin-dispatch--plan-for role task seat)))
-               (sid (funcall maduin-dispatch--session-run-fn workdir model agent plan)))
-          (when sid
-            (push (list :handle sid :seat seat :role role :task task)
-                  maduin-dispatch--active)
-            (when (boundp 'maduin-cockpit-refresh-hook)
-              (run-hook-with-args 'maduin-cockpit-refresh-hook))
-            sid))))))
+        (maduin-dispatch--spawn-session task role seat model plan nil)))))
+
+(defun maduin-dispatch--spawn-session (task role seat model plan fallback-attempted)
+  "Spawn one ROLE session for TASK at SEAT (task already claimed) and
+register it in `maduin-dispatch--active'.  MODEL and PLAN override the
+seat defaults when non-nil.  FALLBACK-ATTEMPTED flags a re-dispatch
+using the seat's fallback model.  Return handle, or nil on spawn failure."
+  (let* ((model (or model (maduin-dispatch--seat-model-for role seat)))
+         (agent (maduin-dispatch--seat-agent-for role))
+         (workdir (funcall maduin-dispatch--workdir-fn seat))
+         (plan (or plan (maduin-dispatch--plan-for role task seat)))
+         (sid (funcall maduin-dispatch--session-run-fn workdir model agent plan)))
+    (when sid
+      (push (list :handle sid :seat seat :role role :task task
+                  :model model :fallback-attempted fallback-attempted)
+            maduin-dispatch--active)
+      (when (boundp 'maduin-cockpit-refresh-hook)
+        (run-hook-with-args 'maduin-cockpit-refresh-hook))
+      sid)))
 
 ;;; Completion → land → close
 
@@ -290,12 +304,26 @@ close: the epic stays open until its children are implemented."
       ;; staying in_progress forever.
       (funcall maduin-dispatch--release-fn task)))))
 
-(defun maduin-dispatch--fail (entry)
+(defun maduin-dispatch--fail (entry sid)
   "Handle failed session for ENTRY: report and release the claim so the
-task returns to open (bd ready) rather than staying claimed in_progress."
-  (funcall maduin-dispatch--comment-fn (plist-get entry :task)
-           "session failed — task left open")
-  (funcall maduin-dispatch--release-fn (plist-get entry :task)))
+task returns to open (bd ready) rather than staying claimed in_progress.
+A usage/rate-limit failure on an implementer session that has a
+fallback model (and has not already used it) is instead re-dispatched
+with the fallback model, keeping the claim in place."
+  (let ((role (plist-get entry :role))
+        (seat (plist-get entry :seat))
+        (task (plist-get entry :task)))
+    (if (and (not (plist-get entry :fallback-attempted))
+             (maduin-session-usage-limited-p sid)
+             (maduin-dispatch--seat-fallback role))
+        (progn
+          (funcall maduin-dispatch--comment-fn
+                   task "usage limit — retrying with fallback model")
+          (maduin-dispatch--spawn-session
+           task 'implementer seat
+           (maduin-dispatch--seat-fallback role) nil t))
+      (funcall maduin-dispatch--comment-fn task "session failed — task left open")
+      (funcall maduin-dispatch--release-fn task))))
 
 (defun maduin-dispatch--on-complete (sid status)
   "Completion hook: route a finished session SID (STATUS `completed'|`failed').
@@ -310,7 +338,7 @@ while work is in flight)."
       (unwind-protect
           (if (eq status 'completed)
               (maduin-dispatch--complete entry sid)
-            (maduin-dispatch--fail entry))
+            (maduin-dispatch--fail entry sid))
         (funcall maduin-dispatch--session-delete-fn sid))
       (maduin-dispatch--maybe-drained)
       (when (boundp 'maduin-cockpit-refresh-hook)
