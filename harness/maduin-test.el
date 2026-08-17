@@ -31,7 +31,6 @@
 (require 'maduin-handoff)
 (require 'maduin-pipeline)
 (require 'maduin-cockpit)
-(require 'maduin-repairer)
 (require 'maduin-review)
 (require 'maduin-terminal)
 (require 'maduin-dispatch)
@@ -111,9 +110,15 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (should (equal (maduin--seat-model "alexander") "opencode-go/deepseek-v4-pro"))
   (should (equal (maduin--seat-model "ramuh") "opencode-go/deepseek-v4-pro"))
-  (should (equal (maduin--seat-model "ifrit") "opencode-go/deepseek-v4-flash"))
-  (should (equal (maduin--seat-model "shiva") "opencode-go/deepseek-v4-flash"))
-  (should (equal (maduin--seat-model "titan") "opencode-go/deepseek-v4-flash")))
+  (should (equal (maduin--seat-model "ifrit") "opencode/deepseek-v4-flash-free"))
+  (should (equal (maduin--seat-model "shiva") "opencode/deepseek-v4-flash-free"))
+  (should (equal (maduin--seat-model "titan") "opencode/deepseek-v4-flash-free")))
+
+(ert-deftest maduin-test-config-fleet-fallback ()
+  :tags '(maduin)
+  (should (equal (maduin-dispatch--seat-fallback 'implementer)
+                 "opencode-go/deepseek-v4-flash"))
+  (should-not (maduin-dispatch--seat-fallback 'designer)))
 
 (ert-deftest maduin-test-config-welfare-handoff-enabled ()
   :tags '(maduin)
@@ -164,6 +169,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (dolist (f '(maduin-bd-ready-tasks
                maduin-bd-claim
+               maduin-bd-release
                maduin-bd-close
                maduin-bd-create-epic
                maduin-bd-create-task
@@ -175,6 +181,45 @@ Mimics an opencode subprocess so session tests need no real CLI."
                maduin-bd-epic-children))
     (should (fboundp f))))
 
+(ert-deftest maduin-test-bd-close-path ()
+  :tags '(maduin)
+  (let ((maduin-bd-close-file "out.md"))
+    (should (string= (maduin-bd-close-path "/x/y") "/x/y/out.md"))
+    (should (string= (maduin-bd-close-path nil)
+                     (expand-file-name "out.md" default-directory)))))
+
+(ert-deftest maduin-test-bd-close-writes-to-worktree-not-root ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (maduin-bd-close-file (format "ert-close-%d.md" (random)))
+         (root-file (expand-file-name maduin-bd-close-file default-directory)))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'maduin-bd--run)
+                     (lambda (_cmd) (cons 0 ""))))
+            (should (maduin-bd-close "t1" "out" dir)))
+          ;; Written inside DIR (the worktree), NOT the repo/harness root.
+          (should (string= (with-temp-buffer
+                             (insert-file-contents
+                              (expand-file-name maduin-bd-close-file dir))
+                             (buffer-string))
+                           "out"))
+          (should-not (file-exists-p root-file)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-bd-close-default-dir-fallback ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (maduin-bd-close-file (format "ert-close2-%d.md" (random)))
+         (file (expand-file-name maduin-bd-close-file dir)))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'maduin-bd--run) (lambda (_cmd) (cons 0 "")))
+                    (default-directory dir))
+            (should (maduin-bd-close "t2" nil)))
+          (should (file-exists-p file)))
+      (delete-directory dir t))))
+
 (ert-deftest maduin-test-bd-remember-and-forget ()
   :tags '(maduin)
   (let* ((ts (format-time-string "%Y%m%d%H%M%S" (current-time)))
@@ -185,6 +230,50 @@ Mimics an opencode subprocess so session tests need no real CLI."
     (when ok
       (should (eq ok t)))
     (maduin-test--bd-forget-matching "maduin-ert-probe")))
+
+(ert-deftest maduin-test-bd-query-all-flag ()
+  :tags '(maduin)
+  ;; Default excludes closed; ALL=t must append `--all' so closed children
+  ;; are visible (an epic with only-closed children still reports them).
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (cmd)
+                 (setq seen cmd)
+                 (cons 0 "[{\"id\":\"t1\"}]"))))
+      (should (equal (maduin-bd-query "parent=epic-x") '("t1")))
+      (should (string-match-p "--json" seen))
+      (should-not (string-match-p "--all" seen)))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (cmd)
+                 (setq seen cmd)
+                 (cons 0 "[{\"id\":\"t1\"}]"))))
+      (should (equal (maduin-bd-query "parent=epic-x" t) '("t1")))
+      (should (string-match-p "--all" seen)))))
+
+(ert-deftest maduin-test-bd-epic-children-includes-closed ()
+  :tags '(maduin)
+  ;; Epic-children MUST include closed children (`--all'), else a done epic
+  ;; looks undecomposed and Ramuh re-dispatches decomposition on it.
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (cmd)
+                 (setq seen cmd)
+                 (cons 0 "[{\"id\":\"c1\"},{\"id\":\"c2\"}]"))))
+      (should (equal (maduin-bd-epic-children "epic-x") '("c1" "c2")))
+      (should (string-match-p "epic-x" seen))
+      (should (string-match-p "--all" seen)))))
+
+(ert-deftest maduin-test-bd-release-resets-status-open ()
+  :tags '(maduin)
+  ;; Releasing a claim must reset status to open (bd update ID --status open).
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (cmd)
+                 (setq seen cmd)
+                 (cons 0 ""))))
+      (should (maduin-bd-release "t1"))
+      (should (string-match-p "t1" seen))
+      (should (string-match-p "--status open" seen)))))
 
 ;;; 4. session
 
@@ -241,6 +330,21 @@ Mimics an opencode subprocess so session tests need no real CLI."
 (ert-deftest maduin-test-session-parse-garbage ()
   :tags '(maduin)
   (should-not (maduin-session--parse-line "not json at all")))
+
+(ert-deftest maduin-test-session-usage-limit-line ()
+  :tags '(maduin)
+  (should (maduin-session--usage-limit-line-p
+           "{\"type\":\"message.updated\",\"info\":{\"error\":{\"name\":\"APIError\",\"data\":{\"statusCode\":429,\"message\":\"usage limit exceeded\"}}}}"))
+  (should (maduin-session--usage-limit-line-p
+           "{\"type\":\"session.error\",\"error\":\"rate limit reached\"}"))
+  (should (maduin-session--usage-limit-line-p
+           "{\"type\":\"message.updated\",\"info\":{\"error\":{\"data\":{\"message\":\"429 Too Many Requests\"}}}}"))
+  ;; Model text mentioning 429/error in ordinary output is NOT a limit.
+  (should-not (maduin-session--usage-limit-line-p
+               "{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"handle HTTP 429 error responses\"}}"))
+  ;; Bare failure with no usage/limit signal is NOT a limit.
+  (should-not (maduin-session--usage-limit-line-p
+               "{\"type\":\"step_finish\",\"part\":{\"reason\":\"error\"}}")))
 
 (ert-deftest maduin-test-session-run-missing-cli ()
   :tags '(maduin)
@@ -351,6 +455,17 @@ Mimics an opencode subprocess so session tests need no real CLI."
   (should (equal (maduin-pipeline-fleet-seats)
                  '("ifrit" "shiva" "titan"))))
 
+(ert-deftest maduin-test-pipeline-fleet-busy-dispatch ()
+  :tags '(maduin)
+  ;; Fleet busy must read the dispatch active registry (demand-driven
+  ;; source of truth), not legacy seat-buffer sessions.
+  (let ((maduin-dispatch--active
+         '((:handle "h1" :seat "ifrit" :role implementer :task "bd-1")
+           (:handle "h2" :seat "shiva" :role designer :task "bd-2"))))
+    (should (= (maduin-pipeline--fleet-busy-count) 1)))
+  (let ((maduin-dispatch--active nil))
+    (should (= (maduin-pipeline--fleet-busy-count) 0))))
+
 ;;; 8. cockpit
 
 (ert-deftest maduin-test-cockpit-show ()
@@ -373,18 +488,528 @@ Mimics an opencode subprocess so session tests need no real CLI."
             (error (should t))))
       (kill-buffer buf))))
 
-(ert-deftest maduin-test-cockpit-seat-status-dispatch ()
+(ert-deftest maduin-test-cockpit-refresh-interval-bound ()
   :tags '(maduin)
-  ;; Demand-driven mode: seat status must come from the dispatch active
-  ;; registry, not the (absent) legacy seat buffers.
-  (let ((maduin-dispatch--active
-         '((:handle "h1" :seat "ifrit" :role implementer :task "bd-1"))))
-    (let ((status (maduin-cockpit--seat-status "ifrit")))
-      (should (eq (plist-get status :status) 'working))
-      (should (equal (plist-get status :task) "bd-1"))))
-  ;; Idle seat with no dispatch entry falls back to legacy (nil → dead).
-  (let ((maduin-dispatch--active nil))
-    (should (null (maduin-cockpit--seat-status "ifrit")))))
+  (should (integerp maduin-cockpit-refresh-interval))
+  (should (> maduin-cockpit-refresh-interval 0)))
+
+(ert-deftest maduin-test-cockpit-timer-start-stop ()
+  :tags '(maduin)
+  (unwind-protect
+      (progn
+        (maduin-cockpit--start-timer)
+        (should maduin-cockpit--timer)
+        (should (timerp maduin-cockpit--timer))
+        ;; Idempotent: starting twice keeps one timer.
+        (let ((t1 maduin-cockpit--timer))
+          (maduin-cockpit--start-timer)
+          (should (eq t1 maduin-cockpit--timer)))
+        (maduin-cockpit--stop-timer)
+        (should (null maduin-cockpit--timer)))
+    (when maduin-cockpit--timer
+      (cancel-timer maduin-cockpit--timer)
+      (setq maduin-cockpit--timer nil))))
+
+(ert-deftest maduin-test-cockpit-auto-refresh-cancels-when-hidden ()
+  :tags '(maduin)
+  ;; In batch (no windows) the buffer is never visible, so one tick must
+  ;; cancel the timer instead of refreshing (prevents timer leak).
+  (unwind-protect
+      (progn
+        (maduin-cockpit--start-timer)
+        (maduin-cockpit--auto-refresh)
+        (should (null maduin-cockpit--timer)))
+    (when maduin-cockpit--timer
+      (cancel-timer maduin-cockpit--timer)
+      (setq maduin-cockpit--timer nil))))
+
+;;; 8b. cockpit-face
+
+(ert-deftest maduin-test-cockpit-face-state-face-known ()
+  :tags '(maduin)
+  (dolist (s '(dead idle working running repairing))
+    (should (facep (maduin-cockpit-state-face s))))
+  (should (null (maduin-cockpit-state-face 'unknown)))
+  (should (null (maduin-cockpit-state-face nil))))
+
+(ert-deftest maduin-test-cockpit-face-state-color-known ()
+  :tags '(maduin)
+  (dolist (s '(dead idle working running repairing))
+    (let ((c (maduin-cockpit-state-color s)))
+      (should (stringp c))
+      (should (> (length c) 0))))
+  (should (null (maduin-cockpit-state-color 'unknown)))
+  (should (null (maduin-cockpit-state-color nil))))
+
+(ert-deftest maduin-test-cockpit-face-chip-face-known ()
+  :tags '(maduin)
+  (dolist (k '(queued active completed blocked fleet-free fleet-busy))
+    (should (facep (maduin-cockpit-chip-face k))))
+  (should (null (maduin-cockpit-chip-face 'unknown))))
+
+(ert-deftest maduin-test-cockpit-face-setup-creates-all ()
+  :tags '(maduin)
+  (maduin-cockpit-face-setup)
+  (dolist (f maduin-cockpit-face--pill-faces)
+    (should (facep f))))
+
+(ert-deftest maduin-test-cockpit-face-adapt-batch-safe ()
+  :tags '(maduin)
+  (condition-case nil
+      (progn (maduin-cockpit-face-adapt) (should t))
+    (error (should nil))))
+
+(ert-deftest maduin-test-cockpit-face-adapt-pill-box ()
+  :tags '(maduin)
+  (maduin-cockpit-face-adapt)
+  (if (display-graphic-p)
+      (dolist (f maduin-cockpit-face--pill-faces)
+        (should (eq (face-attribute f :box nil 'default) t)))
+    (should t)))
+
+;;; 8c. cockpit-rich
+
+(ert-deftest maduin-test-cockpit-seat-status-rich ()
+  :tags '(maduin)
+  (cl-letf (((symbol-value 'maduin-dispatch--active)
+             (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1")))
+            ((symbol-function 'maduin-agent-status)
+             (lambda (_seat) (list :status 'idle :task "t0" :uptime 42.0 :model "m0" :role 'designer)))
+            ((symbol-function 'maduin-bd--run)
+             (lambda (_cmd) (cons 0 "[{\"title\": \"T1 title\"}]"))))
+    (let ((st (maduin-cockpit--seat-status "ifrit")))
+      (should (equal (plist-get st :seat) "ifrit"))
+      (should (eq (plist-get st :role) 'implementer))    ; dispatch wins
+      (should (eq (plist-get st :status) 'working))      ; dispatch ⇒ working
+      (should (equal (plist-get st :task-id) "t1"))      ; dispatch wins
+      (should (equal (plist-get st :task-title) "T1 title"))
+      (should (equal (plist-get st :model) "m0"))
+      (should (equal (plist-get st :uptime) 42.0))
+      (should (null (plist-get st :phase)))
+      (should (= (length st) 16)))))                      ; 8 keys
+
+(ert-deftest maduin-test-cockpit-seat-status-fallback ()
+  :tags '(maduin)
+  (cl-letf (((symbol-value 'maduin-dispatch--active) nil)
+            ((symbol-function 'maduin-agent-status)
+             (lambda (_seat) (list :status 'running :task "t9" :uptime 7.0 :model "m9" :role 'concierge)))
+            ((symbol-function 'maduin-bd--run)
+             (lambda (_cmd) (cons 0 "[{\"title\": \"T9 title\"}]"))))
+    (let ((st (maduin-cockpit--seat-status "shiva")))
+      (should (eq (plist-get st :status) 'running))
+      (should (equal (plist-get st :task-id) "t9"))
+      (should (equal (plist-get st :task-title) "T9 title"))
+      (should (equal (plist-get st :model) "m9"))
+      (should (equal (plist-get st :role) 'concierge)))))
+
+(ert-deftest maduin-test-cockpit-task-title-success ()
+  :tags '(maduin)
+  (setq maduin-cockpit--title-cache nil)
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (_cmd)
+                 (cl-incf calls)
+                 (cons 0 "[{\"title\": \"Big Title\"}]"))))
+      (should (equal (maduin-cockpit--task-title "maduin-x") "Big Title"))
+      (should (= calls 1))
+      ;; Cache hit: second call must not re-run bd.
+      (should (equal (maduin-cockpit--task-title "maduin-x") "Big Title"))
+      (should (= calls 1))))
+  (setq maduin-cockpit--title-cache nil))
+
+(ert-deftest maduin-test-cockpit-task-title-object-shape ()
+  :tags '(maduin)
+  (setq maduin-cockpit--title-cache nil)
+  (cl-letf (((symbol-function 'maduin-bd--run)
+             (lambda (_cmd) (cons 0 "{\"title\": \"Obj Title\"}"))))
+    (should (equal (maduin-cockpit--task-title "maduin-z") "Obj Title")))
+  (setq maduin-cockpit--title-cache nil))
+
+(ert-deftest maduin-test-cockpit-task-title-failure ()
+  :tags '(maduin)
+  (setq maduin-cockpit--title-cache nil)
+  (cl-letf (((symbol-function 'maduin-bd--run)
+             (lambda (_cmd) (cons 1 "error output"))))
+    (should (null (maduin-cockpit--task-title "maduin-y"))))
+  (setq maduin-cockpit--title-cache nil))
+
+(ert-deftest maduin-test-cockpit-status-pill-known ()
+  :tags '(maduin)
+  (dolist (s '(dead idle working running repairing))
+    (let ((pill (maduin-cockpit--status-pill s)))
+      (should (string= pill (symbol-name s)))
+      (should (eq (get-text-property 0 'face pill)
+                  (maduin-cockpit-state-face s))))))
+
+(ert-deftest maduin-test-cockpit-status-pill-unknown ()
+  :tags '(maduin)
+  (let ((pill (maduin-cockpit--status-pill 'mystery)))
+    (should (string= pill "mystery"))
+    (should (null (get-text-property 0 'face pill))))
+  (let ((pill (maduin-cockpit--status-pill nil)))
+    (should (string= pill "dead"))
+    (should (null (get-text-property 0 'face pill)))))
+
+(ert-deftest maduin-test-cockpit-pipeline-summary-chips ()
+  :tags '(maduin)
+  (let ((summary (maduin-cockpit--pipeline-summary)))
+    (dolist (k '(queued active completed blocked fleet-free fleet-busy))
+      (should (string-match-p (symbol-name k) summary))
+      (let ((pos (string-match (symbol-name k) summary)))
+        (should (facep (get-text-property pos 'face summary)))))))
+
+(ert-deftest maduin-test-cockpit-refresh-format-7-columns ()
+  :tags '(maduin)
+  (let ((buf (get-buffer-create "*maduin-cockpit*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (tabulated-list-mode)
+          (setq maduin-cockpit--title-cache (list (cons "stale" "old")))
+          (maduin-cockpit-refresh)
+          (should (= (length tabulated-list-format) 7))
+          (should (equal (elt (aref tabulated-list-format 0) 0) "Seat"))
+          (should (equal (elt (aref tabulated-list-format 1) 0) "Role"))
+          (should (equal (elt (aref tabulated-list-format 2) 0) "Status"))
+          (should (equal (elt (aref tabulated-list-format 3) 0) "Task"))
+          (should (equal (elt (aref tabulated-list-format 4) 0) "Model"))
+          (should (equal (elt (aref tabulated-list-format 5) 0) "Uptime(s)"))
+          (should (equal (elt (aref tabulated-list-format 6) 0) "Activity"))
+          (should (null maduin-cockpit--title-cache)))
+      (kill-buffer buf))))
+
+;;; 8d. cockpit-live
+
+(ert-deftest maduin-test-cockpit-live-refresh-hook-defined ()
+  :tags '(maduin)
+  (should (boundp 'maduin-cockpit-refresh-hook))
+  (should (listp maduin-cockpit-refresh-hook)))
+
+(ert-deftest maduin-test-cockpit-live-register-once ()
+  :tags '(maduin)
+  (maduin-cockpit--register-live-updates)
+  (maduin-cockpit--register-live-updates)
+  (should (memq #'maduin-cockpit--schedule-refresh maduin-cockpit-refresh-hook))
+  (should (memq #'maduin-cockpit--on-complete maduin-session-on-complete-hook))
+  (should (= (cl-count #'maduin-cockpit--schedule-refresh
+                       maduin-cockpit-refresh-hook)
+             1))
+  (should (= (cl-count #'maduin-cockpit--on-complete
+                       maduin-session-on-complete-hook)
+             1)))
+
+(ert-deftest maduin-test-cockpit-live-schedule-refresh-visible ()
+  :tags '(maduin)
+  ;; Visible cockpit buffer → schedule a single-shot idle timer.
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (maduin-cockpit--idle-timer nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t)))
+          (maduin-cockpit--schedule-refresh)
+          (should (timerp maduin-cockpit--idle-timer)))
+      (when (timerp maduin-cockpit--idle-timer)
+        (cancel-timer maduin-cockpit--idle-timer))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-schedule-refresh-buried-noop ()
+  :tags '(maduin)
+  ;; Buried (hidden) cockpit buffer → no timer scheduled.
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (maduin-cockpit--idle-timer nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) nil)))
+          (maduin-cockpit--schedule-refresh)
+          (should (null maduin-cockpit--idle-timer)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-schedule-refresh-absent-noop ()
+  :tags '(maduin)
+  ;; No cockpit buffer at all → no timer scheduled, no error.
+  (let ((maduin-cockpit--idle-timer nil))
+    (when (get-buffer "*maduin-cockpit*") (kill-buffer "*maduin-cockpit*"))
+    (maduin-cockpit--schedule-refresh)
+    (should (null maduin-cockpit--idle-timer))))
+
+(ert-deftest maduin-test-cockpit-live-idle-refresh-visible-runs ()
+  :tags '(maduin)
+  ;; The idle-timer callback refreshes when the buffer is visible.
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (count 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t))
+                  ((symbol-function 'maduin-cockpit-refresh)
+                   (lambda () (setq count (1+ count)))))
+          (with-current-buffer buf (tabulated-list-mode))
+          (maduin-cockpit--idle-refresh)
+          (should (= count 1)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-idle-refresh-buried-noop ()
+  :tags '(maduin)
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (count 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) nil))
+                  ((symbol-function 'maduin-cockpit-refresh)
+                   (lambda () (setq count (1+ count)))))
+          (maduin-cockpit--idle-refresh)
+          (should (= count 0)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-on-complete-runs-hook ()
+  :tags '(maduin)
+  (let* ((count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
+    (maduin-cockpit--on-complete "s-1" 'completed)
+    (should (= count 1))))
+
+(ert-deftest maduin-test-cockpit-live-on-window-change-selected ()
+  :tags '(maduin)
+  ;; Cockpit in the selected window → refresh hook runs.
+  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
+         (orig (window-buffer (selected-window)))
+         (count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buf)
+          (maduin-cockpit--on-window-change)
+          (should (= count 1)))
+      (set-window-buffer (selected-window) orig)
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-on-window-change-not-selected ()
+  :tags '(maduin)
+  ;; Selected window shows another buffer → no refresh (cheap guard).
+  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
+         (other (get-buffer-create "*maduin-cockpit-live-other*"))
+         (count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) other)
+          (maduin-cockpit--on-window-change)
+          (should (= count 0)))
+      (kill-buffer buf)
+      (kill-buffer other))))
+
+(ert-deftest maduin-test-dispatch-spawn-runs-cockpit-refresh-hook ()
+  :tags '(maduin)
+  ;; Spawn path nudge: dispatch fires the guarded refresh hook, no require.
+  (let* ((dir (maduin-test--temp-dir))
+         (count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count)))))
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir)))
+    (unwind-protect
+        (progn
+          (should (equal (maduin-dispatch-implement "t1") "s-1"))
+          (should (= count 1)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-on-complete-runs-cockpit-refresh-hook ()
+  :tags '(maduin)
+  ;; Removal path nudge: completion fires the guarded refresh hook.
+  (let* ((dir (maduin-test--temp-dir))
+         (count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count)))))
+         (maduin-dispatch--active
+          (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1")))
+         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--land-fn (lambda (_seat) t))
+         (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch--on-complete "s-1" 'completed)
+          (should (= count 1))
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
+;;; 8e. cockpit-inbox (embedded chaplet inbox)
+
+(ert-deftest maduin-test-cockpit-show-inbox-absent-still-renders ()
+  :tags '(maduin)
+  ;; chaplet absent → cockpit still renders, message issued, no error.
+  (let ((msg nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'require)
+                   (lambda (_feature &optional _na _ne) nil))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq msg (apply #'format fmt args)))))
+          (should (bufferp (maduin-cockpit-show)))
+          (should (get-buffer "*maduin-cockpit*"))
+          (should (string-match-p "chaplet" msg)))
+      (when (get-buffer "*maduin-cockpit*")
+        (kill-buffer "*maduin-cockpit*")))))
+
+(ert-deftest maduin-test-cockpit-inbox-embed-absent-noop ()
+  :tags '(maduin)
+  ;; chaplet not loadable → nil + message, never an error.
+  (let ((msg nil))
+    (cl-letf (((symbol-function 'require)
+               (lambda (_feature &optional _na _ne) nil))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq msg (apply #'format fmt args)))))
+      (should-not (maduin-cockpit--embed-inbox)))
+    (should (string-match-p "chaplet" msg))))
+
+(ert-deftest maduin-test-cockpit-inbox-embed-present ()
+  :tags '(maduin)
+  ;; chaplet available (mocked) → lower window returned, view set inbox,
+  ;; cockpit buffer stays in the main (selected) window.
+  (let ((view nil)
+        (buf (get-buffer-create "*maduin-cockpit*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (let ((main (selected-window)))
+            (cl-letf (((symbol-function 'require)
+                       (lambda (_feature &optional _na _ne) t))
+                      ((symbol-function 'chaplet-list-set-view)
+                       (lambda (name) (setq view name))))
+              (let ((win (maduin-cockpit--embed-inbox)))
+                (unwind-protect
+                    (progn
+                      (should (windowp win))
+                      (should (eq view 'inbox))
+                      (should (eq (selected-window) main))
+                      (should (eq (window-buffer main) buf))
+                      (should-not (eq win main)))
+                  (when (and win (windowp win) (window-live-p win))
+                    (ignore-errors (delete-window win))))))))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-inbox-refresh-noop-no-buffer ()
+  :tags '(maduin)
+  ;; Inbox buffer absent → refresh fn never invoked, silent no-op.
+  (when (get-buffer "*chaplet*") (kill-buffer "*chaplet*"))
+  (let ((called nil))
+    (cl-letf (((symbol-function 'chaplet-list-refresh)
+               (lambda () (setq called t))))
+      (should-not (maduin-cockpit--inbox-refresh))
+      (should-not called))))
+
+(ert-deftest maduin-test-cockpit-inbox-refresh-refreshes-when-present ()
+  :tags '(maduin)
+  ;; Inbox buffer live in chaplet-list-mode → refresh invoked once.
+  (let ((buf (get-buffer-create "*chaplet*"))
+        (called nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq major-mode 'chaplet-list-mode))
+          (cl-letf (((symbol-function 'chaplet-list-refresh)
+                     (lambda () (setq called t))))
+            (should (maduin-cockpit--inbox-refresh))
+            (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-auto-refresh-inbox-absent-no-error ()
+  :tags '(maduin)
+  ;; Visible cockpit + inbox absent → auto-refresh refreshes cockpit and the
+  ;; inbox refresh is a silent no-op (no error).
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (count 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t))
+                  ((symbol-function 'maduin-cockpit-refresh)
+                   (lambda () (setq count (1+ count)))))
+          (with-current-buffer buf (tabulated-list-mode))
+          (maduin-cockpit--auto-refresh)
+          (should (= count 1)))
+      (when maduin-cockpit--timer
+        (cancel-timer maduin-cockpit--timer)
+        (setq maduin-cockpit--timer nil))
+      (kill-buffer buf))))
+
+;;; 8f. cockpit-evil (evil-aware keybindings + inbox jump)
+
+(ert-deftest maduin-test-cockpit-evil-symbols-exist ()
+  :tags '(maduin)
+  (should (fboundp 'maduin-cockpit--bind))
+  (should (fboundp 'maduin-cockpit--evil-setup))
+  (should (commandp 'maduin-cockpit-inbox)))
+
+(ert-deftest maduin-test-cockpit-evil-plain-map-bindings ()
+  :tags '(maduin)
+  ;; Plain map carries RET/r/q/k/i via the single-source-of-truth helper.
+  (should (eq (lookup-key maduin-cockpit-map (kbd "RET"))
+              'maduin-cockpit-attach))
+  (should (eq (lookup-key maduin-cockpit-map (kbd "r"))
+              'maduin-cockpit-refresh))
+  (should (eq (lookup-key maduin-cockpit-map (kbd "q"))
+              'quit-window))
+  (should (eq (lookup-key maduin-cockpit-map (kbd "k"))
+              'maduin-cockpit-kill))
+  (should (eq (lookup-key maduin-cockpit-map (kbd "i"))
+              'maduin-cockpit-inbox))
+  ;; Leak suppression is evil-only: plain map must NOT bind "v".
+  (should-not (lookup-key maduin-cockpit-map (kbd "v"))))
+
+(ert-deftest maduin-test-cockpit-evil-setup-mirrors-normal-motion ()
+  :tags '(maduin)
+  ;; featurep+mock recorder: normal/motion receive the shared bindings AND
+  ;; the leak keys (v etc.) bound to nil.
+  (let ((recorded nil))
+    (cl-letf (((symbol-function 'featurep)
+               (lambda (f &optional _sub) (eq f 'evil)))
+              ((symbol-function 'fboundp)
+               (lambda (f) (eq f 'evil-define-key*)))
+              ((symbol-function 'evil-define-key*)
+               (lambda (state _map key def)
+                 (push (list state key def) recorded))))
+      (maduin-cockpit--evil-setup)
+      (dolist (binding maduin-cockpit--bindings)
+        (let ((key (kbd (car binding))) (def (cdr binding)))
+          (should (member (list 'normal key def) recorded))
+          (should (member (list 'motion key def) recorded))))
+      ;; v (and every suppress key) → nil in BOTH evil states.
+      (should (member (list 'normal (kbd "v") nil) recorded))
+      (should (member (list 'motion (kbd "v") nil) recorded))
+      (dolist (key maduin-cockpit--evil-suppress-keys)
+        (should (member (list 'normal (kbd key) nil) recorded))
+        (should (member (list 'motion (kbd key) nil) recorded))))))
+
+(ert-deftest maduin-test-cockpit-evil-setup-no-evil-noop ()
+  :tags '(maduin)
+  ;; evil absent → guard short-circuits, evil-define-key* never called.
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'featurep) (lambda (_f &optional _s) nil))
+              ((symbol-function 'evil-define-key*)
+               (lambda (&rest _) (cl-incf calls))))
+      (maduin-cockpit--evil-setup)
+      (should (= calls 0)))))
+
+(ert-deftest maduin-test-cockpit-inbox-selects-window ()
+  :tags '(maduin)
+  ;; Inbox window live → select-window invoked on it.
+  (let ((win (selected-window))
+        (selected nil))
+    (cl-letf (((symbol-function 'get-buffer-window)
+               (lambda (_buf &optional _f) win))
+              ((symbol-function 'select-window)
+               (lambda (w) (setq selected w))))
+      (maduin-cockpit-inbox)
+      (should (eq selected win)))))
+
+(ert-deftest maduin-test-cockpit-inbox-absent-message ()
+  :tags '(maduin)
+  ;; Inbox absent → polite message, no error, no selection.
+  (let ((msg nil))
+    (cl-letf (((symbol-function 'get-buffer-window)
+               (lambda (_buf &optional _f) nil))
+              ((symbol-function 'select-window)
+               (lambda (_w) (error "must not select")))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq msg (apply #'format fmt args)))))
+      (maduin-cockpit-inbox)
+      (should (string-match-p "no inbox" msg)))))
 
 ;;; 9. main
 
@@ -449,6 +1074,99 @@ Mimics an opencode subprocess so session tests need no real CLI."
                         (format "git branch -D %s"
                                 (shell-quote-argument seat))))))))
 
+(ert-deftest maduin-test-workspace-cleanup-removes-real-worktree ()
+  :tags '(maduin)
+  ;; Scratch repo: git init + seed commit off the harness dir, then a REAL
+  ;; worktree + branch, all under a temp dir.  Seams point cleanup at the
+  ;; scratch repo; after cleanup the worktree is unregistered and the branch
+  ;; is gone.  Never touches the real main repo.
+  (let* ((dir (maduin-test--temp-dir))
+         (wt (expand-file-name "wt" dir))
+         (branch "cleanup-branch-xyz")
+         (result nil)
+         (maduin-workspace--main-root-fn (lambda () dir)))
+    (unwind-protect
+        (progn
+          (maduin-workspace--git dir "init" "-q")
+          (maduin-workspace--git dir "config" "user.email" "t@example.com")
+          (maduin-workspace--git dir "config" "user.name" "Test")
+          (write-region "seed\n" nil (expand-file-name "seed.txt" dir))
+          (maduin-workspace--git dir "add" "-A")
+          (maduin-workspace--git dir "commit" "-q" "-m" "seed")
+          (maduin-workspace--git dir "worktree" "add" wt "-b" branch)
+          (should (maduin-bd-worktree-real-p wt))
+          (cl-letf (((symbol-function 'maduin-workspace-path) (lambda (_s) wt))
+                    ((symbol-function 'maduin-workspace-branch) (lambda (_s) branch)))
+            (setq result (maduin-workspace-cleanup "test-seat")))
+          (should (eq result t))
+          (should-not (maduin-bd-worktree-real-p wt))
+          (should (/= 0 (car (maduin-workspace--git-output
+                              dir "rev-parse" "--verify" branch)))))
+      (ignore-errors (delete-directory wt t))
+      (ignore-errors (maduin-workspace--git dir "worktree" "prune"))
+      (ignore-errors (delete-directory dir t)))))
+
+(ert-deftest maduin-test-workspace-cleanup-missing-worktree ()
+  :tags '(maduin)
+  ;; Worktree dir missing → t immediately, no git calls at all.
+  (let* ((dir (maduin-test--temp-dir))
+         (maduin-workspace--main-root-fn (lambda () dir))
+         (maduin-workspace--git-fn (lambda (&rest _) (error "git-fn must not run")))
+         (maduin-workspace--git-output-fn
+          (lambda (&rest _) (error "git-output-fn must not run"))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-workspace-path)
+                   (lambda (_s) (expand-file-name "no-such-wt" dir)))
+                  ((symbol-function 'maduin-workspace-branch)
+                   (lambda (_s) "missing-branch-xyz")))
+          (should (eq (maduin-workspace-cleanup "test-seat") t)))
+      (ignore-errors (delete-directory dir t)))))
+
+(ert-deftest maduin-test-workspace-cleanup-remove-failure ()
+  :tags '(maduin)
+  ;; Branch verifies, but `git worktree remove' fails → nil + warning,
+  ;; tree left (no delete-directory fallback).
+  (let* ((dir (maduin-test--temp-dir))
+         (wt (expand-file-name "wt" dir))
+         (logged nil)
+         (maduin-workspace--main-root-fn (lambda () dir))
+         (maduin-workspace--git-fn
+          (lambda (_d &rest args) (if (member "remove" args) 1 0)))
+         (maduin-workspace--git-output-fn
+          (lambda (_d &rest _args) (cons 0 "abc123\n"))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-workspace-path) (lambda (_s) wt))
+                  ((symbol-function 'maduin-workspace-branch)
+                   (lambda (_s) "cleanup-branch-xyz"))
+                  ((symbol-function 'maduin-workspace--log-warning)
+                   (lambda (msg) (setq logged msg))))
+          (make-directory wt t)
+          (should (null (maduin-workspace-cleanup "test-seat")))
+          (should (stringp logged))
+          (should (file-directory-p wt)))
+      (ignore-errors (delete-directory dir t)))))
+
+(ert-deftest maduin-test-workspace-cleanup-missing-branch ()
+  :tags '(maduin)
+  ;; Worktree exists but branch no longer verifies → t without branch -D.
+  ;; git-fn errors on any "-D" call; reaching it would flip the result to nil.
+  (let* ((dir (maduin-test--temp-dir))
+         (wt (expand-file-name "wt" dir))
+         (maduin-workspace--main-root-fn (lambda () dir))
+         (maduin-workspace--git-fn
+          (lambda (_d &rest args)
+            (when (member "-D" args) (error "branch -D must not run"))
+            0))
+         (maduin-workspace--git-output-fn
+          (lambda (_d &rest _args) (cons 128 "fatal: needed a single revision\n"))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-workspace-path) (lambda (_s) wt))
+                  ((symbol-function 'maduin-workspace-branch)
+                   (lambda (_s) "ghost-branch-xyz")))
+          (make-directory wt t)
+          (should (eq (maduin-workspace-cleanup "test-seat") t)))
+      (ignore-errors (delete-directory dir t)))))
+
 (ert-deftest maduin-test-bootstrap-no-error ()
   :tags '(maduin)
   (condition-case err
@@ -465,45 +1183,76 @@ Mimics an opencode subprocess so session tests need no real CLI."
     (error
      (ert-fail (format "land-branch errored: %s" (error-message-string err))))))
 
-(ert-deftest maduin-test-land-branch-nothing-to-land ()
+(ert-deftest maduin-test-land-branch-already-ancestor ()
   :tags '(maduin)
-  ;; Nothing staged → `git diff --cached --quiet' exits 0 → returns t.
+  ;; Seat branch (worktree HEAD) already an ancestor of main → skip the
+  ;; merge entirely and return t.  The git-output mock errors on any
+  ;; "merge" call, so reaching merge would fail the test.
   (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
         (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
         (maduin-pipeline--git-output-fn
-         (lambda (_dir &rest _args) (cons 0 ""))))
+         (lambda (_dir &rest args)
+           (when (member "merge" args)
+             (error "land-branch: merge must not run when already ancestor"))
+           (cons 0 ""))))
     (should (eq (maduin-pipeline-land-branch "test-seat") t))))
 
-(ert-deftest maduin-test-land-branch-conflict ()
+(ert-deftest maduin-test-land-branch-nothing-to-commit-still-merges ()
   :tags '(maduin)
-  ;; Staged changes → commit succeeds → branch verifies → merge reports a
-  ;; conflict → returns `conflict'.
+  ;; Worker pre-committed → `git commit' reports "nothing to commit" (exit
+  ;; 1), but the seat branch is not yet an ancestor of main → still merge,
+  ;; and return t on a clean merge.
   (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
         (maduin-pipeline--git-fn
-         (lambda (_dir &rest args) (if (member "diff" args) 1 0)))
+         (lambda (_dir &rest args) (if (member "merge-base" args) 1 0)))
         (maduin-pipeline--git-output-fn
          (lambda (_dir &rest args)
            (cond
-            ((member "commit" args) (cons 0 ""))
+            ((member "commit" args)
+             (cons 1 "nothing to commit, working tree clean\n"))
             ((member "rev-parse" args) (cons 0 "abc123\n"))
-            ((member "merge" args)
-             (cons 1 "CONFLICT (content): Merge conflict in foo.el\n"))))))
-    (should (eq (maduin-pipeline-land-branch "test-seat") 'conflict))))
+            ((member "merge" args) (cons 0 ""))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") t))))
+
+(ert-deftest maduin-test-land-branch-conflict ()
+  :tags '(maduin)
+  ;; Commit succeeds (or nothing to commit) → branch not an ancestor →
+  ;; branch verifies → merge reports a conflict → abort the failed merge in
+  ;; main (leaving it clean, no jammed MERGE_HEAD) → returns `conflict'.
+  (let* ((calls nil)
+         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+         (maduin-pipeline--git-fn
+          (lambda (_dir &rest args)
+            (push args calls)
+            (if (member "merge-base" args) 1 0)))
+         (maduin-pipeline--git-output-fn
+          (lambda (_dir &rest args)
+            (cond
+             ((member "commit" args) (cons 0 ""))
+             ((member "rev-parse" args) (cons 0 "abc123\n"))
+             ((member "merge" args)
+              (cons 1 "CONFLICT (content): Merge conflict in foo.el\n"))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") 'conflict))
+    ;; The failed merge must be aborted so main is left clean.
+    (should (cl-some (lambda (args) (equal args '("merge" "--abort"))) calls))))
 
 (ert-deftest maduin-test-land-branch-missing-branch ()
   :tags '(maduin)
-  ;; Staged changes commit, but the seat branch does not exist → logs a
-  ;; warning naming the branch and returns nil (never merges).
+  ;; Commit done (or nothing to commit), branch not an ancestor, but the
+  ;; seat branch does not exist → logs a warning naming the branch and
+  ;; returns nil (never merges).
   (let ((logged nil)
         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
         (maduin-pipeline--git-fn
-         (lambda (_dir &rest args) (if (member "diff" args) 1 0)))
+         (lambda (_dir &rest args) (if (member "merge-base" args) 1 0)))
         (maduin-pipeline--git-output-fn
          (lambda (_dir &rest args)
            (cond
@@ -521,7 +1270,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
   (let ((ws (cdr (assq 'workspaces maduin-config))))
     (should (eq (alist-get 'land-on-stop ws) t))))
 
-;;; 11. repairer
+;;; 11. repairer config
 
 (ert-deftest maduin-test-config-repairer-keys ()
   :tags '(maduin)
@@ -529,55 +1278,6 @@ Mimics an opencode subprocess so session tests need no real CLI."
     (should (eq (alist-get 'enabled repairer) t))
     (should (string= (alist-get 'model repairer) "opencode-go/deepseek-v4-pro"))
     (should (= (alist-get 'max-retries repairer) 3))))
-
-(ert-deftest maduin-test-repairer-active-p-bogus ()
-  :tags '(maduin)
-  (should-not (maduin-repairer-active-p "bogus-seat-xyz")))
-
-(ert-deftest maduin-test-repairer-prompt ()
-  :tags '(maduin)
-  (let ((prompt (maduin-repairer--prompt "prompt-seat-xyz" 'merge-conflict)))
-    (should (string-match-p "prompt-seat-xyz" prompt))
-    (should (string-match-p "RESOLVED_DONE" prompt))))
-
-(ert-deftest maduin-test-repairer-start-degraded ()
-  :tags '(maduin)
-  (let ((seat "degraded-seat-xyz")
-        (maduin-opencode-command "no-such-opencode-cli-xyz"))
-    (unwind-protect
-        (progn
-          (should-not (maduin-repairer-start seat))
-          (should-not (maduin-repairer-active-p seat))
-          (should (get-buffer "*maduin/repairer-degraded-seat-xyz*")))
-      (maduin-repairer-stop seat)
-      (when (get-buffer "*maduin/repairer-degraded-seat-xyz*")
-        (kill-buffer "*maduin/repairer-degraded-seat-xyz*")))))
-
-(ert-deftest maduin-test-repairer-start-fake-process ()
-  :tags '(maduin)
-  (let* ((script (maduin-test--fake-opencode))
-         (seat "fake-repairer-seat-xyz")
-         (workdir (maduin-workspace-path seat))
-         (maduin-opencode-command script))
-    (unwind-protect
-        (progn
-          (make-directory workdir t)
-          (maduin-repairer-start seat)
-          (should (maduin-repairer-active-p seat))
-          (maduin-repairer-stop seat)
-          (should-not (maduin-repairer-active-p seat)))
-      (delete-file script)
-      (maduin-repairer-stop seat)
-      (ignore-errors (delete-directory workdir t)))))
-
-(ert-deftest maduin-test-repairer-stop-inactive ()
-  :tags '(maduin)
-  (should
-   (condition-case nil
-       (progn
-         (maduin-repairer-stop "ghost-seat-xyz")
-         t)
-     (error nil))))
 
 ;;; 12. project root
 
@@ -743,7 +1443,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--diff-fn
           (lambda (_sid) (list '((file . "a.el") (patch . "+x")))))
          (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
-         (maduin-dispatch--close-fn (lambda (task out) (setq closed (cons task out)) t))
+         (maduin-dispatch--close-fn (lambda (task out &optional _dir) (setq closed (cons task out)) t))
          (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
     (unwind-protect
         (progn
@@ -760,21 +1460,66 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (let* ((dir (maduin-test--temp-dir))
          (commented nil)
+         (released nil)
          (closed nil)
          (maduin-dispatch--active nil)
          (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
-          (maduin-dispatch--close-fn (lambda (task _out) (setq closed task) t))
+          (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
          (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
           (maduin-dispatch-implement "t1")
           (maduin-dispatch--on-complete "s-1" 'failed)
           (should (equal (car commented) "t1"))
+          ;; Failed session must release the claim (status → open).
+          (should (equal released "t1"))
           (should-not closed)
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-usage-limit-falls-back ()
+  :tags '(maduin)
+  ;; A usage-limited implementer session re-dispatches on the fallback
+  ;; (go flash) model, holding the claim; a second failure releases it.
+  (let* ((dir (maduin-test--temp-dir))
+         (run-count 0)
+         (last-model nil)
+         (commented nil)
+         (released nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn
+          (lambda (_w m _a _p)
+            (setq run-count (1+ run-count))
+            (setq last-model m)
+            (format "s-%d" run-count)))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-session-usage-limited-p)
+                   (lambda (_sid) t)))
+          (maduin-dispatch-implement "t1")
+          (should (string= last-model "opencode/deepseek-v4-flash-free"))
+          ;; Usage limit → fallback re-dispatch (go flash), claim held.
+          (maduin-dispatch--on-complete "s-1" 'failed)
+          (should (= run-count 2))
+          (should (string= last-model "opencode-go/deepseek-v4-flash"))
+          (should (equal commented
+                         '("t1" . "usage limit — retrying with fallback model")))
+          (should-not released)
+          (should (= (length maduin-dispatch--active) 1))
+          ;; Fallback already attempted → second failure releases.
+          (maduin-dispatch--on-complete "s-2" 'failed)
+          (should (= run-count 2))
+          (should (equal released "t1"))
           (should-not maduin-dispatch--active))
       (delete-directory dir t))))
 
@@ -794,7 +1539,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--diff-fn (lambda (_sid) nil))
          (maduin-dispatch--land-fn (lambda (_seat) 'conflict))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
-         (maduin-dispatch--close-fn (lambda (_t _o) t))
+         (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
          (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -805,6 +1550,32 @@ Mimics an opencode subprocess so session tests need no real CLI."
           (should (equal (car commented) "t1"))
           (should (cl-find-if (lambda (e) (eq (plist-get e :role) 'repairer))
                               maduin-dispatch--active)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-completion-land-fail-releases ()
+  :tags '(maduin)
+  ;; Non-conflict land failure (nil) must release the claim so the task
+  ;; returns to open instead of staying in_progress forever.
+  (let* ((dir (maduin-test--temp-dir))
+         (released nil)
+         (closed nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--land-fn (lambda (_seat) nil))
+         (maduin-dispatch--comment-fn (lambda (_task _text) t))
+         (maduin-dispatch--close-fn (lambda (task _o &optional _dir) (setq closed task) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-implement "t1")
+          (maduin-dispatch--on-complete "s-1" 'completed)
+          (should (equal released "t1"))
+          (should-not closed))
       (delete-directory dir t))))
 
 (ert-deftest maduin-test-dispatch-run-loop-dispatches-ready ()
@@ -820,6 +1591,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--ready-fn (lambda () '("t1" "t2")))
+         (maduin-dispatch--in-progress-fn (lambda () nil))
          (maduin-dispatch--open-epics-fn (lambda () nil)))
     (unwind-protect
         (progn
@@ -828,10 +1600,40 @@ Mimics an opencode subprocess so session tests need no real CLI."
           (should (= (length maduin-dispatch--active) 2)))
       (delete-directory dir t))))
 
+(ert-deftest maduin-test-dispatch-orphaned-tasks ()
+  :tags '(maduin)
+  ;; in_progress tasks with a live dispatch session are NOT orphans.
+  (let ((maduin-dispatch--in-progress-fn (lambda () '("o1" "o2" "live")))
+        (maduin-dispatch--active
+         (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "live"))))
+    (should (equal (maduin-dispatch--orphaned-tasks) '("o1" "o2")))))
+
+(ert-deftest maduin-test-dispatch-recover-redispatches-orphans ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (run-count 0)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--in-progress-fn (lambda () '("orphan-1")))
+         (maduin-dispatch--session-run-fn
+          (lambda (_w _m _a _p)
+            (setq run-count (1+ run-count))
+            (format "s-%d" run-count)))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir)))
+    (unwind-protect
+        (progn
+          (should (= (maduin-dispatch--recover) 1))
+          (should (= run-count 1))
+          (should (cl-find-if (lambda (e) (string= (plist-get e :task) "orphan-1"))
+                              maduin-dispatch--active)))
+      (delete-directory dir t))))
+
 (ert-deftest maduin-test-dispatch-start-stop-timer ()
   :tags '(maduin)
   (let ((maduin-dispatch--timer nil)
         (maduin-dispatch--active nil)
+        (maduin-dispatch--in-progress-fn (lambda () nil))
         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -854,7 +1656,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn (lambda (_sid) nil))
          (maduin-dispatch--land-fn (lambda (_seat) t))
-         (maduin-dispatch--close-fn (lambda (_t _o) t))
+         (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
          (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
     (unwind-protect
         (progn
@@ -929,6 +1731,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--ready-fn (lambda () '("t1")))
+         (maduin-dispatch--in-progress-fn (lambda () nil))
          (maduin-dispatch--open-epics-fn
           (lambda () '("epic-x" "epic-y")))
          (maduin-dispatch--epic-children-fn
@@ -959,7 +1762,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn (lambda (_sid) nil))
          (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
-         (maduin-dispatch--close-fn (lambda (task _out) (setq closed task) t))
+         (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
          (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -1165,8 +1968,9 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (let ((maduin-dispatch--timer nil)
         (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn
-          (lambda (_w _m _a _p) (ert-fail "maduin-start must not spawn sessions")))
+        (maduin-dispatch--in-progress-fn (lambda () nil))
+        (maduin-dispatch--session-run-fn
+         (lambda (_w _m _a _p) (ert-fail "maduin-start must not spawn sessions")))
         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
     (unwind-protect
         (progn
@@ -1223,6 +2027,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
                  (deleted '())
                  (maduin-dispatch--active nil)
                  (maduin-dispatch--ready-fn (lambda () (list task)))
+                 (maduin-dispatch--in-progress-fn (lambda () nil))
                  (maduin-dispatch--open-epics-fn (lambda () nil))
                  (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-loop-1"))
                  (maduin-dispatch--claim-fn (lambda (_t) t))
@@ -1231,7 +2036,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
                  (maduin-dispatch--diff-fn
                   (lambda (_sid) (list '((file . "x.el") (patch . "+1")))))
                  (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
-                 (maduin-dispatch--close-fn (lambda (t2 _out) (setq closed t2) t))
+                 (maduin-dispatch--close-fn (lambda (t2 _out &optional _dir) (setq closed t2) t))
                  (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
             (unwind-protect
                 (progn
@@ -1293,16 +2098,16 @@ Mimics an opencode subprocess so session tests need no real CLI."
 
 (ert-deftest maduin-test-review-epic-children-closed-p ()
   :tags '(maduin)
-  (let ((maduin-review--query-fn (lambda (_q) '("t1" "t2")))
+  (let ((maduin-review--epic-children-fn (lambda (_epic) '("t1" "t2")))
         (maduin-review--show-fn (lambda (_id) (list :status "closed"))))
     (should (maduin-review--epic-children-closed-p "epic-x")))
-  (let ((maduin-review--query-fn (lambda (_q) '("t1" "t2")))
+  (let ((maduin-review--epic-children-fn (lambda (_epic) '("t1" "t2")))
         (maduin-review--show-fn
          (lambda (id)
            (list :status (if (string= id "t2") "in_progress" "closed")))))
     (should-not (maduin-review--epic-children-closed-p "epic-x")))
   ;; no children → not complete.
-  (let ((maduin-review--query-fn (lambda (_q) nil))
+  (let ((maduin-review--epic-children-fn (lambda (_epic) nil))
         (maduin-review--show-fn (lambda (_id) (list :status "closed"))))
     (should-not (maduin-review--epic-children-closed-p "epic-x"))))
 
@@ -1395,7 +2200,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-review--epic-starts nil)
          (maduin-review--show-fn
           (lambda (_id) (list :parent "epic-x" :status "closed")))
-         (maduin-review--query-fn (lambda (_q) '("t1")))
+         (maduin-review--epic-children-fn (lambda (_epic) '("t1")))
          (maduin-review--main-root-fn (lambda () "/repo"))
          (maduin-review--git-output-fn
           (lambda (_dir &rest _args) (cons 0 "sha\n"))))
@@ -1414,7 +2219,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
             (if (string= id "t1")
                 (list :parent "epic-x" :status "in_progress")
               (list :status "in_progress"))))
-         (maduin-review--query-fn (lambda (_q) '("t1" "t2"))))
+          (maduin-review--epic-children-fn (lambda (_epic) '("t1" "t2"))))
     (cl-letf (((symbol-function 'maduin-review-gate)
                (lambda (_epic) (setq gate-called t) 'approved)))
       (should (null (maduin-review--maybe-review-epic "t1")))

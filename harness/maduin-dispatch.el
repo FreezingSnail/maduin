@@ -50,10 +50,14 @@
   "Function `(seat)' → t | `conflict' | nil.")
 
 (defvar maduin-dispatch--close-fn #'maduin-bd-close
-  "Function `(task output)' → boolean.")
+  "Function `(task output &optional dir)' → boolean.
+DIR is the seat worktree the close output should land in.")
 
 (defvar maduin-dispatch--claim-fn #'maduin-bd-claim
   "Function `(task)' → boolean.")
+
+(defvar maduin-dispatch--release-fn #'maduin-bd-release
+  "Function `(task)' → boolean.  Releases a failed task's claim (status → open).")
 
 (defvar maduin-dispatch--ready-fn #'maduin-bd-ready-tasks
   "Function `()' → list of ready task id strings | nil.")
@@ -69,6 +73,10 @@
 
 (defvar maduin-dispatch--open-epics-fn #'maduin-bd-open-epics
   "Function `()' → list of open epic id strings | nil.")
+
+(defvar maduin-dispatch--in-progress-fn #'maduin-bd-in-progress-tasks
+  "Function `()' → list of in_progress task id strings | nil.
+Recovery seam: detects tasks orphaned by an Emacs quit mid-task.")
 
 (defvar maduin-dispatch--epic-children-fn #'maduin-bd-epic-children
   "Function `(epic)' → list of child id strings | nil.")
@@ -141,6 +149,12 @@ The run-loop picks up no new work while draining.")
     ('designer (maduin-dispatch--config-get 'designer 'agent))
     ('repairer (maduin-dispatch--config-get 'repairer 'agent))
     (_ nil)))
+
+(defun maduin-dispatch--seat-fallback (role)
+  "Return fallback model for ROLE, or nil.
+Only the fleet (implementer) role has a fallback (free-flash → go flash)."
+  (and (eq role 'implementer)
+       (maduin-dispatch--config-get 'fleet 'fallback)))
 
 ;;; Concurrency
 
@@ -229,15 +243,25 @@ PLAN overrides the role's default plan string (designer owns its prompt)."
               (maduin-dispatch--role-cap role))
     (let ((seat (or seat (maduin-dispatch--free-seat role))))
       (when (and seat (funcall maduin-dispatch--claim-fn task))
-        (let* ((model (or model (maduin-dispatch--seat-model-for role seat)))
-               (agent (maduin-dispatch--seat-agent-for role))
-               (workdir (funcall maduin-dispatch--workdir-fn seat))
-               (plan (or plan (maduin-dispatch--plan-for role task seat)))
-               (sid (funcall maduin-dispatch--session-run-fn workdir model agent plan)))
-          (when sid
-            (push (list :handle sid :seat seat :role role :task task)
-                  maduin-dispatch--active)
-            sid))))))
+        (maduin-dispatch--spawn-session task role seat model plan nil)))))
+
+(defun maduin-dispatch--spawn-session (task role seat model plan fallback-attempted)
+  "Spawn one ROLE session for TASK at SEAT (task already claimed) and
+register it in `maduin-dispatch--active'.  MODEL and PLAN override the
+seat defaults when non-nil.  FALLBACK-ATTEMPTED flags a re-dispatch
+using the seat's fallback model.  Return handle, or nil on spawn failure."
+  (let* ((model (or model (maduin-dispatch--seat-model-for role seat)))
+         (agent (maduin-dispatch--seat-agent-for role))
+         (workdir (funcall maduin-dispatch--workdir-fn seat))
+         (plan (or plan (maduin-dispatch--plan-for role task seat)))
+         (sid (funcall maduin-dispatch--session-run-fn workdir model agent plan)))
+    (when sid
+      (push (list :handle sid :seat seat :role role :task task
+                  :model model :fallback-attempted fallback-attempted)
+            maduin-dispatch--active)
+      (when (boundp 'maduin-cockpit-refresh-hook)
+        (run-hook-with-args 'maduin-cockpit-refresh-hook))
+      sid)))
 
 ;;; Completion → land → close
 
@@ -268,18 +292,38 @@ close: the epic stays open until its children are implemented."
     (cond
      ((eq land t)
       (unless (eq role 'designer)
-        (funcall maduin-dispatch--close-fn task output)))
+        (funcall maduin-dispatch--close-fn
+                 task output (funcall maduin-dispatch--workdir-fn seat))))
      ((eq land 'conflict)
       (funcall maduin-dispatch--comment-fn task "merge conflict — repairer dispatched")
       (unless (eq role 'repairer)
         (maduin-dispatch-repair seat task)))
      (t
-      (funcall maduin-dispatch--comment-fn task "land failed — task left open")))))
+      (funcall maduin-dispatch--comment-fn task "land failed — task left open")
+      ;; Release the claim so the task returns to open (bd ready) instead of
+      ;; staying in_progress forever.
+      (funcall maduin-dispatch--release-fn task)))))
 
-(defun maduin-dispatch--fail (entry)
-  "Handle failed session for ENTRY: report and keep the task open."
-  (funcall maduin-dispatch--comment-fn (plist-get entry :task)
-           "session failed — task left open"))
+(defun maduin-dispatch--fail (entry sid)
+  "Handle failed session for ENTRY: report and release the claim so the
+task returns to open (bd ready) rather than staying claimed in_progress.
+A usage/rate-limit failure on an implementer session that has a
+fallback model (and has not already used it) is instead re-dispatched
+with the fallback model, keeping the claim in place."
+  (let ((role (plist-get entry :role))
+        (seat (plist-get entry :seat))
+        (task (plist-get entry :task)))
+    (if (and (not (plist-get entry :fallback-attempted))
+             (maduin-session-usage-limited-p sid)
+             (maduin-dispatch--seat-fallback role))
+        (progn
+          (funcall maduin-dispatch--comment-fn
+                   task "usage limit — retrying with fallback model")
+          (maduin-dispatch--spawn-session
+           task 'implementer seat
+           (maduin-dispatch--seat-fallback role) nil t))
+      (funcall maduin-dispatch--comment-fn task "session failed — task left open")
+      (funcall maduin-dispatch--release-fn task))))
 
 (defun maduin-dispatch--on-complete (sid status)
   "Completion hook: route a finished session SID (STATUS `completed'|`failed').
@@ -294,9 +338,11 @@ while work is in flight)."
       (unwind-protect
           (if (eq status 'completed)
               (maduin-dispatch--complete entry sid)
-            (maduin-dispatch--fail entry))
+            (maduin-dispatch--fail entry sid))
         (funcall maduin-dispatch--session-delete-fn sid))
-      (maduin-dispatch--maybe-drained))))
+      (maduin-dispatch--maybe-drained)
+      (when (boundp 'maduin-cockpit-refresh-hook)
+        (run-hook-with-args 'maduin-cockpit-refresh-hook)))))
 
 (defun maduin-dispatch--maybe-drained ()
   "Signal soft-stop completion when draining and no sessions remain."
@@ -322,6 +368,30 @@ given, overrides the default design plan (the designer owns the prompt)."
 Return a session handle, or nil when a repairer is already active."
   (maduin-dispatch--spawn task 'repairer seat))
 
+;;; Recovery — orphaned in_progress tasks
+
+(defun maduin-dispatch--orphaned-tasks ()
+  "Return in_progress task IDs with no active dispatch session.
+A task claimed (in_progress) but absent from `maduin-dispatch--active'
+was orphaned by an Emacs quit mid-task; `bd ready' never re-surfaces it."
+  (let ((active (mapcar (lambda (e) (plist-get e :task))
+                        maduin-dispatch--active)))
+    (cl-remove-if (lambda (task) (member task active))
+                  (or (funcall maduin-dispatch--in-progress-fn) nil))))
+
+(defun maduin-dispatch--recover ()
+  "Re-dispatch orphaned in_progress tasks.
+Each orphan is re-dispatched via `maduin-dispatch-implement'; re-claim
+is idempotent (`bd update --claim' on an already-claimed-by-us task) so
+the spawn proceeds without double-work.  Respects the concurrency cap:
+a full fleet no-ops and retries on a later tick.  Return the number of
+tasks re-dispatched."
+  (let ((n 0))
+    (dolist (task (maduin-dispatch--orphaned-tasks))
+      (when (maduin-dispatch-implement task)
+        (setq n (1+ n))))
+    n))
+
 ;;; Run loop
 
 (defun maduin-dispatch--undecomposed-epics ()
@@ -339,11 +409,12 @@ no-ops once the designer role is at its cap."
     (funcall maduin-dispatch--epic-decompose-fn epic)))
 
 (defun maduin-dispatch-run-loop ()
-  "One tick: poll ready bd tasks and dispatch implement for each, then
-dispatch Ramuh decomposition for open epics lacking decomposition.
-Stops spawning once the implementer concurrency cap is reached.
-No-op while draining (soft stop in progress)."
+  "One tick: recover orphaned in_progress tasks, poll ready bd tasks and
+dispatch implement for each, then dispatch Ramuh decomposition for open
+epics lacking decomposition.  Stops spawning once the implementer
+concurrency cap is reached.  No-op while draining (soft stop in progress)."
   (unless maduin-dispatch--draining
+    (maduin-dispatch--recover)
     (let ((ready (funcall maduin-dispatch--ready-fn)))
       (dolist (task ready)
         (maduin-dispatch-implement task)))
@@ -365,7 +436,9 @@ Tasks are left open; their worktree changes persist for the next run."
 
 (defun maduin-dispatch-start ()
   "Activate dispatchers: register the completion hook and start the
-run-loop timer.  Spawns NO sessions."
+run-loop timer.  Runs one recovery pass immediately so tasks orphaned
+by a prior mid-task quit are re-dispatched without waiting for the
+first timer tick."
   (maduin-dispatch--register-hook)
   (when maduin-dispatch--timer
     (cancel-timer maduin-dispatch--timer)
@@ -373,6 +446,7 @@ run-loop timer.  Spawns NO sessions."
   (let ((interval (or (maduin-dispatch--config-get 'fleet 'poll-interval) 30)))
     (setq maduin-dispatch--timer
           (run-at-time interval interval #'maduin-dispatch-run-loop)))
+  (maduin-dispatch--recover)
   t)
 
 (defun maduin-dispatch-stop (&optional hard)

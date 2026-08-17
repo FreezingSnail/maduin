@@ -17,7 +17,7 @@ maduin dogfoods itself: maduin's own development is managed by maduin.
 ```
 concierge  →  intake & prioritize work
 designer   →  design, decompose into bd tasks (dependencies tracked)
-fleet      →  poll ready tasks → claim → implement → write output.md → close
+fleet      →  poll ready tasks → claim → implement → write output.md into seat worktree → close
 reviewer   →  batched drift-review gate (approve/reject)
 repairer   →  drift-fix on rejected review output
 ```
@@ -68,7 +68,7 @@ Restart Emacs (or run `M-x maduin-reload`).
 | `M-x maduin-start` | Activate dispatchers (demand-driven; spawns 0 sessions) |
 | `M-x maduin-stop` | Gracefully hand off and tear down any live sessions |
 | `M-x maduin-restart` | Stop then start |
-| `M-x maduin-status` | Refresh the cockpit and show a summary |
+| `M-x maduin-status` | Refresh the cockpit and show a summary (auto-refreshes while visible) |
 | `M-x maduin-attach` | Switch to a seat's session buffer |
 | `M-x maduin-reload` | Unload/reload all modules (edit-then-reload dev loop) |
 
@@ -102,7 +102,7 @@ blamelessness), `workspaces` (path, `land-on-stop`), `pipeline`
 Single entry point:
 
 ```bash
-harness/check.sh                     # clean + byte-compile + ERT (95 tests)
+harness/check.sh                     # clean + byte-compile + ERT (119 tests)
 harness/check.sh -c                  # compile only
 harness/check.sh -k                  # skip clean
 harness/check.sh probe probes/<f>.el # + exploratory probe test
@@ -141,11 +141,15 @@ harness/
 
 - **Exit codes lie.** `opencode run` exits 0 even on permission rejection.
   maduin parses NDJSON events (`step_finish.reason`, `tool_use.state.status`)
-  for the real completion signal. See `output.md` for the substrate spike.
+  for the real completion signal (see the session substrate in `maduin-session.el`).
 - **Buffers, not tmux.** Each seat is an Emacs buffer named
   `*maduin/{role}-{seat}*`.
 - **Shared state only via bd + brain.** Per-seat workspaces are isolated;
   nothing else touches another seat's tree.
+- **Close writes to the seat worktree.** Task summaries (`output.md`) land in
+  the task's own worktree, never the main repo root.
+- **Startup recovery.** Tasks left `in_progress` by a crashed/quit session are
+  detected on start and re-dispatched, so `bd ready` re-surfaces orphaned work.
 
 ## Inspiration
 

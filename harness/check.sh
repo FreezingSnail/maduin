@@ -38,10 +38,10 @@ FILES=(
   "maduin-review.el"
   "maduin-handoff.el"
   "maduin-dispatch.el"
+  "maduin-cockpit-face.el"
   "maduin-cockpit.el"
   "maduin-designer.el"
   "maduin-concierge.el"
-  "maduin-repairer.el"
   "maduin.el"
   "maduin-test.el"
 )

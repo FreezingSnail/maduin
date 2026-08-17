@@ -11,7 +11,10 @@
 
 ;;;###autoload
 (defcustom maduin-bd-close-file "output.md"
-  "File written by `maduin-bd-close' before closing the task."
+  "File name written by `maduin-bd-close' before closing the task.
+The file is resolved under the close directory (a seat worktree) —
+never the main repo root — so the root substrate-spike doc is not
+clobbered."
   :type 'string
   :group 'maduin)
 
@@ -74,7 +77,8 @@
 (defun maduin-bd-claim (task-id)
   "Claim TASK-ID via `bd update TASK-ID --claim'. Return t on success."
   (let ((res (maduin-bd--run
-              (format "bd update %s --claim" task-id))))
+              (format "bd update %s --claim"
+                      (shell-quote-argument task-id)))))
     (if (= 0 (car res))
         t
       (maduin-bd--log-error
@@ -82,12 +86,35 @@
                task-id (car res) (cdr res)))
       nil)))
 
-(defun maduin-bd-close (task-id output)
-  "Write OUTPUT to `maduin-bd-close-file', then close TASK-ID.
-Return t on success."
-  (let ((file maduin-bd-close-file))
-    (when (stringp output)
-      (with-temp-file file (insert output)))
+(defun maduin-bd-release (task-id)
+  "Release TASK-ID's claim: reset status to open.
+Used when a session fails or a land errors non-conflict, so the task is
+truly \"left open\" (returned to `bd ready') instead of staying claimed
+in_progress forever.  Return t on success."
+  (let ((res (maduin-bd--run
+              (format "bd update %s --status open"
+                      (shell-quote-argument task-id)))))
+    (if (= 0 (car res))
+        t
+      (maduin-bd--log-error
+       (format "bd update %s --status open failed (exit %d): %s"
+               task-id (car res) (cdr res)))
+      nil)))
+
+(defun maduin-bd-close-path (&optional dir)
+  "Return absolute path of `maduin-bd-close-file' under DIR.
+DIR defaults to `default-directory'."
+  (expand-file-name maduin-bd-close-file (or dir default-directory)))
+
+(defun maduin-bd-close (task-id output &optional dir)
+  "Write OUTPUT to `maduin-bd-close-file' inside DIR, then close TASK-ID.
+DIR is the seat worktree (or any per-task directory); it defaults to
+`default-directory'.  Return t on success."
+  (let ((file (maduin-bd-close-path dir)))
+    ;; Always write the file (empty when OUTPUT is nil) so the close's
+    ;; `--reason-file' always exists — even in the worktree dir.
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file (insert (or output "")))
     (let ((res (maduin-bd--run
                 (format "bd close %s --reason-file %s" task-id file))))
       (if (= 0 (car res))
@@ -224,11 +251,14 @@ Return t on success."
                id label (car res) (cdr res)))
       nil)))
 
-(defun maduin-bd-query (q)
+(defun maduin-bd-query (q &optional all)
   "Return list of issue IDs matching Q via `bd query Q --json'.
-Return nil on failure."
+When ALL is non-nil, include closed issues (`--all'; the CLI excludes
+them by default).  Return nil on failure."
   (let ((res (maduin-bd--run
-              (format "bd query %s --json" (shell-quote-argument q)))))
+              (format "bd query %s --json%s"
+                      (shell-quote-argument q)
+                      (if all " --all" "")))))
     (if (/= 0 (car res))
         (progn
           (maduin-bd--log-error
@@ -243,9 +273,19 @@ Query `status=open AND type=epic' — epics the run-loop may still need
 decomposing."
   (maduin-bd-query "status=open AND type=epic"))
 
+(defun maduin-bd-in-progress-tasks ()
+  "Return list of in_progress task ID strings, or nil.
+Query `status=in_progress AND type=task' — tasks that were claimed but
+may have been orphaned by an Emacs quit mid-task.  Dispatch recovery
+uses this to re-dispatch stuck work."
+  (maduin-bd-query "status=in_progress AND type=task"))
+
 (defun maduin-bd-epic-children (epic)
-  "Return list of child issue IDs under EPIC, or nil."
-  (maduin-bd-query (format "parent=%s" epic)))
+  "Return list of child issue IDs under EPIC (any status), or nil.
+Uses `--all' so a fully-implemented epic (all children closed) still
+reports its children — otherwise the run-loop treats a done epic as
+undecomposed and re-dispatches Ramuh decomposition."
+  (maduin-bd-query (format "parent=%s" epic) t))
 
 (defun maduin-bd-comment (id text)
   "Add TEXT as a comment on ID via `bd comment ID TEXT'. Return t on success."

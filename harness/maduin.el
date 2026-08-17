@@ -24,11 +24,11 @@
 (require 'maduin-handoff)
 (require 'maduin-pipeline)
 (require 'maduin-workspace)
-(require 'maduin-repairer)
 (require 'maduin-terminal)
 (require 'maduin-dispatch)
 (require 'maduin-concierge)
 (require 'maduin-designer)
+(require 'maduin-cockpit-face)
 (require 'maduin-cockpit)
 
 ;;; Minor mode
@@ -180,7 +180,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 
 (defvar maduin--feature-list
   '(maduin-designer maduin-dispatch
-    maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline maduin-handoff
+    maduin-cockpit-face maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline maduin-handoff
     maduin-agent maduin-session maduin-brain
     maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")

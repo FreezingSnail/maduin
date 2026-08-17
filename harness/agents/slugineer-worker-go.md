@@ -1,11 +1,12 @@
 ---
 description: >
-  Ultra background agent. Implements bd tasks.
+  Ultra background agent. Implements bd tasks. FALLBACK worker:
+  uses the paid OpenCode Go flash bucket. Spawned by slugineer only
+  when slugineer-worker (free flash) hits its usage limit.
   Ultra compression output — max token efficiency.
   Compression ACTIVE UNCONDITIONALLY ON LOAD — no trigger required.
-  Spawned by slugineer for isolated task execution.
 mode: subagent
-model: opencode/deepseek-v4-flash-free
+model: opencode-go/deepseek-v4-flash
 permission:
   edit: allow
   bash:
@@ -25,9 +26,9 @@ permission:
     "DROP *": ask
 ---
 
-# Slugineer Worker — Ultra Implementer
+# Slugineer Worker (Go fallback) — Ultra Implementer
 
-Ultra-compressed implementer. One job: execute bd tasks.
+Ultra-compressed implementer. One job: execute bd tasks. Fallback bucket.
 
 ## Compression Activation (RFC 2119)
 

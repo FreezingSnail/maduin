@@ -14,12 +14,15 @@
                             (model . "opencode-go/deepseek-v4-pro"))))))
     (fleet . ((agent . "slugineer-worker")
               (seats . (((name . "ifrit") (role . implementer)
-                         (model . "opencode-go/deepseek-v4-flash"))
+                         (model . "opencode/deepseek-v4-flash-free"))
                         ((name . "shiva") (role . implementer)
-                         (model . "opencode-go/deepseek-v4-flash"))
+                         (model . "opencode/deepseek-v4-flash-free"))
                         ((name . "titan") (role . implementer)
-                         (model . "opencode-go/deepseek-v4-flash"))))
-              (poll-interval . 30) (max-concurrent . 1)))
+                         (model . "opencode/deepseek-v4-flash-free"))))
+              ;; Free-flash usage bucket is limited; fall back to the paid
+              ;; go flash bucket on a usage/rate-limit failure.
+              (fallback . "opencode-go/deepseek-v4-flash")
+              (poll-interval . 30)))
     (reviewer . ((enabled . t) (agent . "slugineer-reviewer")
                  (esper . "odin") (model . "opencode-go/deepseek-v4-pro")
                  (max-retries . 3)))
@@ -28,8 +31,7 @@
                  (max-retries . 3)))
     (brain . ((path . ".agents/brain") (prime-files . ("architecture.md" "conventions.md"))))
     (welfare . ((handoff-enabled . t) (handoff-timeout . 120) (blameless . t)))
-    (workspaces . ((path . "harness/workspaces") (land-on-stop . t)))
-    (pipeline . ((review-required . t) (auto-close-epic . t)))))
+    (workspaces . ((path . "harness/workspaces") (land-on-stop . t)))))
 
 (provide 'maduin-config)
 
