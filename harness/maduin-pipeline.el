@@ -201,7 +201,13 @@ otherwise verify the seat branch exists (`git rev-parse --verify') and
                     ;; Distinguish conflict from other merge failures:
                     ;; git prints "CONFLICT (content): ..." / "fix conflicts".
                     (if (string-match-p "conflict" (downcase (cdr res)))
-                        'conflict
+                        (progn
+                          ;; Abort the failed merge so main is left clean.
+                          ;; Otherwise main stays on a conflicted MERGE_HEAD
+                          ;; and a later land (or the repairer's own merge)
+                          ;; jams against the half-finished merge.
+                          (funcall maduin-pipeline--git-fn main "merge" "--abort")
+                          'conflict)
                       (maduin-workspace--log-warning
                        (format "land-branch: merge of %s into main failed (exit %d): %s"
                                branch (car res) (cdr res)))

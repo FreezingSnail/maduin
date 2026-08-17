@@ -164,6 +164,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (dolist (f '(maduin-bd-ready-tasks
                maduin-bd-claim
+               maduin-bd-release
                maduin-bd-close
                maduin-bd-create-epic
                maduin-bd-create-task
@@ -224,6 +225,50 @@ Mimics an opencode subprocess so session tests need no real CLI."
     (when ok
       (should (eq ok t)))
     (maduin-test--bd-forget-matching "maduin-ert-probe")))
+
+(ert-deftest maduin-test-bd-query-all-flag ()
+  :tags '(maduin)
+  ;; Default excludes closed; ALL=t must append `--all' so closed children
+  ;; are visible (an epic with only-closed children still reports them).
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (cmd)
+                 (setq seen cmd)
+                 (cons 0 "[{\"id\":\"t1\"}]"))))
+      (should (equal (maduin-bd-query "parent=epic-x") '("t1")))
+      (should (string-match-p "--json" seen))
+      (should-not (string-match-p "--all" seen)))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (cmd)
+                 (setq seen cmd)
+                 (cons 0 "[{\"id\":\"t1\"}]"))))
+      (should (equal (maduin-bd-query "parent=epic-x" t) '("t1")))
+      (should (string-match-p "--all" seen)))))
+
+(ert-deftest maduin-test-bd-epic-children-includes-closed ()
+  :tags '(maduin)
+  ;; Epic-children MUST include closed children (`--all'), else a done epic
+  ;; looks undecomposed and Ramuh re-dispatches decomposition on it.
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (cmd)
+                 (setq seen cmd)
+                 (cons 0 "[{\"id\":\"c1\"},{\"id\":\"c2\"}]"))))
+      (should (equal (maduin-bd-epic-children "epic-x") '("c1" "c2")))
+      (should (string-match-p "epic-x" seen))
+      (should (string-match-p "--all" seen)))))
+
+(ert-deftest maduin-test-bd-release-resets-status-open ()
+  :tags '(maduin)
+  ;; Releasing a claim must reset status to open (bd update ID --status open).
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (cmd)
+                 (setq seen cmd)
+                 (cons 0 ""))))
+      (should (maduin-bd-release "t1"))
+      (should (string-match-p "t1" seen))
+      (should (string-match-p "--status open" seen)))))
 
 ;;; 4. session
 
@@ -870,20 +915,26 @@ Mimics an opencode subprocess so session tests need no real CLI."
 (ert-deftest maduin-test-land-branch-conflict ()
   :tags '(maduin)
   ;; Commit succeeds (or nothing to commit) → branch not an ancestor →
-  ;; branch verifies → merge reports a conflict → returns `conflict'.
-  (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
-        (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
-        (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
-        (maduin-pipeline--git-fn
-         (lambda (_dir &rest args) (if (member "merge-base" args) 1 0)))
-        (maduin-pipeline--git-output-fn
-         (lambda (_dir &rest args)
-           (cond
-            ((member "commit" args) (cons 0 ""))
-            ((member "rev-parse" args) (cons 0 "abc123\n"))
-            ((member "merge" args)
-             (cons 1 "CONFLICT (content): Merge conflict in foo.el\n"))))))
-    (should (eq (maduin-pipeline-land-branch "test-seat") 'conflict))))
+  ;; branch verifies → merge reports a conflict → abort the failed merge in
+  ;; main (leaving it clean, no jammed MERGE_HEAD) → returns `conflict'.
+  (let* ((calls nil)
+         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+         (maduin-pipeline--git-fn
+          (lambda (_dir &rest args)
+            (push args calls)
+            (if (member "merge-base" args) 1 0)))
+         (maduin-pipeline--git-output-fn
+          (lambda (_dir &rest args)
+            (cond
+             ((member "commit" args) (cons 0 ""))
+             ((member "rev-parse" args) (cons 0 "abc123\n"))
+             ((member "merge" args)
+              (cons 1 "CONFLICT (content): Merge conflict in foo.el\n"))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") 'conflict))
+    ;; The failed merge must be aborted so main is left clean.
+    (should (cl-some (lambda (args) (equal args '("merge" "--abort"))) calls))))
 
 (ert-deftest maduin-test-land-branch-missing-branch ()
   :tags '(maduin)
@@ -1152,10 +1203,12 @@ Mimics an opencode subprocess so session tests need no real CLI."
   :tags '(maduin)
   (let* ((dir (maduin-test--temp-dir))
          (commented nil)
+         (released nil)
          (closed nil)
          (maduin-dispatch--active nil)
          (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
@@ -1166,6 +1219,8 @@ Mimics an opencode subprocess so session tests need no real CLI."
           (maduin-dispatch-implement "t1")
           (maduin-dispatch--on-complete "s-1" 'failed)
           (should (equal (car commented) "t1"))
+          ;; Failed session must release the claim (status → open).
+          (should (equal released "t1"))
           (should-not closed)
           (should-not maduin-dispatch--active))
       (delete-directory dir t))))
@@ -1197,6 +1252,32 @@ Mimics an opencode subprocess so session tests need no real CLI."
           (should (equal (car commented) "t1"))
           (should (cl-find-if (lambda (e) (eq (plist-get e :role) 'repairer))
                               maduin-dispatch--active)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-completion-land-fail-releases ()
+  :tags '(maduin)
+  ;; Non-conflict land failure (nil) must release the claim so the task
+  ;; returns to open instead of staying in_progress forever.
+  (let* ((dir (maduin-test--temp-dir))
+         (released nil)
+         (closed nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir))
+         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--land-fn (lambda (_seat) nil))
+         (maduin-dispatch--comment-fn (lambda (_task _text) t))
+         (maduin-dispatch--close-fn (lambda (task _o &optional _dir) (setq closed task) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-implement "t1")
+          (maduin-dispatch--on-complete "s-1" 'completed)
+          (should (equal released "t1"))
+          (should-not closed))
       (delete-directory dir t))))
 
 (ert-deftest maduin-test-dispatch-run-loop-dispatches-ready ()
@@ -1719,16 +1800,16 @@ Mimics an opencode subprocess so session tests need no real CLI."
 
 (ert-deftest maduin-test-review-epic-children-closed-p ()
   :tags '(maduin)
-  (let ((maduin-review--query-fn (lambda (_q) '("t1" "t2")))
+  (let ((maduin-review--epic-children-fn (lambda (_epic) '("t1" "t2")))
         (maduin-review--show-fn (lambda (_id) (list :status "closed"))))
     (should (maduin-review--epic-children-closed-p "epic-x")))
-  (let ((maduin-review--query-fn (lambda (_q) '("t1" "t2")))
+  (let ((maduin-review--epic-children-fn (lambda (_epic) '("t1" "t2")))
         (maduin-review--show-fn
          (lambda (id)
            (list :status (if (string= id "t2") "in_progress" "closed")))))
     (should-not (maduin-review--epic-children-closed-p "epic-x")))
   ;; no children → not complete.
-  (let ((maduin-review--query-fn (lambda (_q) nil))
+  (let ((maduin-review--epic-children-fn (lambda (_epic) nil))
         (maduin-review--show-fn (lambda (_id) (list :status "closed"))))
     (should-not (maduin-review--epic-children-closed-p "epic-x"))))
 
@@ -1821,7 +1902,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
          (maduin-review--epic-starts nil)
          (maduin-review--show-fn
           (lambda (_id) (list :parent "epic-x" :status "closed")))
-         (maduin-review--query-fn (lambda (_q) '("t1")))
+         (maduin-review--epic-children-fn (lambda (_epic) '("t1")))
          (maduin-review--main-root-fn (lambda () "/repo"))
          (maduin-review--git-output-fn
           (lambda (_dir &rest _args) (cons 0 "sha\n"))))
@@ -1840,7 +1921,7 @@ Mimics an opencode subprocess so session tests need no real CLI."
             (if (string= id "t1")
                 (list :parent "epic-x" :status "in_progress")
               (list :status "in_progress"))))
-         (maduin-review--query-fn (lambda (_q) '("t1" "t2"))))
+          (maduin-review--epic-children-fn (lambda (_epic) '("t1" "t2"))))
     (cl-letf (((symbol-function 'maduin-review-gate)
                (lambda (_epic) (setq gate-called t) 'approved)))
       (should (null (maduin-review--maybe-review-epic "t1")))

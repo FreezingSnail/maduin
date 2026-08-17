@@ -77,11 +77,27 @@ clobbered."
 (defun maduin-bd-claim (task-id)
   "Claim TASK-ID via `bd update TASK-ID --claim'. Return t on success."
   (let ((res (maduin-bd--run
-              (format "bd update %s --claim" task-id))))
+              (format "bd update %s --claim"
+                      (shell-quote-argument task-id)))))
     (if (= 0 (car res))
         t
       (maduin-bd--log-error
        (format "bd update %s --claim failed (exit %d): %s"
+               task-id (car res) (cdr res)))
+      nil)))
+
+(defun maduin-bd-release (task-id)
+  "Release TASK-ID's claim: reset status to open.
+Used when a session fails or a land errors non-conflict, so the task is
+truly \"left open\" (returned to `bd ready') instead of staying claimed
+in_progress forever.  Return t on success."
+  (let ((res (maduin-bd--run
+              (format "bd update %s --status open"
+                      (shell-quote-argument task-id)))))
+    (if (= 0 (car res))
+        t
+      (maduin-bd--log-error
+       (format "bd update %s --status open failed (exit %d): %s"
                task-id (car res) (cdr res)))
       nil)))
 
@@ -235,11 +251,14 @@ DIR is the seat worktree (or any per-task directory); it defaults to
                id label (car res) (cdr res)))
       nil)))
 
-(defun maduin-bd-query (q)
+(defun maduin-bd-query (q &optional all)
   "Return list of issue IDs matching Q via `bd query Q --json'.
-Return nil on failure."
+When ALL is non-nil, include closed issues (`--all'; the CLI excludes
+them by default).  Return nil on failure."
   (let ((res (maduin-bd--run
-              (format "bd query %s --json" (shell-quote-argument q)))))
+              (format "bd query %s --json%s"
+                      (shell-quote-argument q)
+                      (if all " --all" "")))))
     (if (/= 0 (car res))
         (progn
           (maduin-bd--log-error
@@ -262,8 +281,11 @@ uses this to re-dispatch stuck work."
   (maduin-bd-query "status=in_progress AND type=task"))
 
 (defun maduin-bd-epic-children (epic)
-  "Return list of child issue IDs under EPIC, or nil."
-  (maduin-bd-query (format "parent=%s" epic)))
+  "Return list of child issue IDs under EPIC (any status), or nil.
+Uses `--all' so a fully-implemented epic (all children closed) still
+reports its children — otherwise the run-loop treats a done epic as
+undecomposed and re-dispatches Ramuh decomposition."
+  (maduin-bd-query (format "parent=%s" epic) t))
 
 (defun maduin-bd-comment (id text)
   "Add TEXT as a comment on ID via `bd comment ID TEXT'. Return t on success."

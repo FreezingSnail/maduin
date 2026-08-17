@@ -115,6 +115,11 @@ Reads the session's hidden run buffer via `maduin-session--run-buffer'."
 (defvar maduin-review--query-fn #'maduin-bd-query
   "Function `(q)' → list of issue ids | nil.")
 
+(defvar maduin-review--epic-children-fn #'maduin-bd-epic-children
+  "Function `(epic)' → list of child id strings (any status, incl. closed).
+Distinct from `maduin-review--query-fn' because epic-completion checks
+must see closed children; `bd query' excludes them unless `--all'.")
+
 (defvar maduin-review--session-run-fn #'maduin-session-run
   "Function `(workdir model agent plan)' → session handle | nil.")
 
@@ -168,8 +173,7 @@ a warning."
 (defun maduin-review--epic-children-closed-p (epic-id)
   "Return t when every child task of EPIC-ID is closed.
 An epic with no children is NOT complete (nil)."
-  (let ((children (funcall maduin-review--query-fn
-                           (format "parent=%s" epic-id))))
+  (let ((children (funcall maduin-review--epic-children-fn epic-id)))
     (and children
          (cl-every (lambda (id)
                      (let ((spec (condition-case nil

@@ -56,6 +56,9 @@ DIR is the seat worktree the close output should land in.")
 (defvar maduin-dispatch--claim-fn #'maduin-bd-claim
   "Function `(task)' → boolean.")
 
+(defvar maduin-dispatch--release-fn #'maduin-bd-release
+  "Function `(task)' → boolean.  Releases a failed task's claim (status → open).")
+
 (defvar maduin-dispatch--ready-fn #'maduin-bd-ready-tasks
   "Function `()' → list of ready task id strings | nil.")
 
@@ -280,12 +283,17 @@ close: the epic stays open until its children are implemented."
       (unless (eq role 'repairer)
         (maduin-dispatch-repair seat task)))
      (t
-      (funcall maduin-dispatch--comment-fn task "land failed — task left open")))))
+      (funcall maduin-dispatch--comment-fn task "land failed — task left open")
+      ;; Release the claim so the task returns to open (bd ready) instead of
+      ;; staying in_progress forever.
+      (funcall maduin-dispatch--release-fn task)))))
 
 (defun maduin-dispatch--fail (entry)
-  "Handle failed session for ENTRY: report and keep the task open."
+  "Handle failed session for ENTRY: report and release the claim so the
+task returns to open (bd ready) rather than staying claimed in_progress."
   (funcall maduin-dispatch--comment-fn (plist-get entry :task)
-           "session failed — task left open"))
+           "session failed — task left open")
+  (funcall maduin-dispatch--release-fn (plist-get entry :task)))
 
 (defun maduin-dispatch--on-complete (sid status)
   "Completion hook: route a finished session SID (STATUS `completed'|`failed').
