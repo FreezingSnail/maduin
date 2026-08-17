@@ -114,20 +114,13 @@ concurrency cap).  Idle = zero sessions."
 
 Soft stop by default: stop picking up new work and let in-flight
 sessions finish (drain).  With a prefix argument (\\[universal-argument]),
-HARD is non-nil and live sessions are deleted immediately.  Then
-gracefully stops any remaining legacy agent sessions via
-`maduin-handoff-stop-all'.  Never aborts on error."
+HARD is non-nil and live sessions are deleted immediately.  Never
+aborts on error."
   (interactive "P")
   (condition-case err
       (maduin-dispatch-stop hard)
     (error
      (message "maduin: dispatch-stop error (continuing): %s"
-              (error-message-string err))))
-  (condition-case err
-      (maduin-handoff-stop-all
-       (maduin--config-get 'handoff-timeout 'welfare))
-    (error
-     (message "maduin: handoff error (continuing): %s"
               (error-message-string err))))
   (when (and hard (null maduin-dispatch--active))
     (message "maduin stopped")))
