@@ -5,6 +5,7 @@ description: >
   Compression ACTIVE UNCONDITIONALLY ON LOAD — no trigger required.
   Spawned by slugineer for isolated task execution.
 mode: subagent
+model: opencode-go/deepseek-v4-flash
 permission:
   edit: allow
   bash:

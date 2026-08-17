@@ -245,6 +245,8 @@ PLAN overrides the role's default plan string (designer owns its prompt)."
           (when sid
             (push (list :handle sid :seat seat :role role :task task)
                   maduin-dispatch--active)
+            (when (boundp 'maduin-cockpit-refresh-hook)
+              (run-hook-with-args 'maduin-cockpit-refresh-hook))
             sid))))))
 
 ;;; Completion → land → close
@@ -310,7 +312,9 @@ while work is in flight)."
               (maduin-dispatch--complete entry sid)
             (maduin-dispatch--fail entry))
         (funcall maduin-dispatch--session-delete-fn sid))
-      (maduin-dispatch--maybe-drained))))
+      (maduin-dispatch--maybe-drained)
+      (when (boundp 'maduin-cockpit-refresh-hook)
+        (run-hook-with-args 'maduin-cockpit-refresh-hook)))))
 
 (defun maduin-dispatch--maybe-drained ()
   "Signal soft-stop completion when draining and no sessions remain."

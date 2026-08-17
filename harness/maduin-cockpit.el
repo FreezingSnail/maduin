@@ -27,6 +27,15 @@
     (require 'maduin-handoff)
   (error nil))
 
+;; chaplet (optional) — embedded inbox.  Symbols are fboundp-guarded at
+;; runtime and declared here so this file byte-compiles without chaplet.
+(declare-function chaplet-list-set-view "chaplet-list" (name))
+(declare-function chaplet-list-refresh "chaplet-list" ())
+;; evil (optional) — evil-aware bindings.  Declared so this file
+;; byte-compiles when evil is not installed (AGENTS.md: use the
+;; evil-define-key* function, not the macro).
+(declare-function evil-define-key* "evil-core" (state keymap &rest bindings))
+
 (defvar maduin-cockpit-buffer-name "*maduin-cockpit*"
   "Name of the cockpit dashboard buffer.")
 
@@ -36,15 +45,61 @@
 (defvar maduin-cockpit--timer nil
   "Timer driving periodic cockpit refresh, or nil when not running.")
 
+(defvar maduin-cockpit-refresh-hook nil
+  "Hook run to request a cockpit refresh.
+External modules (dispatch, session) run this hook to nudge a refresh
+without requiring maduin-cockpit.  Refresh is scheduled on an idle
+timer and only happens while the cockpit buffer is visible.")
+
+(defvar maduin-cockpit--idle-timer nil
+  "Single-shot idle timer scheduled by `maduin-cockpit--schedule-refresh'.")
+
 (defvar maduin-cockpit-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
-    (define-key map (kbd "RET") #'maduin-cockpit-attach)
-    (define-key map (kbd "r") #'maduin-cockpit-refresh)
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "k") #'maduin-cockpit-kill)
     map)
   "Keymap for the cockpit buffer.")
+
+(defconst maduin-cockpit--bindings
+  '(("RET" . maduin-cockpit-attach)
+    ("r"   . maduin-cockpit-refresh)
+    ("q"   . quit-window)
+    ("k"   . maduin-cockpit-kill)
+    ("i"   . maduin-cockpit-inbox))
+  "Cockpit keybindings as ((KEY . DEF) ...), KEY a `kbd' string.
+Single source of truth; mirrored into evil normal/motion states when
+evil is available.")
+
+(defconst maduin-cockpit--evil-suppress-keys
+  '("v" "V" "C-v" "c" "C" "d" "D" "s" "S" "x" "X" "R" "p" "P")
+  "Single-char motions suppressed in evil states only.
+In the read-only cockpit these would leak into visual/change state;
+they are bound to nil in evil normal/motion states while the plain map
+keeps only the shared RET/r/q/k/i bindings.")
+
+(defun maduin-cockpit--bind (key def)
+  "Bind KEY (a `kbd' string) to DEF in the plain cockpit map and, when
+evil is available, in evil normal/motion states.
+Single source of truth for cockpit keybindings (AGENTS.md)."
+  (define-key maduin-cockpit-map (kbd key) def)
+  (when (and (featurep 'evil) (fboundp 'evil-define-key*))
+    (evil-define-key* 'normal maduin-cockpit-map (kbd key) def)
+    (evil-define-key* 'motion maduin-cockpit-map (kbd key) def)))
+
+(defun maduin-cockpit--evil-setup ()
+  "Mirror cockpit bindings into evil normal/motion states and suppress
+read-only leak motions in those states only.  No-op when evil is absent."
+  (when (and (featurep 'evil) (fboundp 'evil-define-key*))
+    (dolist (binding maduin-cockpit--bindings)
+      (maduin-cockpit--bind (car binding) (cdr binding)))
+    (dolist (key maduin-cockpit--evil-suppress-keys)
+      (let ((k (kbd key)))
+        (evil-define-key* 'normal maduin-cockpit-map k nil)
+        (evil-define-key* 'motion maduin-cockpit-map k nil)))))
+
+;; Build the plain-map bindings through the helper (single source of truth).
+(dolist (binding maduin-cockpit--bindings)
+  (maduin-cockpit--bind (car binding) (cdr binding)))
 
 (defun maduin-cockpit--seats ()
   "Return alist ((SEAT-NAME . ROLE) ...) from config seats."
@@ -173,17 +228,21 @@ Each chip carries its `maduin-cockpit-chip-face' text property."
 
 ;;;###autoload
 (defun maduin-cockpit-show ()
-  "Create (or switch to) the cockpit dashboard buffer.
-Return the buffer."
+  "Create (or switch to) the cockpit dashboard buffer, and embed the
+chaplet inbox in a lower window when chaplet is available.
+Return the cockpit buffer."
   (interactive)
   (let ((buf (get-buffer-create maduin-cockpit-buffer-name)))
     (switch-to-buffer buf)
     (tabulated-list-mode)
     (use-local-map maduin-cockpit-map)
+    (maduin-cockpit--evil-setup)
     (with-current-buffer buf
       (add-hook 'kill-buffer-hook #'maduin-cockpit--stop-timer nil t))
+    (maduin-cockpit--register-live-updates)
     (maduin-cockpit-refresh)
     (maduin-cockpit--start-timer)
+    (maduin-cockpit--embed-inbox)
     buf))
 
 (defun maduin-cockpit-refresh ()
@@ -229,7 +288,108 @@ window, stop the timer.  Refresh is skipped while the buffer is buried
     (if (or (null buf) (null (get-buffer-window buf 'visible)))
         (maduin-cockpit--stop-timer)
       (with-current-buffer buf
-        (maduin-cockpit-refresh)))))
+        (maduin-cockpit-refresh)
+        (maduin-cockpit--inbox-refresh)))))
+
+;;; Embedded chaplet inbox
+
+(defconst maduin-cockpit--inbox-buffer-name "*chaplet*"
+  "Buffer name of the embedded chaplet inbox list buffer.
+Reuses chaplet's single list buffer (`chaplet-list--buffer-name').")
+
+(defun maduin-cockpit--embed-inbox ()
+  "Embed the chaplet inbox in a lower window below the cockpit.
+Return the inbox window, or nil when chaplet is unavailable or the split
+fails.  The cockpit buffer stays in the selected (main) window; the inbox
+buffer lands in the new lower window, so killing the cockpit leaves the
+inbox usable."
+  (if (not (and (require 'chaplet nil t)
+                (fboundp 'chaplet-list-set-view)))
+      (progn
+        (message "maduin-cockpit: chaplet not installed; inbox omitted")
+        nil)
+    (condition-case nil
+        (let ((win (split-window-below)))
+          (with-selected-window win
+            (chaplet-list-set-view 'inbox))
+          win)
+      (error nil))))
+
+(defun maduin-cockpit--inbox-refresh ()
+  "Refresh the embedded chaplet inbox list buffer, when present.
+Silent no-op when chaplet is absent or the inbox buffer is gone."
+  (when (fboundp 'chaplet-list-refresh)
+    (let ((buf (get-buffer maduin-cockpit--inbox-buffer-name)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (eq major-mode 'chaplet-list-mode)
+            (condition-case nil
+                (chaplet-list-refresh)
+              (error nil))))))))
+
+(defun maduin-cockpit-inbox ()
+  "Select the embedded chaplet inbox window, when present.
+When the inbox is absent, message politely and do nothing."
+  (interactive)
+  (let ((win (get-buffer-window maduin-cockpit--inbox-buffer-name)))
+    (if (window-live-p win)
+        (select-window win)
+      (message "maduin-cockpit: no inbox present"))))
+
+(defun maduin-cockpit--schedule-refresh ()
+  "Schedule a debounced single-shot idle-timer refresh of the cockpit.
+No-op when the cockpit buffer is absent or not visible (buried/hidden),
+so work in other buffers is not interrupted.  Wrapped in condition-case
+so a missing buffer or timer error never signals."
+  (condition-case nil
+      (let ((buf (get-buffer maduin-cockpit-buffer-name)))
+        (when (and buf (get-buffer-window buf 'visible))
+          (when (timerp maduin-cockpit--idle-timer)
+            (cancel-timer maduin-cockpit--idle-timer))
+          (setq maduin-cockpit--idle-timer
+                (run-with-idle-timer 0.2 nil #'maduin-cockpit--idle-refresh))))
+    (error nil)))
+
+(defun maduin-cockpit--idle-refresh ()
+  "Refresh the cockpit from the scheduled idle timer, guarded.
+Clears the timer and refreshes only while the cockpit buffer is visible;
+a buried or absent buffer is a no-op."
+  (setq maduin-cockpit--idle-timer nil)
+  (condition-case nil
+      (let ((buf (get-buffer maduin-cockpit-buffer-name)))
+        (when (and buf (get-buffer-window buf 'visible))
+          (with-current-buffer buf
+            (maduin-cockpit-refresh))))
+    (error nil)))
+
+(defun maduin-cockpit--on-complete (_sid _status)
+  "Nudge a cockpit refresh when an autonomous session reaches a terminal state.
+Added to `maduin-session-on-complete-hook' (SID STATUS are ignored)."
+  (condition-case nil
+      (run-hook-with-args 'maduin-cockpit-refresh-hook)
+    (error nil)))
+
+(defun maduin-cockpit--on-window-change (&optional _frame)
+  "Refresh the cockpit when it becomes the selected window's buffer.
+Per-event cheap guard: only acts when the selected window shows the
+cockpit buffer, avoiding a refresh storm on unrelated window changes."
+  (condition-case nil
+      (when (and (get-buffer maduin-cockpit-buffer-name)
+                 (eq (window-buffer (selected-window))
+                     (get-buffer maduin-cockpit-buffer-name)))
+        (run-hook-with-args 'maduin-cockpit-refresh-hook))
+    (error nil)))
+
+(defun maduin-cockpit--register-live-updates ()
+  "Register cockpit live-update hooks once (idempotent).
+Wires the refresh-hook consumer, the session completion nudge, and the
+focus refresh (when `window-buffer-change-functions' is available;
+older Emacs falls back to the timer-only poll)."
+  (add-hook 'maduin-cockpit-refresh-hook #'maduin-cockpit--schedule-refresh)
+  (unless (memq #'maduin-cockpit--on-complete maduin-session-on-complete-hook)
+    (add-hook 'maduin-session-on-complete-hook #'maduin-cockpit--on-complete))
+  (when (boundp 'window-buffer-change-functions)
+    (add-hook 'window-buffer-change-functions #'maduin-cockpit--on-window-change)))
 
 (defun maduin-cockpit-attach ()
   "Switch to the agent buffer named by the row under point."

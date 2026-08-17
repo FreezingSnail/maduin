@@ -657,6 +657,340 @@ Mimics an opencode subprocess so session tests need no real CLI."
           (should (null maduin-cockpit--title-cache)))
       (kill-buffer buf))))
 
+;;; 8d. cockpit-live
+
+(ert-deftest maduin-test-cockpit-live-refresh-hook-defined ()
+  :tags '(maduin)
+  (should (boundp 'maduin-cockpit-refresh-hook))
+  (should (listp maduin-cockpit-refresh-hook)))
+
+(ert-deftest maduin-test-cockpit-live-register-once ()
+  :tags '(maduin)
+  (maduin-cockpit--register-live-updates)
+  (maduin-cockpit--register-live-updates)
+  (should (memq #'maduin-cockpit--schedule-refresh maduin-cockpit-refresh-hook))
+  (should (memq #'maduin-cockpit--on-complete maduin-session-on-complete-hook))
+  (should (= (cl-count #'maduin-cockpit--schedule-refresh
+                       maduin-cockpit-refresh-hook)
+             1))
+  (should (= (cl-count #'maduin-cockpit--on-complete
+                       maduin-session-on-complete-hook)
+             1)))
+
+(ert-deftest maduin-test-cockpit-live-schedule-refresh-visible ()
+  :tags '(maduin)
+  ;; Visible cockpit buffer → schedule a single-shot idle timer.
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (maduin-cockpit--idle-timer nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t)))
+          (maduin-cockpit--schedule-refresh)
+          (should (timerp maduin-cockpit--idle-timer)))
+      (when (timerp maduin-cockpit--idle-timer)
+        (cancel-timer maduin-cockpit--idle-timer))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-schedule-refresh-buried-noop ()
+  :tags '(maduin)
+  ;; Buried (hidden) cockpit buffer → no timer scheduled.
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (maduin-cockpit--idle-timer nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) nil)))
+          (maduin-cockpit--schedule-refresh)
+          (should (null maduin-cockpit--idle-timer)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-schedule-refresh-absent-noop ()
+  :tags '(maduin)
+  ;; No cockpit buffer at all → no timer scheduled, no error.
+  (let ((maduin-cockpit--idle-timer nil))
+    (when (get-buffer "*maduin-cockpit*") (kill-buffer "*maduin-cockpit*"))
+    (maduin-cockpit--schedule-refresh)
+    (should (null maduin-cockpit--idle-timer))))
+
+(ert-deftest maduin-test-cockpit-live-idle-refresh-visible-runs ()
+  :tags '(maduin)
+  ;; The idle-timer callback refreshes when the buffer is visible.
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (count 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t))
+                  ((symbol-function 'maduin-cockpit-refresh)
+                   (lambda () (setq count (1+ count)))))
+          (with-current-buffer buf (tabulated-list-mode))
+          (maduin-cockpit--idle-refresh)
+          (should (= count 1)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-idle-refresh-buried-noop ()
+  :tags '(maduin)
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (count 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) nil))
+                  ((symbol-function 'maduin-cockpit-refresh)
+                   (lambda () (setq count (1+ count)))))
+          (maduin-cockpit--idle-refresh)
+          (should (= count 0)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-on-complete-runs-hook ()
+  :tags '(maduin)
+  (let* ((count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
+    (maduin-cockpit--on-complete "s-1" 'completed)
+    (should (= count 1))))
+
+(ert-deftest maduin-test-cockpit-live-on-window-change-selected ()
+  :tags '(maduin)
+  ;; Cockpit in the selected window → refresh hook runs.
+  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
+         (orig (window-buffer (selected-window)))
+         (count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buf)
+          (maduin-cockpit--on-window-change)
+          (should (= count 1)))
+      (set-window-buffer (selected-window) orig)
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-on-window-change-not-selected ()
+  :tags '(maduin)
+  ;; Selected window shows another buffer → no refresh (cheap guard).
+  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
+         (other (get-buffer-create "*maduin-cockpit-live-other*"))
+         (count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) other)
+          (maduin-cockpit--on-window-change)
+          (should (= count 0)))
+      (kill-buffer buf)
+      (kill-buffer other))))
+
+(ert-deftest maduin-test-dispatch-spawn-runs-cockpit-refresh-hook ()
+  :tags '(maduin)
+  ;; Spawn path nudge: dispatch fires the guarded refresh hook, no require.
+  (let* ((dir (maduin-test--temp-dir))
+         (count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count)))))
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--claim-fn (lambda (_t) t))
+         (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_s) dir)))
+    (unwind-protect
+        (progn
+          (should (equal (maduin-dispatch-implement "t1") "s-1"))
+          (should (= count 1)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-on-complete-runs-cockpit-refresh-hook ()
+  :tags '(maduin)
+  ;; Removal path nudge: completion fires the guarded refresh hook.
+  (let* ((dir (maduin-test--temp-dir))
+         (count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count)))))
+         (maduin-dispatch--active
+          (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1")))
+         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--land-fn (lambda (_seat) t))
+         (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
+         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch--on-complete "s-1" 'completed)
+          (should (= count 1))
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
+;;; 8e. cockpit-inbox (embedded chaplet inbox)
+
+(ert-deftest maduin-test-cockpit-show-inbox-absent-still-renders ()
+  :tags '(maduin)
+  ;; chaplet absent → cockpit still renders, message issued, no error.
+  (let ((msg nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'require)
+                   (lambda (_feature &optional _na _ne) nil))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq msg (apply #'format fmt args)))))
+          (should (bufferp (maduin-cockpit-show)))
+          (should (get-buffer "*maduin-cockpit*"))
+          (should (string-match-p "chaplet" msg)))
+      (when (get-buffer "*maduin-cockpit*")
+        (kill-buffer "*maduin-cockpit*")))))
+
+(ert-deftest maduin-test-cockpit-inbox-embed-absent-noop ()
+  :tags '(maduin)
+  ;; chaplet not loadable → nil + message, never an error.
+  (let ((msg nil))
+    (cl-letf (((symbol-function 'require)
+               (lambda (_feature &optional _na _ne) nil))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq msg (apply #'format fmt args)))))
+      (should-not (maduin-cockpit--embed-inbox)))
+    (should (string-match-p "chaplet" msg))))
+
+(ert-deftest maduin-test-cockpit-inbox-embed-present ()
+  :tags '(maduin)
+  ;; chaplet available (mocked) → lower window returned, view set inbox,
+  ;; cockpit buffer stays in the main (selected) window.
+  (let ((view nil)
+        (buf (get-buffer-create "*maduin-cockpit*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (let ((main (selected-window)))
+            (cl-letf (((symbol-function 'require)
+                       (lambda (_feature &optional _na _ne) t))
+                      ((symbol-function 'chaplet-list-set-view)
+                       (lambda (name) (setq view name))))
+              (let ((win (maduin-cockpit--embed-inbox)))
+                (unwind-protect
+                    (progn
+                      (should (windowp win))
+                      (should (eq view 'inbox))
+                      (should (eq (selected-window) main))
+                      (should (eq (window-buffer main) buf))
+                      (should-not (eq win main)))
+                  (when (and win (windowp win) (window-live-p win))
+                    (ignore-errors (delete-window win))))))))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-inbox-refresh-noop-no-buffer ()
+  :tags '(maduin)
+  ;; Inbox buffer absent → refresh fn never invoked, silent no-op.
+  (when (get-buffer "*chaplet*") (kill-buffer "*chaplet*"))
+  (let ((called nil))
+    (cl-letf (((symbol-function 'chaplet-list-refresh)
+               (lambda () (setq called t))))
+      (should-not (maduin-cockpit--inbox-refresh))
+      (should-not called))))
+
+(ert-deftest maduin-test-cockpit-inbox-refresh-refreshes-when-present ()
+  :tags '(maduin)
+  ;; Inbox buffer live in chaplet-list-mode → refresh invoked once.
+  (let ((buf (get-buffer-create "*chaplet*"))
+        (called nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq major-mode 'chaplet-list-mode))
+          (cl-letf (((symbol-function 'chaplet-list-refresh)
+                     (lambda () (setq called t))))
+            (should (maduin-cockpit--inbox-refresh))
+            (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-auto-refresh-inbox-absent-no-error ()
+  :tags '(maduin)
+  ;; Visible cockpit + inbox absent → auto-refresh refreshes cockpit and the
+  ;; inbox refresh is a silent no-op (no error).
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (count 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t))
+                  ((symbol-function 'maduin-cockpit-refresh)
+                   (lambda () (setq count (1+ count)))))
+          (with-current-buffer buf (tabulated-list-mode))
+          (maduin-cockpit--auto-refresh)
+          (should (= count 1)))
+      (when maduin-cockpit--timer
+        (cancel-timer maduin-cockpit--timer)
+        (setq maduin-cockpit--timer nil))
+      (kill-buffer buf))))
+
+;;; 8f. cockpit-evil (evil-aware keybindings + inbox jump)
+
+(ert-deftest maduin-test-cockpit-evil-symbols-exist ()
+  :tags '(maduin)
+  (should (fboundp 'maduin-cockpit--bind))
+  (should (fboundp 'maduin-cockpit--evil-setup))
+  (should (commandp 'maduin-cockpit-inbox)))
+
+(ert-deftest maduin-test-cockpit-evil-plain-map-bindings ()
+  :tags '(maduin)
+  ;; Plain map carries RET/r/q/k/i via the single-source-of-truth helper.
+  (should (eq (lookup-key maduin-cockpit-map (kbd "RET"))
+              'maduin-cockpit-attach))
+  (should (eq (lookup-key maduin-cockpit-map (kbd "r"))
+              'maduin-cockpit-refresh))
+  (should (eq (lookup-key maduin-cockpit-map (kbd "q"))
+              'quit-window))
+  (should (eq (lookup-key maduin-cockpit-map (kbd "k"))
+              'maduin-cockpit-kill))
+  (should (eq (lookup-key maduin-cockpit-map (kbd "i"))
+              'maduin-cockpit-inbox))
+  ;; Leak suppression is evil-only: plain map must NOT bind "v".
+  (should-not (lookup-key maduin-cockpit-map (kbd "v"))))
+
+(ert-deftest maduin-test-cockpit-evil-setup-mirrors-normal-motion ()
+  :tags '(maduin)
+  ;; featurep+mock recorder: normal/motion receive the shared bindings AND
+  ;; the leak keys (v etc.) bound to nil.
+  (let ((recorded nil))
+    (cl-letf (((symbol-function 'featurep)
+               (lambda (f &optional _sub) (eq f 'evil)))
+              ((symbol-function 'fboundp)
+               (lambda (f) (eq f 'evil-define-key*)))
+              ((symbol-function 'evil-define-key*)
+               (lambda (state _map key def)
+                 (push (list state key def) recorded))))
+      (maduin-cockpit--evil-setup)
+      (dolist (binding maduin-cockpit--bindings)
+        (let ((key (kbd (car binding))) (def (cdr binding)))
+          (should (member (list 'normal key def) recorded))
+          (should (member (list 'motion key def) recorded))))
+      ;; v (and every suppress key) → nil in BOTH evil states.
+      (should (member (list 'normal (kbd "v") nil) recorded))
+      (should (member (list 'motion (kbd "v") nil) recorded))
+      (dolist (key maduin-cockpit--evil-suppress-keys)
+        (should (member (list 'normal (kbd key) nil) recorded))
+        (should (member (list 'motion (kbd key) nil) recorded))))))
+
+(ert-deftest maduin-test-cockpit-evil-setup-no-evil-noop ()
+  :tags '(maduin)
+  ;; evil absent → guard short-circuits, evil-define-key* never called.
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'featurep) (lambda (_f &optional _s) nil))
+              ((symbol-function 'evil-define-key*)
+               (lambda (&rest _) (cl-incf calls))))
+      (maduin-cockpit--evil-setup)
+      (should (= calls 0)))))
+
+(ert-deftest maduin-test-cockpit-inbox-selects-window ()
+  :tags '(maduin)
+  ;; Inbox window live → select-window invoked on it.
+  (let ((win (selected-window))
+        (selected nil))
+    (cl-letf (((symbol-function 'get-buffer-window)
+               (lambda (_buf &optional _f) win))
+              ((symbol-function 'select-window)
+               (lambda (w) (setq selected w))))
+      (maduin-cockpit-inbox)
+      (should (eq selected win)))))
+
+(ert-deftest maduin-test-cockpit-inbox-absent-message ()
+  :tags '(maduin)
+  ;; Inbox absent → polite message, no error, no selection.
+  (let ((msg nil))
+    (cl-letf (((symbol-function 'get-buffer-window)
+               (lambda (_buf &optional _f) nil))
+              ((symbol-function 'select-window)
+               (lambda (_w) (error "must not select")))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq msg (apply #'format fmt args)))))
+      (maduin-cockpit-inbox)
+      (should (string-match-p "no inbox" msg)))))
+
 ;;; 9. main
 
 (ert-deftest maduin-test-main-commands-exist ()
