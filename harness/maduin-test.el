@@ -423,19 +423,6 @@ Mimics an opencode subprocess so session tests need no real CLI."
             (error (should t))))
       (kill-buffer buf))))
 
-(ert-deftest maduin-test-cockpit-seat-status-dispatch ()
-  :tags '(maduin)
-  ;; Demand-driven mode: seat status must come from the dispatch active
-  ;; registry, not the (absent) legacy seat buffers.
-  (let ((maduin-dispatch--active
-         '((:handle "h1" :seat "ifrit" :role implementer :task "bd-1"))))
-    (let ((status (maduin-cockpit--seat-status "ifrit")))
-      (should (eq (plist-get status :status) 'working))
-      (should (equal (plist-get status :task) "bd-1"))))
-  ;; Idle seat with no dispatch entry falls back to legacy (nil → dead).
-  (let ((maduin-dispatch--active nil))
-    (should (null (maduin-cockpit--seat-status "ifrit")))))
-
 (ert-deftest maduin-test-cockpit-refresh-interval-bound ()
   :tags '(maduin)
   (should (integerp maduin-cockpit-refresh-interval))
@@ -470,6 +457,160 @@ Mimics an opencode subprocess so session tests need no real CLI."
     (when maduin-cockpit--timer
       (cancel-timer maduin-cockpit--timer)
       (setq maduin-cockpit--timer nil))))
+
+;;; 8b. cockpit-face
+
+(ert-deftest maduin-test-cockpit-face-state-face-known ()
+  :tags '(maduin)
+  (dolist (s '(dead idle working running repairing))
+    (should (facep (maduin-cockpit-state-face s))))
+  (should (null (maduin-cockpit-state-face 'unknown)))
+  (should (null (maduin-cockpit-state-face nil))))
+
+(ert-deftest maduin-test-cockpit-face-state-color-known ()
+  :tags '(maduin)
+  (dolist (s '(dead idle working running repairing))
+    (let ((c (maduin-cockpit-state-color s)))
+      (should (stringp c))
+      (should (> (length c) 0))))
+  (should (null (maduin-cockpit-state-color 'unknown)))
+  (should (null (maduin-cockpit-state-color nil))))
+
+(ert-deftest maduin-test-cockpit-face-chip-face-known ()
+  :tags '(maduin)
+  (dolist (k '(queued active completed blocked fleet-free fleet-busy))
+    (should (facep (maduin-cockpit-chip-face k))))
+  (should (null (maduin-cockpit-chip-face 'unknown))))
+
+(ert-deftest maduin-test-cockpit-face-setup-creates-all ()
+  :tags '(maduin)
+  (maduin-cockpit-face-setup)
+  (dolist (f maduin-cockpit-face--pill-faces)
+    (should (facep f))))
+
+(ert-deftest maduin-test-cockpit-face-adapt-batch-safe ()
+  :tags '(maduin)
+  (condition-case nil
+      (progn (maduin-cockpit-face-adapt) (should t))
+    (error (should nil))))
+
+(ert-deftest maduin-test-cockpit-face-adapt-pill-box ()
+  :tags '(maduin)
+  (maduin-cockpit-face-adapt)
+  (if (display-graphic-p)
+      (dolist (f maduin-cockpit-face--pill-faces)
+        (should (eq (face-attribute f :box nil 'default) t)))
+    (should t)))
+
+;;; 8c. cockpit-rich
+
+(ert-deftest maduin-test-cockpit-seat-status-rich ()
+  :tags '(maduin)
+  (cl-letf (((symbol-value 'maduin-dispatch--active)
+             (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1")))
+            ((symbol-function 'maduin-agent-status)
+             (lambda (_seat) (list :status 'idle :task "t0" :uptime 42.0 :model "m0" :role 'designer)))
+            ((symbol-function 'maduin-bd--run)
+             (lambda (_cmd) (cons 0 "[{\"title\": \"T1 title\"}]"))))
+    (let ((st (maduin-cockpit--seat-status "ifrit")))
+      (should (equal (plist-get st :seat) "ifrit"))
+      (should (eq (plist-get st :role) 'implementer))    ; dispatch wins
+      (should (eq (plist-get st :status) 'working))      ; dispatch ⇒ working
+      (should (equal (plist-get st :task-id) "t1"))      ; dispatch wins
+      (should (equal (plist-get st :task-title) "T1 title"))
+      (should (equal (plist-get st :model) "m0"))
+      (should (equal (plist-get st :uptime) 42.0))
+      (should (null (plist-get st :phase)))
+      (should (= (length st) 16)))))                      ; 8 keys
+
+(ert-deftest maduin-test-cockpit-seat-status-fallback ()
+  :tags '(maduin)
+  (cl-letf (((symbol-value 'maduin-dispatch--active) nil)
+            ((symbol-function 'maduin-agent-status)
+             (lambda (_seat) (list :status 'running :task "t9" :uptime 7.0 :model "m9" :role 'concierge)))
+            ((symbol-function 'maduin-bd--run)
+             (lambda (_cmd) (cons 0 "[{\"title\": \"T9 title\"}]"))))
+    (let ((st (maduin-cockpit--seat-status "shiva")))
+      (should (eq (plist-get st :status) 'running))
+      (should (equal (plist-get st :task-id) "t9"))
+      (should (equal (plist-get st :task-title) "T9 title"))
+      (should (equal (plist-get st :model) "m9"))
+      (should (equal (plist-get st :role) 'concierge)))))
+
+(ert-deftest maduin-test-cockpit-task-title-success ()
+  :tags '(maduin)
+  (setq maduin-cockpit--title-cache nil)
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'maduin-bd--run)
+               (lambda (_cmd)
+                 (cl-incf calls)
+                 (cons 0 "[{\"title\": \"Big Title\"}]"))))
+      (should (equal (maduin-cockpit--task-title "maduin-x") "Big Title"))
+      (should (= calls 1))
+      ;; Cache hit: second call must not re-run bd.
+      (should (equal (maduin-cockpit--task-title "maduin-x") "Big Title"))
+      (should (= calls 1))))
+  (setq maduin-cockpit--title-cache nil))
+
+(ert-deftest maduin-test-cockpit-task-title-object-shape ()
+  :tags '(maduin)
+  (setq maduin-cockpit--title-cache nil)
+  (cl-letf (((symbol-function 'maduin-bd--run)
+             (lambda (_cmd) (cons 0 "{\"title\": \"Obj Title\"}"))))
+    (should (equal (maduin-cockpit--task-title "maduin-z") "Obj Title")))
+  (setq maduin-cockpit--title-cache nil))
+
+(ert-deftest maduin-test-cockpit-task-title-failure ()
+  :tags '(maduin)
+  (setq maduin-cockpit--title-cache nil)
+  (cl-letf (((symbol-function 'maduin-bd--run)
+             (lambda (_cmd) (cons 1 "error output"))))
+    (should (null (maduin-cockpit--task-title "maduin-y"))))
+  (setq maduin-cockpit--title-cache nil))
+
+(ert-deftest maduin-test-cockpit-status-pill-known ()
+  :tags '(maduin)
+  (dolist (s '(dead idle working running repairing))
+    (let ((pill (maduin-cockpit--status-pill s)))
+      (should (string= pill (symbol-name s)))
+      (should (eq (get-text-property 0 'face pill)
+                  (maduin-cockpit-state-face s))))))
+
+(ert-deftest maduin-test-cockpit-status-pill-unknown ()
+  :tags '(maduin)
+  (let ((pill (maduin-cockpit--status-pill 'mystery)))
+    (should (string= pill "mystery"))
+    (should (null (get-text-property 0 'face pill))))
+  (let ((pill (maduin-cockpit--status-pill nil)))
+    (should (string= pill "dead"))
+    (should (null (get-text-property 0 'face pill)))))
+
+(ert-deftest maduin-test-cockpit-pipeline-summary-chips ()
+  :tags '(maduin)
+  (let ((summary (maduin-cockpit--pipeline-summary)))
+    (dolist (k '(queued active completed blocked fleet-free fleet-busy))
+      (should (string-match-p (symbol-name k) summary))
+      (let ((pos (string-match (symbol-name k) summary)))
+        (should (facep (get-text-property pos 'face summary)))))))
+
+(ert-deftest maduin-test-cockpit-refresh-format-7-columns ()
+  :tags '(maduin)
+  (let ((buf (get-buffer-create "*maduin-cockpit*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (tabulated-list-mode)
+          (setq maduin-cockpit--title-cache (list (cons "stale" "old")))
+          (maduin-cockpit-refresh)
+          (should (= (length tabulated-list-format) 7))
+          (should (equal (elt (aref tabulated-list-format 0) 0) "Seat"))
+          (should (equal (elt (aref tabulated-list-format 1) 0) "Role"))
+          (should (equal (elt (aref tabulated-list-format 2) 0) "Status"))
+          (should (equal (elt (aref tabulated-list-format 3) 0) "Task"))
+          (should (equal (elt (aref tabulated-list-format 4) 0) "Model"))
+          (should (equal (elt (aref tabulated-list-format 5) 0) "Uptime(s)"))
+          (should (equal (elt (aref tabulated-list-format 6) 0) "Activity"))
+          (should (null maduin-cockpit--title-cache)))
+      (kill-buffer buf))))
 
 ;;; 9. main
 
