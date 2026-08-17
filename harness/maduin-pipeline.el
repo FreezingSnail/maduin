@@ -192,13 +192,13 @@ Uses `git merge-base --is-ancestor <branch> main` from the main repo."
 
 ;;; Status
 
-(defun maduin-pipeline--count (status)
-  "Return bd issue count with STATUS via `bd count', or 0."
-  (let* ((res (maduin-bd--run
-               (format "bd count --status %s --json" status)))
-         (data (and (= 0 (car res))
-                    (maduin-bd--json-data (cdr res)))))
-    (or (and data (alist-get 'count (car data))) 0)))
+(defun maduin-pipeline--count (data status)
+  "Return number of alists in DATA whose `status' equals STATUS.
+DATA is the normalized result of `maduin-bd-list-all' (one subprocess),
+so callers count without extra bd calls.  STATUS must be a stored bd
+status string (e.g. \"in_progress\", \"closed\", \"blocked\")."
+  (cl-count-if (lambda (o) (equal (alist-get 'status o) status))
+               (or data nil)))
 
 (defun maduin-pipeline--fleet-busy-count ()
   "Return number of in-flight fleet (implementer) sessions.
@@ -211,13 +211,17 @@ not loaded (pipeline may load standalone)."
     0))
 
 (defun maduin-pipeline-status ()
-  "Return plist (:queued :active :completed :blocked :fleet-free :fleet-busy)."
+  "Return plist (:queued :active :completed :blocked :fleet-free :fleet-busy).
+Issues at most two bd subprocesses per refresh: one `bd ready' for the
+queued count and one `bd list --json --all' whose status field feeds
+the active/completed/blocked counts client-side."
   (let* ((fleet (maduin-pipeline-fleet-seats))
-         (busy (maduin-pipeline--fleet-busy-count)))
+         (busy (maduin-pipeline--fleet-busy-count))
+         (data (maduin-bd-list-all)))
     (list :queued (length (or (maduin-bd-ready-tasks) nil))
-          :active (maduin-pipeline--count "in-progress")
-          :completed (maduin-pipeline--count "closed")
-          :blocked (maduin-pipeline--count "blocked")
+          :active (maduin-pipeline--count data "in_progress")
+          :completed (maduin-pipeline--count data "closed")
+          :blocked (maduin-pipeline--count data "blocked")
           :fleet-free (- (length fleet) busy)
           :fleet-busy busy)))
 

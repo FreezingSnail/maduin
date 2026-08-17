@@ -89,6 +89,19 @@ non-whitespace character is not `[' or `{')."
           nil)
       (maduin-bd--json-ids (cdr res)))))
 
+(defun maduin-bd-list-all ()
+  "Return all bd issues (any status) as normalized bead alists, or nil.
+Issues a single `bd list --json --all' subprocess; callers derive
+closed/in-progress/blocked counts client-side from each entry's
+`status' field instead of issuing three `bd count --status' calls."
+  (let ((res (maduin-bd--call "bd" "list" "--json" "--all")))
+    (if (/= 0 (car res))
+        (progn
+          (maduin-bd--log-error
+           (format "bd list --all failed (exit %d): %s" (car res) (cdr res)))
+          nil)
+      (maduin-bd--json-data (cdr res)))))
+
 (defun maduin-bd-claim (task-id)
   "Claim TASK-ID via `bd update TASK-ID --claim'. Return t on success."
   (let ((res (maduin-bd--run

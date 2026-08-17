@@ -458,6 +458,48 @@
   (let ((maduin-dispatch--active nil))
     (should (= (maduin-pipeline--fleet-busy-count) 0))))
 
+(ert-deftest maduin-test-pipeline-count-statuses-client-side ()
+  :tags '(maduin)
+  ;; Fixture alists → correct counts, no bd subprocesses.  Status matches
+  ;; bd's stored status strings (underscore: in_progress), which is what
+  ;; `bd list --json --all' emits.
+  (let ((data (list (list (cons 'status "closed") (cons 'id "c1"))
+                    (list (cons 'status "in_progress") (cons 'id "i1"))
+                    (list (cons 'status "blocked") (cons 'id "b1"))
+                    (list (cons 'status "closed") (cons 'id "c2"))
+                    (list (cons 'status "open") (cons 'id "o1"))
+                    (list (cons 'status "deferred") (cons 'id "d1")))))
+    (should (= (maduin-pipeline--count data "closed") 2))
+    (should (= (maduin-pipeline--count data "in_progress") 1))
+    (should (= (maduin-pipeline--count data "blocked") 1))
+    (should (= (maduin-pipeline--count data "open") 1))
+    (should (= (maduin-pipeline--count data "deferred") 1))
+    (should (= (maduin-pipeline--count data "queued") 0)))
+  ;; Nil data (failed list call) counts as zero.
+  (should (= (maduin-pipeline--count nil "closed") 0)))
+
+(ert-deftest maduin-test-pipeline-status-at-most-two-bd-calls ()
+  :tags '(maduin)
+  ;; One refresh = `bd ready' + one `bd list --json --all' (≤ 2 calls),
+  ;; statuses derived client-side from the list result's status field.
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'maduin-bd--call)
+               (lambda (_prog &rest args)
+                 (cl-incf calls)
+                 (if (member "ready" args)
+                     (cons 0 "[{\"id\":\"q1\"},{\"id\":\"q2\"}]")
+                   (cons 0 "[{\"id\":\"c1\",\"status\":\"closed\"},
+                             {\"id\":\"c2\",\"status\":\"closed\"},
+                             {\"id\":\"i1\",\"status\":\"in_progress\"},
+                             {\"id\":\"b1\",\"status\":\"blocked\"}]"))))
+              ((symbol-value 'maduin-dispatch--active) nil))
+      (let ((st (maduin-pipeline-status)))
+        (should (<= calls 2))
+        (should (= (plist-get st :queued) 2))
+        (should (= (plist-get st :active) 1))
+        (should (= (plist-get st :completed) 2))
+        (should (= (plist-get st :blocked) 1))))))
+
 ;;; 8. cockpit
 
 (ert-deftest maduin-test-cockpit-show ()
