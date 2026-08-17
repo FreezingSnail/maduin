@@ -48,6 +48,19 @@ timer and only happens while the cockpit buffer is visible.")
 (defvar maduin-cockpit--idle-timer nil
   "Single-shot idle timer scheduled by `maduin-cockpit--schedule-refresh'.")
 
+(defvar maduin-cockpit--last-refresh nil
+  "Float-time of the last cockpit refresh, or nil when never refreshed.
+Set by `maduin-cockpit-refresh'; consulted by
+`maduin-cockpit--refresh-throttled-p' to debounce focus-driven
+refreshes (`maduin-cockpit--on-window-change').")
+
+(defvar chaplet-auto-refresh t
+  "When non-nil, chaplet auto-refreshes its buffers on focus.
+Declared here so maduin-cockpit byte-compiles without chaplet.  The
+timer-driven cockpit refresh gates its embedded-inbox refresh on this
+flag, so the inbox is not double-refreshed by both the cockpit timer
+and chaplet's own focus hook.")
+
 (defvar maduin-cockpit-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
@@ -272,13 +285,17 @@ focus-driven path can throttle rapid window switches."
   "Refresh the cockpit while its buffer is visible.
 Self-cancelling: when the buffer is gone or no longer shown in any
 window, stop the timer.  Refresh is skipped while the buffer is buried
-(hidden but alive) so work in other buffers is not interrupted."
+(hidden but alive) so work in other buffers is not interrupted.
+The embedded inbox is refreshed only when `chaplet-auto-refresh' is
+non-nil; chaplet refreshes the inbox itself on focus, so refreshing
+it here unconditionally double-refreshes."
   (let ((buf (get-buffer maduin-cockpit-buffer-name)))
     (if (or (null buf) (null (get-buffer-window buf 'visible)))
         (maduin-cockpit--stop-timer)
       (with-current-buffer buf
         (maduin-cockpit-refresh)
-        (maduin-cockpit--inbox-refresh)))))
+        (when chaplet-auto-refresh
+          (maduin-cockpit--inbox-refresh))))))
 
 ;;; Embedded chaplet inbox
 
@@ -352,20 +369,38 @@ a buried or absent buffer is a no-op."
     (error nil)))
 
 (defun maduin-cockpit--on-complete (_sid _status)
-  "Nudge a cockpit refresh when an autonomous session reaches a terminal state.
+  "Clear the task-title cache and nudge a cockpit refresh when an
+autonomous session reaches a terminal state.
 Added to `maduin-session-on-complete-hook' (SID STATUS are ignored)."
+  (setq maduin-cockpit--title-cache nil)
   (condition-case nil
       (run-hook-with-args 'maduin-cockpit-refresh-hook)
     (error nil)))
 
+(defun maduin-cockpit--refresh-throttled-p (&optional now)
+  "Return non-nil when a cockpit refresh should be skipped as throttled.
+True when less than `maduin-cockpit-refresh-interval' seconds have
+elapsed since `maduin-cockpit--last-refresh' — i.e. the cockpit was
+already visible and freshly refreshed.  NOW (float) defaults to
+`float-time'."
+  (let ((last maduin-cockpit--last-refresh))
+    (and last
+         (< (- (or now (float-time)) last)
+            maduin-cockpit-refresh-interval))))
+
 (defun maduin-cockpit--on-window-change (&optional _frame)
   "Refresh the cockpit when it becomes the selected window's buffer.
 Per-event cheap guard: only acts when the selected window shows the
-cockpit buffer, avoiding a refresh storm on unrelated window changes."
+cockpit buffer, avoiding a refresh storm on unrelated window changes.
+Debounced: scheduling is skipped when a refresh happened less than
+`maduin-cockpit-refresh-interval' seconds ago (the cockpit was already
+visible and freshly refreshed), so rapid window switches queue at most
+one refresh within the interval."
   (condition-case nil
       (when (and (get-buffer maduin-cockpit-buffer-name)
                  (eq (window-buffer (selected-window))
-                     (get-buffer maduin-cockpit-buffer-name)))
+                     (get-buffer maduin-cockpit-buffer-name))
+                 (not (maduin-cockpit--refresh-throttled-p)))
         (run-hook-with-args 'maduin-cockpit-refresh-hook))
     (error nil)))
 

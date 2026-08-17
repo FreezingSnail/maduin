@@ -807,8 +807,11 @@
   :tags '(maduin)
   (let* ((count 0)
          (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
+    (setq maduin-cockpit--title-cache (list (cons "t1" "Old Title")))
     (maduin-cockpit--on-complete "s-1" 'completed)
-    (should (= count 1))))
+    (should (= count 1))
+    ;; Completion must invalidate the task-title cache.
+    (should (null maduin-cockpit--title-cache))))
 
 (ert-deftest maduin-test-cockpit-live-on-window-change-selected ()
   :tags '(maduin)
@@ -816,6 +819,7 @@
   (let* ((buf (get-buffer-create "*maduin-cockpit*"))
          (orig (window-buffer (selected-window)))
          (count 0)
+         (maduin-cockpit--last-refresh nil)
          (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
     (unwind-protect
         (progn
@@ -831,6 +835,7 @@
   (let* ((buf (get-buffer-create "*maduin-cockpit*"))
          (other (get-buffer-create "*maduin-cockpit-live-other*"))
          (count 0)
+         (maduin-cockpit--last-refresh nil)
          (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
     (unwind-protect
         (progn
@@ -974,6 +979,126 @@
         (cancel-timer maduin-cockpit--timer)
         (setq maduin-cockpit--timer nil))
       (kill-buffer buf))))
+
+;;; 8e2. cockpit-throttle (debounced focus refresh)
+
+(ert-deftest maduin-test-cockpit-throttle-predicate ()
+  :tags '(maduin)
+  ;; Never refreshed → not throttled.
+  (let ((maduin-cockpit--last-refresh nil)
+        (maduin-cockpit-refresh-interval 5))
+    (should-not (maduin-cockpit--refresh-throttled-p 1000.0)))
+  ;; Inside the interval → throttled.
+  (let ((maduin-cockpit--last-refresh 996.0)
+        (maduin-cockpit-refresh-interval 5))
+    (should (maduin-cockpit--refresh-throttled-p 1000.0)))
+  ;; At exactly the interval boundary → not throttled.
+  (let ((maduin-cockpit--last-refresh 995.0)
+        (maduin-cockpit-refresh-interval 5))
+    (should-not (maduin-cockpit--refresh-throttled-p 1000.0)))
+  ;; Long after the interval → not throttled.
+  (let ((maduin-cockpit--last-refresh 900.0)
+        (maduin-cockpit-refresh-interval 5))
+    (should-not (maduin-cockpit--refresh-throttled-p 1000.0))))
+
+(ert-deftest maduin-test-cockpit-live-window-change-throttled-fresh ()
+  :tags '(maduin)
+  ;; Cockpit already visible and freshly refreshed (last refresh = now)
+  ;; → on-window-change must NOT run the refresh hook again.
+  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
+         (orig (window-buffer (selected-window)))
+         (count 0)
+         (maduin-cockpit--last-refresh (float-time))
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buf)
+          (maduin-cockpit--on-window-change)
+          (should (= count 0)))
+      (set-window-buffer (selected-window) orig)
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-window-change-throttled-rapid ()
+  :tags '(maduin)
+  ;; Rapid switches queue at most one refresh within the interval: the
+  ;; first change schedules a refresh, the second (still fresh) is
+  ;; throttled.
+  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
+         (orig (window-buffer (selected-window)))
+         (count 0)
+         (maduin-cockpit--last-refresh nil)
+         (maduin-cockpit-refresh-hook
+          (list (lambda ()
+                  (setq count (1+ count))
+                  ;; Simulate the refresh having run (marks freshness).
+                  (setq maduin-cockpit--last-refresh (float-time))))))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buf)
+          (maduin-cockpit--on-window-change)
+          (should (= count 1))
+          ;; Second rapid switch, still inside the interval → throttled.
+          (maduin-cockpit--on-window-change)
+          (should (= count 1)))
+      (set-window-buffer (selected-window) orig)
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-window-change-not-throttled-stale ()
+  :tags '(maduin)
+  ;; Last refresh older than the interval → refresh hook runs again.
+  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
+         (orig (window-buffer (selected-window)))
+         (count 0)
+         (maduin-cockpit--last-refresh
+          (- (float-time) maduin-cockpit-refresh-interval 1))
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buf)
+          (maduin-cockpit--on-window-change)
+          (should (= count 1)))
+      (set-window-buffer (selected-window) orig)
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-refresh-marks-last-refresh ()
+  :tags '(maduin)
+  ;; maduin-cockpit-refresh records float-time as last-refresh (mocked).
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (maduin-cockpit--last-refresh nil)
+        (maduin-dispatch--active nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-bd--call)
+                   (lambda (&rest _args) (cons 0 "[{\"title\": \"T\"}]")))
+                  ((symbol-function 'float-time) (lambda () 42.0)))
+          (with-current-buffer buf (tabulated-list-mode))
+          (maduin-cockpit-refresh)
+          (should (= maduin-cockpit--last-refresh 42.0)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-auto-refresh-inbox-gated ()
+  :tags '(maduin)
+  ;; The timer path refreshes the embedded inbox only when
+  ;; chaplet-auto-refresh is non-nil (chaplet refreshes the inbox itself
+  ;; on focus, so refreshing it unconditionally double-refreshes).
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (inbox (get-buffer-create "*chaplet*"))
+        (calls 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer inbox (setq major-mode 'chaplet-list-mode))
+          (with-current-buffer buf (tabulated-list-mode))
+          (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t))
+                    ((symbol-function 'maduin-cockpit-refresh) (lambda ()))
+                    ((symbol-function 'chaplet-list-refresh)
+                     (lambda () (setq calls (1+ calls)))))
+            (let ((chaplet-auto-refresh nil))
+              (maduin-cockpit--auto-refresh)
+              (should (= calls 0)))
+            (let ((chaplet-auto-refresh t))
+              (maduin-cockpit--auto-refresh)
+              (should (= calls 1)))))
+      (kill-buffer buf)
+      (kill-buffer inbox))))
 
 ;;; 8f. cockpit-evil (evil-aware keybindings + inbox jump)
 
