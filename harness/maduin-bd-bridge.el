@@ -33,6 +33,17 @@ Stderr is discarded so human error text never contaminates stdout."
                               shell-command-switch cmd)))
       (cons code (buffer-string)))))
 
+(defun maduin-bd--call (program &rest args)
+  "Run PROGRAM directly with ARGS (no shell). Return (exit-code . stdout-string).
+Stderr is discarded so human error text never contaminates stdout.
+Args travel as a Lisp list — never interpolated into a shell string —
+so task-ids and queries need no quoting and cannot be shell-injected."
+  (with-temp-buffer
+    (let ((code (apply #'call-process program nil
+                       (list (current-buffer) nil) nil
+                       args)))
+      (cons code (buffer-string)))))
+
 (defun maduin-bd--json-data (output)
   "Parse OUTPUT as a JSON array; return list of alists, or nil.
 Returns nil silently when OUTPUT is empty or not JSON (first
@@ -70,7 +81,7 @@ non-whitespace character is not `[' or `{')."
 
 (defun maduin-bd-ready-tasks ()
   "Return list of ready task ID strings (epics excluded)."
-  (let ((res (maduin-bd--run "bd ready --exclude-type epic --json")))
+  (let ((res (maduin-bd--call "bd" "ready" "--exclude-type" "epic" "--json")))
     (if (/= 0 (car res))
         (progn
           (maduin-bd--log-error
@@ -170,8 +181,7 @@ DIR is the seat worktree (or any per-task directory); it defaults to
 
 (defun maduin-bd-show (task-id)
   "Return plist (:title :desc :status :deps :parent) for TASK-ID, or nil."
-  (let ((res (maduin-bd--run
-              (format "bd show %s --json" task-id))))
+  (let ((res (maduin-bd--call "bd" "show" task-id "--json")))
     (if (/= 0 (car res))
         (progn
           (maduin-bd--log-error
@@ -259,10 +269,9 @@ DIR is the seat worktree (or any per-task directory); it defaults to
   "Return list of issue IDs matching Q via `bd query Q --json'.
 When ALL is non-nil, include closed issues (`--all'; the CLI excludes
 them by default).  Return nil on failure."
-  (let ((res (maduin-bd--run
-              (format "bd query %s --json%s"
-                      (shell-quote-argument q)
-                      (if all " --all" "")))))
+  (let ((res (apply #'maduin-bd--call
+                    "bd" "query" q "--json"
+                    (if all '("--all") nil))))
     (if (/= 0 (car res))
         (progn
           (maduin-bd--log-error

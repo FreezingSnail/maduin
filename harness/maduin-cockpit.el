@@ -113,8 +113,7 @@ Results are cached in `maduin-cockpit--title-cache'; failures are not.
 Tolerates either an object or an array shape in the JSON output."
   (when task-id
     (or (cdr (assoc task-id maduin-cockpit--title-cache))
-        (let* ((res (maduin-bd--run
-                     (format "bd show %s --json" task-id)))
+        (let* ((res (maduin-bd--call "bd" "show" task-id "--json"))
                (data (maduin-bd--json-data (cdr res)))
                (title (and (= 0 (car res))
                            (or (and (listp data)

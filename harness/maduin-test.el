@@ -206,32 +206,91 @@
   ;; Default excludes closed; ALL=t must append `--all' so closed children
   ;; are visible (an epic with only-closed children still reports them).
   (let ((seen nil))
-    (cl-letf (((symbol-function 'maduin-bd--run)
-               (lambda (cmd)
-                 (setq seen cmd)
+    (cl-letf (((symbol-function 'maduin-bd--call)
+               (lambda (_prog &rest args)
+                 (setq seen args)
                  (cons 0 "[{\"id\":\"t1\"}]"))))
       (should (equal (maduin-bd-query "parent=epic-x") '("t1")))
-      (should (string-match-p "--json" seen))
-      (should-not (string-match-p "--all" seen)))
-    (cl-letf (((symbol-function 'maduin-bd--run)
-               (lambda (cmd)
-                 (setq seen cmd)
+      (should (member "--json" seen))
+      (should-not (member "--all" seen)))
+    (cl-letf (((symbol-function 'maduin-bd--call)
+               (lambda (_prog &rest args)
+                 (setq seen args)
                  (cons 0 "[{\"id\":\"t1\"}]"))))
       (should (equal (maduin-bd-query "parent=epic-x" t) '("t1")))
-      (should (string-match-p "--all" seen)))))
+      (should (member "--all" seen)))))
 
 (ert-deftest maduin-test-bd-epic-children-includes-closed ()
   :tags '(maduin)
   ;; Epic-children MUST include closed children (`--all'), else a done epic
   ;; looks undecomposed and Ramuh re-dispatches decomposition on it.
   (let ((seen nil))
-    (cl-letf (((symbol-function 'maduin-bd--run)
-               (lambda (cmd)
-                 (setq seen cmd)
+    (cl-letf (((symbol-function 'maduin-bd--call)
+               (lambda (_prog &rest args)
+                 (setq seen args)
                  (cons 0 "[{\"id\":\"c1\"},{\"id\":\"c2\"}]"))))
       (should (equal (maduin-bd-epic-children "epic-x") '("c1" "c2")))
-      (should (string-match-p "epic-x" seen))
-      (should (string-match-p "--all" seen)))))
+      (should (member "parent=epic-x" seen))
+      (should (member "--all" seen)))))
+
+(ert-deftest maduin-test-bd-call-task-id-as-arg-no-shell ()
+  :tags '(maduin)
+  ;; maduin-bd--call must hand task-ids to the program as literal arg
+  ;; elements (a Lisp list), never interpolated into a shell string, so
+  ;; quoting/injection is impossible.  Mock `call-process' to capture the
+  ;; exact program and args.
+  (let (seen)
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (program _infile _destination _display &rest args)
+                 (setq seen (cons program args))
+                 0)))
+      (maduin-bd-show "maduin-x59.1")
+      (should (equal (car seen) "bd"))
+      (should (cl-every #'stringp (cdr seen)))
+      (should (member "show" (cdr seen)))
+      (should (member "--json" (cdr seen)))
+      ;; The task-id arrives as a single argument element, exactly equal.
+      (should (member "maduin-x59.1" (cdr seen)))
+      (should-not (string-match-p "maduin-x59.1"
+                                  (mapconcat #'identity (remove "maduin-x59.1" (cdr seen)) " "))))))
+
+(ert-deftest maduin-test-bd-call-real-program-no-shell ()
+  :tags '(maduin)
+  ;; maduin-bd--call must run the program directly (no shell): each arg
+  ;; arrives verbatim as one element, and shell metacharacters inside an
+  ;; arg are inert.  Real subprocess via `call-process', exit+stdout shape
+  ;; asserted.  Skips when printf is unavailable (unlikely on macOS/Linux).
+  (let ((printf (executable-find "printf")))
+    (skip-unless printf)
+    (let* ((task-id "maduin-x59.1")
+           (toxic "evil; echo hacked >&2 |$(touch pwn)`date` &")
+           (args (list "%s\n" task-id toxic))
+           (res (apply #'maduin-bd--call printf args)))
+      (should (= 0 (car res)))
+      (should (stringp (cdr res)))
+      ;; One output line per arg, in order, byte-for-byte — proves args
+      ;; were handed to the program as list elements, never shell-joined.
+      (let ((lines (split-string (cdr res) "\n" t)))
+        (should (equal lines (list task-id toxic)))))))
+
+(ert-deftest maduin-test-bd-list-all-single-call-normalized ()
+  :tags '(maduin)
+  ;; One `bd list --json --all' subprocess yields normalized bead alists —
+  ;; callers count statuses client-side instead of 3x `bd count --status'.
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'maduin-bd--call)
+               (lambda (_prog &rest args)
+                 (setq seen args)
+                 (cons 0 "[{\"id\":\"a\",\"status\":\"closed\"}]"))))
+      (should (equal (maduin-bd-list-all)
+                     '(((id . "a") (status . "closed"))))))
+    (should (equal seen '("list" "--json" "--all")))))
+
+(ert-deftest maduin-test-bd-list-all-failure-nil ()
+  :tags '(maduin)
+  (cl-letf (((symbol-function 'maduin-bd--call)
+             (lambda (&rest _) (cons 1 "boom"))))
+    (should-not (maduin-bd-list-all))))
 
 (ert-deftest maduin-test-bd-release-resets-status-open ()
   :tags '(maduin)
@@ -506,8 +565,8 @@
   :tags '(maduin)
   (cl-letf (((symbol-value 'maduin-dispatch--active)
              (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1")))
-            ((symbol-function 'maduin-bd--run)
-             (lambda (_cmd) (cons 0 "[{\"title\": \"T1 title\"}]"))))
+            ((symbol-function 'maduin-bd--call)
+             (lambda (_prog &rest _args) (cons 0 "[{\"title\": \"T1 title\"}]"))))
     (let ((st (maduin-cockpit--seat-status "ifrit")))
       (should (equal (plist-get st :seat) "ifrit"))
       (should (eq (plist-get st :role) 'implementer))
@@ -522,8 +581,8 @@
   :tags '(maduin)
   (setq maduin-cockpit--title-cache nil)
   (let ((calls 0))
-    (cl-letf (((symbol-function 'maduin-bd--run)
-               (lambda (_cmd)
+    (cl-letf (((symbol-function 'maduin-bd--call)
+               (lambda (&rest _args)
                  (cl-incf calls)
                  (cons 0 "[{\"title\": \"Big Title\"}]"))))
       (should (equal (maduin-cockpit--task-title "maduin-x") "Big Title"))
@@ -536,16 +595,16 @@
 (ert-deftest maduin-test-cockpit-task-title-object-shape ()
   :tags '(maduin)
   (setq maduin-cockpit--title-cache nil)
-  (cl-letf (((symbol-function 'maduin-bd--run)
-             (lambda (_cmd) (cons 0 "{\"title\": \"Obj Title\"}"))))
+  (cl-letf (((symbol-function 'maduin-bd--call)
+             (lambda (&rest _args) (cons 0 "{\"title\": \"Obj Title\"}"))))
     (should (equal (maduin-cockpit--task-title "maduin-z") "Obj Title")))
   (setq maduin-cockpit--title-cache nil))
 
 (ert-deftest maduin-test-cockpit-task-title-failure ()
   :tags '(maduin)
   (setq maduin-cockpit--title-cache nil)
-  (cl-letf (((symbol-function 'maduin-bd--run)
-             (lambda (_cmd) (cons 1 "error output"))))
+  (cl-letf (((symbol-function 'maduin-bd--call)
+             (lambda (&rest _args) (cons 1 "error output"))))
     (should (null (maduin-cockpit--task-title "maduin-y"))))
   (setq maduin-cockpit--title-cache nil))
 
