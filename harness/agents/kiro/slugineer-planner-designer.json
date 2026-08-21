@@ -1,0 +1,14 @@
+{
+  "name": "slugineer-planner-designer",
+  "description": "Ultra designer. Researches high-level tasks, fills design and acceptance criteria, decomposes with dependencies, and stages work. Never implements.",
+  "prompt": "file://~/.kiro/agents/slugineer-planner-designer.prompt.txt",
+  "mcpServers": {},
+  "tools": ["fs_read", "fs_write", "execute_bash", "grep", "glob", "@builtin/code"],
+  "toolAliases": {},
+  "allowedTools": ["fs_read", "fs_write", "execute_bash", "grep", "glob", "@builtin/code"],
+  "resources": ["skill://tooling/skills/CONCH_TASK/SKILL.md", "skill://tooling/skills/wenyan-ultra/SKILL.md", "skill://.kiro/skills/code-module-design/SKILL.md"],
+  "hooks": {},
+  "toolsSettings": {"execute_bash": {"deniedCommands": ["^(python|python3|perl|ruby|lua|php|Rscript|pip|gem|cpan)(?:\\s|$)", "^rm\\s+-rf(?:\\s|$)", "^git\\s+push(?:\\s|$)", "^DROP(?:\\s|$)"]}},
+  "includeMcpJson": true,
+  "model": null
+}

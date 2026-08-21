@@ -22,6 +22,11 @@ else
   echo "Classic Emacs: wiring into ${TARGET}"
 fi
 
+remove_agent_link() {
+  local source="$1" destination="$2"
+  [ -L "${destination}" ] && [ "$(readlink "${destination}")" = "${source}" ] && rm -f "${destination}"
+}
+
 uninstall() {
   if [ -f "${TARGET}" ]; then
     # Remove from first marker to end-of-maduin line, inclusive
@@ -31,6 +36,13 @@ uninstall() {
       !skip' "${TARGET}" > "${TARGET}.tmp" && mv -f "${TARGET}.tmp" "${TARGET}"
     echo "Removed wiring from ${TARGET}"
   fi
+  for f in "${HARNESS_DIR}"/agents/*.md; do
+    remove_agent_link "${f}" "${HOME}/.config/opencode/agent/$(basename "${f}")"
+  done
+  for f in "${HARNESS_DIR}"/agents/kiro/*.{json,prompt.txt}; do
+    [ -f "${f}" ] || continue
+    remove_agent_link "${f}" "${HOME}/.kiro/agents/$(basename "${f}")"
+  done
   echo "Done."
   exit 0
 }
@@ -52,10 +64,16 @@ else
   echo "Wired: ${TARGET}"
 fi
 
-# --- Install opencode agents (symlink → repo edits live) ---
+# --- Install agents (symlink → repo edits live) ---
 mkdir -p "${HOME}/.config/opencode/agent"
 for f in "${HARNESS_DIR}"/agents/*.md; do
   ln -sf "${f}" "${HOME}/.config/opencode/agent/$(basename "${f}")"
+done
+
+mkdir -p "${HOME}/.kiro/agents"
+for f in "${HARNESS_DIR}"/agents/kiro/*.{json,prompt.txt}; do
+  [ -f "${f}" ] || continue
+  ln -sf "${f}" "${HOME}/.kiro/agents/$(basename "${f}")"
 done
 
 echo "Installed."

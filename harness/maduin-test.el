@@ -115,6 +115,60 @@
   (let ((fleet (cdr (assq 'fleet maduin-config))))
     (should (= (alist-get 'poll-interval fleet) 30))))
 
+(ert-deftest maduin-test-config-backend-role-defaults ()
+  :tags '(maduin)
+  (dolist (role '(implementer designer concierge repairer reviewer))
+    (should (eq (maduin-config-role-backend role) 'opencode))))
+
+(ert-deftest maduin-test-config-backend-inherits-role-default ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'backend (cdr (assq 'fleet maduin-config))) 'kiro)
+    (should (eq (maduin-config-seat-backend 'implementer "ifrit") 'kiro))))
+
+(ert-deftest maduin-test-config-backend-seat-override-wins ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'backend (cdr (assq 'fleet maduin-config))) 'kiro)
+    (maduin-config-set-seat-backend 'implementer "ifrit" 'opencode)
+    (should (eq (maduin-config-seat-backend 'implementer "ifrit") 'opencode))
+    (should (eq (maduin-config-seat-backend 'implementer "shiva") 'kiro))))
+
+(ert-deftest maduin-test-config-backend-seat-mutation-isolated ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (should (eq (maduin-config-set-seat-backend 'implementer "ifrit" 'kiro)
+                'kiro))
+    (should (eq (maduin-config-seat-backend 'implementer "ifrit") 'kiro))
+    (should (eq (maduin-config-seat-backend 'implementer "shiva") 'opencode))
+    (should (eq (maduin-config-role-backend 'implementer) 'opencode))))
+
+(ert-deftest maduin-test-config-backend-invalid-input-does-not-mutate ()
+  :tags '(maduin)
+  (let* ((maduin-config (copy-tree maduin-config))
+         (before (copy-tree maduin-config)))
+    (dolist (args '((unknown "ifrit" kiro)
+                    (implementer "missing" kiro)
+                    (implementer "ifrit" unsupported)
+                    (implementer 7 kiro)))
+      (should-error (apply #'maduin-config-set-seat-backend args)
+                    :type 'user-error)
+      (should (equal maduin-config before)))))
+
+(ert-deftest maduin-test-config-backend-save-refuses-unsafe-rewrite ()
+  :tags '(maduin)
+  (let* ((maduin-config (copy-tree maduin-config))
+         (before-config (copy-tree maduin-config))
+         (before-file (with-temp-buffer
+                        (insert-file-contents maduin-config--file)
+                        (buffer-string))))
+    (should-error (maduin-config-save) :type 'user-error)
+    (should (equal maduin-config before-config))
+    (should (equal (with-temp-buffer
+                     (insert-file-contents maduin-config--file)
+                     (buffer-string))
+                   before-file))))
+
 ;;; 3. bd-bridge
 
 (ert-deftest maduin-test-bd-json-data-array ()
@@ -2466,6 +2520,75 @@
                (lambda (_epic) (setq gate-called t) 'approved)))
       (should (null (maduin-review--maybe-review-epic "orphan")))
       (should-not gate-called))))
+
+;;; 21. Kiro agent definitions and installer contract
+
+(defconst maduin-test--kiro-agent-roles
+  '(concierge designer fleet reviewer repairer)
+  "Configuration sections backed by checked-in Kiro agents.")
+
+(defun maduin-test--kiro-agent-names ()
+  "Return Kiro agent names configured for the production roles."
+  (mapcar (lambda (role)
+            (alist-get 'agent (cdr (assq role maduin-config))))
+          maduin-test--kiro-agent-roles))
+
+(defun maduin-test--agent-prompt-body (path)
+  "Return PATH without its YAML frontmatter."
+  (with-temp-buffer
+    (insert-file-contents path)
+    (goto-char (point-min))
+    (re-search-forward "^---[ \\t]*$")
+    (forward-line 1)
+    (re-search-forward "^---[ \\t]*$")
+    (forward-line 1)
+    (buffer-substring-no-properties (point) (point-max))))
+
+(ert-deftest maduin-test-kiro-agent-files-cover-configured-roles ()
+  :tags '(maduin)
+  (dolist (name (maduin-test--kiro-agent-names))
+    (should (file-exists-p
+             (expand-file-name (concat "agents/kiro/" name ".json")
+                               maduin-test--dir)))
+    (should (file-exists-p
+             (expand-file-name (concat "agents/kiro/" name ".prompt.txt")
+                               maduin-test--dir)))))
+
+(ert-deftest maduin-test-kiro-agent-json-and-prompt-integrity ()
+  :tags '(maduin)
+  (dolist (name (maduin-test--kiro-agent-names))
+    (let* ((json-path (expand-file-name (concat "agents/kiro/" name ".json")
+                                        maduin-test--dir))
+           (prompt-path (expand-file-name (concat "agents/kiro/" name ".prompt.txt")
+                                          maduin-test--dir))
+           (source-path (expand-file-name (concat "agents/" name ".md")
+                                          maduin-test--dir))
+           (json-object-type 'alist)
+           (json-key-type 'symbol)
+           (config (json-read-file json-path)))
+      (should (equal (alist-get 'name config) name))
+      (should (equal (alist-get 'prompt config)
+                     (concat "file://~/.kiro/agents/" name ".prompt.txt")))
+      (should (file-exists-p prompt-path))
+      (should (equal (maduin-test--agent-prompt-body source-path)
+                     (with-temp-buffer
+                       (insert-file-contents prompt-path)
+                       (buffer-string))))
+      (should (alist-get 'deniedCommands
+                         (alist-get 'execute_bash
+                                    (alist-get 'toolsSettings config)))))))
+
+(ert-deftest maduin-test-install-script-wires-kiro-agents ()
+  :tags '(maduin)
+  (let ((script (expand-file-name "install.sh" maduin-test--dir)))
+    (should (zerop (call-process "bash" nil nil nil "-n" script)))
+    (with-temp-buffer
+      (insert-file-contents script)
+      (let ((contents (buffer-string)))
+        (should (string-match-p "agents/kiro" contents))
+        (should (string-match-p "\\.kiro/agents" contents))
+        (should (string-match-p "ln -sf" contents))
+        (should (string-match-p "remove_agent_link" contents))))))
 
 (provide 'maduin-test)
 
