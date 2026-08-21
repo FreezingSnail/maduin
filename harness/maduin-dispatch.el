@@ -33,6 +33,7 @@
 (require 'maduin-session)
 (require 'maduin-backend)
 (require 'maduin-bd-bridge)
+(require 'maduin-bd-async)
 (require 'maduin-workspace)
 (require 'maduin-pipeline)
 
@@ -98,6 +99,21 @@ Recovery seam: detects tasks orphaned by an Emacs quit mid-task.")
 (defvar maduin-dispatch--epic-children-fn #'maduin-bd-epic-children
   "Function `(epic)' → list of child id strings | nil.")
 
+;; Async polling seams deliberately sit alongside the synchronous seams above.
+;; The latter remain the contract for direct recovery/decomposition helpers and
+;; their existing tests; run-loop polling must never invoke them.
+(defvar maduin-dispatch--ready-async-fn #'maduin-bd-async-ready-tasks
+  "Function `(callback)' → async handle; CALLBACK receives IDS and success.")
+
+(defvar maduin-dispatch--in-progress-async-fn #'maduin-bd-async-in-progress-tasks
+  "Function `(callback)' → async handle; CALLBACK receives IDS and success.")
+
+(defvar maduin-dispatch--open-epics-async-fn #'maduin-bd-async-open-epics
+  "Function `(callback)' → async handle; CALLBACK receives IDS and success.")
+
+(defvar maduin-dispatch--epic-children-async-fn #'maduin-bd-async-epic-children
+  "Function `(epic callback)' → async handle; CALLBACK receives IDS and success.")
+
 (defvar maduin-dispatch--epic-decompose-fn #'maduin-designer-decompose-epic
   "Function `(epic)' → session handle | nil.
 Reuses maduin-designer machinery (Ramuh decomposition session).")
@@ -127,6 +143,12 @@ measures the current attempt, not the original claim).")
 (defvar maduin-dispatch--draining nil
   "Non-nil while a soft stop is draining in-flight sessions.
 The run-loop picks up no new work while draining.")
+
+(defvar maduin-dispatch--tick-in-flight nil
+  "Non-nil while an asynchronous dispatch polling chain is outstanding.")
+
+(defvar maduin-dispatch--tick-notify-pending nil
+  "Non-nil when a polling tick deferred a cockpit refresh notification.")
 
 ;;; Config access
 
@@ -275,11 +297,13 @@ conflicts 3) git add -A 4) git commit. Report blockers instead of guessing."
 ;;; Live-state notifications
 
 (defun maduin-dispatch--notify (&optional _reason)
-  "Request a cockpit refresh.  No-op when the cockpit is not loaded."
-  (when (boundp 'maduin-cockpit-refresh-hook)
-    (condition-case nil
-        (run-hook-with-args 'maduin-cockpit-refresh-hook)
-      (error nil))))
+  "Request a cockpit refresh, coalescing notifications from an active tick."
+  (if maduin-dispatch--tick-in-flight
+      (setq maduin-dispatch--tick-notify-pending t)
+    (when (boundp 'maduin-cockpit-refresh-hook)
+      (condition-case nil
+          (run-hook-with-args 'maduin-cockpit-refresh-hook)
+        (error nil)))))
 
 (defun maduin-dispatch--set-status (handle status)
   "Store changed STATUS on active entry HANDLE and request a refresh.
@@ -544,17 +568,131 @@ no-ops once the designer role is at its cap."
   (dolist (epic (maduin-dispatch--undecomposed-epics))
     (funcall maduin-dispatch--epic-decompose-fn epic)))
 
+(defun maduin-dispatch--recover-tasks (tasks)
+  "Re-dispatch orphaned TASKS from one async in-progress snapshot.
+Return the count dispatched.  Unlike `maduin-dispatch--recover', this
+never starts another bd query."
+  (let ((n 0)
+        (active (mapcar (lambda (entry) (plist-get entry :task))
+                        maduin-dispatch--active)))
+    (dolist (task tasks)
+      (when (and (not (member task active))
+                 (maduin-dispatch-implement task))
+        (setq n (1+ n))))
+    n))
+
+(defun maduin-dispatch--run-loop-error (stage finish)
+  "Log failed async polling STAGE and invoke tick FINISH continuation."
+  (maduin-bd--log-error (format "dispatch async %s query failed" stage))
+  (funcall finish))
+
 (defun maduin-dispatch-run-loop ()
-  "One tick: recover orphaned in_progress tasks, poll ready bd tasks and
-dispatch implement for each, then dispatch Ramuh decomposition for open
-epics lacking decomposition.  Stops spawning once the implementer
-concurrency cap is reached.  No-op while draining (soft stop in progress)."
-  (unless maduin-dispatch--draining
-    (maduin-dispatch--recover)
-    (let ((ready (funcall maduin-dispatch--ready-fn)))
-      (dolist (task ready)
-        (maduin-dispatch-implement task)))
-    (maduin-dispatch--decompose-epics)))
+  "Asynchronously poll, recover, dispatch, and decompose for one tick.
+Read-only bd queries yield to Emacs between subprocesses.  Claim, plan
+construction (`bd show'), and session spawning remain synchronous: those are
+ordered dispatch actions, and a plan must exist before `make-process'."
+  (unless (or maduin-dispatch--draining maduin-dispatch--tick-in-flight)
+    (setq maduin-dispatch--tick-in-flight t)
+    (let ((notified nil)
+          (finish (lambda ()
+                    (let ((flush maduin-dispatch--tick-notify-pending))
+                      (setq maduin-dispatch--tick-in-flight nil
+                            maduin-dispatch--tick-notify-pending nil)
+                      (when flush (maduin-dispatch--notify))))))
+      (cl-labels
+          ((notify-once ()
+             (unless notified
+               (setq notified t)
+               (maduin-dispatch--notify)))
+           (fail (stage)
+             (maduin-dispatch--run-loop-error stage finish))
+           (decompose (epics)
+             ;; Start every parent query before processing any result: the
+             ;; latch joins concurrent child snapshots without serial bd I/O.
+             (if (null epics)
+                 (funcall finish)
+               (let ((remaining (length epics))
+                     (failed nil)
+                     (undecomposed nil))
+                 (dolist (epic epics)
+                   (unless
+                       (funcall
+                        maduin-dispatch--epic-children-async-fn epic
+                        (lambda (children ok)
+                          (condition-case err
+                              (progn
+                                (unless ok (setq failed t))
+                                (when (and ok (null children))
+                                  (push epic undecomposed))
+                                (setq remaining (1- remaining))
+                                (when (= remaining 0)
+                                  (unwind-protect
+                                      (cond
+                                       (failed
+                                        (maduin-bd--log-error
+                                         "dispatch async epic children query failed"))
+                                       ((not maduin-dispatch--draining)
+                                        (dolist (id (nreverse undecomposed))
+                                          (funcall maduin-dispatch--epic-decompose-fn id))
+                                        (when undecomposed (notify-once))))
+                                    (funcall finish))))
+                            (error
+                             (maduin-bd--log-error
+                              (format "dispatch async epic children callback failed: %s"
+                                      (error-message-string err)))
+                             (funcall finish)))))
+                     (setq failed t
+                           remaining (1- remaining))))
+                 ;; A process which could not start invokes no callback.
+                 (when (= remaining 0) (funcall finish)))))
+           (open-epics ()
+             (unless (funcall maduin-dispatch--open-epics-async-fn
+                              (lambda (epics ok)
+                                (condition-case err
+                                    (if ok
+                                        (if maduin-dispatch--draining
+                                            (funcall finish)
+                                          (decompose epics))
+                                      (fail "open epics"))
+                                  (error
+                                   (maduin-bd--log-error
+                                    (format "dispatch async open epics callback failed: %s"
+                                            (error-message-string err)))
+                                   (funcall finish)))))
+               (fail "open epics")))
+           (ready ()
+             (unless (funcall maduin-dispatch--ready-async-fn
+                              (lambda (tasks ok)
+                                (condition-case err
+                                    (if ok
+                                        (progn
+                                          (unless maduin-dispatch--draining
+                                            (dolist (task tasks)
+                                              (maduin-dispatch-implement task)))
+                                          (open-epics))
+                                      (fail "ready"))
+                                  (error
+                                   (maduin-bd--log-error
+                                    (format "dispatch async ready callback failed: %s"
+                                            (error-message-string err)))
+                                   (funcall finish)))))
+               (fail "ready"))))
+        (unless (funcall maduin-dispatch--in-progress-async-fn
+                         (lambda (tasks ok)
+                           (condition-case err
+                               (if ok
+                                   (progn
+                                     (unless maduin-dispatch--draining
+                                       (when (> (maduin-dispatch--recover-tasks tasks) 0)
+                                         (notify-once)))
+                                     (ready))
+                                 (fail "in-progress"))
+                             (error
+                              (maduin-bd--log-error
+                               (format "dispatch async in-progress callback failed: %s"
+                                       (error-message-string err)))
+                              (funcall finish)))))
+          (fail "in-progress"))))))
 
 ;;; Lifecycle
 
@@ -594,7 +732,7 @@ first timer tick."
   (let ((interval (or (maduin-dispatch--config-get 'fleet 'poll-interval) 30)))
     (setq maduin-dispatch--timer
           (run-at-time interval interval #'maduin-dispatch-run-loop)))
-  (maduin-dispatch--recover)
+  (maduin-dispatch-run-loop)
   (maduin-dispatch--notify)
   t)
 
@@ -607,6 +745,10 @@ immediately delete any live sessions (tasks stay open)."
   (when maduin-dispatch--timer
     (cancel-timer maduin-dispatch--timer)
     (setq maduin-dispatch--timer nil))
+  (when maduin-dispatch--tick-in-flight
+    (maduin-bd-async-cancel-all)
+    (setq maduin-dispatch--tick-in-flight nil
+          maduin-dispatch--tick-notify-pending nil))
   (if hard
       (maduin-dispatch--handoff-live)
     (if maduin-dispatch--active

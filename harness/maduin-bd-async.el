@@ -133,3 +133,38 @@ JSON array.  Return the in-flight key, or nil on unavailable/spawn failure."
 (provide 'maduin-bd-async)
 
 ;;; maduin-bd-async.el ends here
+
+(defun maduin-bd-async--ids (data)
+  "Extract issue ID strings from async decoded JSON DATA."
+  (when data
+    (delq nil (mapcar (lambda (object)
+                        (and (listp object) (alist-get 'id object)))
+                      data))))
+
+(defun maduin-bd-async--query (args callback)
+  "Run read-only bd ARGS and call CALLBACK with IDS and success boolean."
+  (maduin-bd-async-json
+   args
+   (lambda (data exit-code)
+     (funcall callback (and (= exit-code 0) (maduin-bd-async--ids data))
+              (= exit-code 0)))))
+
+(defun maduin-bd-async-ready-tasks (callback)
+  "Asynchronously call CALLBACK with ready task IDs and success boolean."
+  (maduin-bd-async--query
+   '("ready" "--exclude-type" "epic" "--json") callback))
+
+(defun maduin-bd-async-in-progress-tasks (callback)
+  "Asynchronously call CALLBACK with in-progress task IDs and success boolean."
+  (maduin-bd-async--query
+   '("query" "status=in_progress AND type=task" "--json") callback))
+
+(defun maduin-bd-async-open-epics (callback)
+  "Asynchronously call CALLBACK with open epic IDs and success boolean."
+  (maduin-bd-async--query
+   '("query" "status=open AND type=epic" "--json") callback))
+
+(defun maduin-bd-async-epic-children (epic callback)
+  "Asynchronously call CALLBACK with EPIC's child IDs and success boolean."
+  (maduin-bd-async--query
+   (list "query" (format "parent=%s" epic) "--json" "--all") callback))

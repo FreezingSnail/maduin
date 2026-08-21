@@ -2682,7 +2682,13 @@
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--ready-fn (lambda () '("t1" "t2")))
          (maduin-dispatch--in-progress-fn (lambda () nil))
-         (maduin-dispatch--open-epics-fn (lambda () nil)))
+         (maduin-dispatch--open-epics-fn (lambda () nil))
+         (maduin-dispatch--in-progress-async-fn
+          (lambda (callback) (funcall callback nil t) 'in-progress))
+         (maduin-dispatch--ready-async-fn
+          (lambda (callback) (funcall callback '("t1" "t2") t) 'ready))
+         (maduin-dispatch--open-epics-async-fn
+          (lambda (callback) (funcall callback nil t) 'epics)))
     (unwind-protect
         (progn
           (maduin-dispatch-run-loop)
@@ -2829,7 +2835,17 @@
             (when (string= epic "epic-x") '("c1"))))
          (maduin-dispatch--epic-decompose-fn
           (lambda (epic) (push epic decomposed)
-            (maduin-dispatch-design epic))))
+            (maduin-dispatch-design epic)))
+         (maduin-dispatch--in-progress-async-fn
+          (lambda (callback) (funcall callback nil t) 'in-progress))
+         (maduin-dispatch--ready-async-fn
+          (lambda (callback) (funcall callback '("t1") t) 'ready))
+         (maduin-dispatch--open-epics-async-fn
+          (lambda (callback) (funcall callback '("epic-x" "epic-y") t) 'epics))
+         (maduin-dispatch--epic-children-async-fn
+          (lambda (epic callback)
+            (funcall callback (when (string= epic "epic-x") '("c1")) t)
+            epic)))
     (unwind-protect
         (progn
           ;; epic-x has children → skipped; epic-y lacks decomposition.
@@ -3121,6 +3137,12 @@
              (maduin-dispatch--ready-fn (lambda () (list task)))
              (maduin-dispatch--in-progress-fn (lambda () nil))
              (maduin-dispatch--open-epics-fn (lambda () nil))
+             (maduin-dispatch--in-progress-async-fn
+              (lambda (callback) (funcall callback nil t) 'in-progress))
+             (maduin-dispatch--ready-async-fn
+              (lambda (callback) (funcall callback (list task) t) 'ready))
+             (maduin-dispatch--open-epics-async-fn
+              (lambda (callback) (funcall callback nil t) 'epics))
              (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-loop-1"))
              (maduin-dispatch--claim-fn (lambda (_t) t))
              (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
@@ -4290,3 +4312,153 @@
       (maduin-dispatch--on-event "h1" 'tool)
       (maduin-dispatch--on-event "h1" 'tool)
       (should (= notifies 2)))))
+
+
+;;; Dispatch async run-loop
+
+(ert-deftest maduin-test-dispatch-run-loop-async ()
+  :tags '(maduin)
+  (let* ((implemented nil) (decomposed nil) (children nil)
+        (maduin-dispatch--active nil)
+        (maduin-dispatch--draining nil)
+        (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--in-progress-async-fn
+         (lambda (callback) (funcall callback '("orphan") t) 'in-progress))
+        (maduin-dispatch--ready-async-fn
+         (lambda (callback) (funcall callback '("ready") t) 'ready))
+        (maduin-dispatch--open-epics-async-fn
+         (lambda (callback) (funcall callback '("epic-full" "epic-empty") t) 'epics))
+        (maduin-dispatch--epic-children-async-fn
+         (lambda (epic callback) (push (cons epic callback) children) epic))
+        (maduin-dispatch--epic-decompose-fn
+         (lambda (epic) (push epic decomposed))))
+    (cl-letf (((symbol-function 'maduin-dispatch-implement)
+               (lambda (task) (push task implemented) task)))
+      (maduin-dispatch-run-loop)
+      ;; All children start before either is answered: concurrent fan-out.
+      (should (equal implemented '("ready" "orphan")))
+      (should (= (length children) 2))
+      (funcall (cdr (assoc "epic-full" children)) '("child") t)
+      (should-not decomposed)
+      (funcall (cdr (assoc "epic-empty" children)) nil t)
+      (should (equal decomposed '("epic-empty")))
+      (should-not maduin-dispatch--tick-in-flight))))
+
+(ert-deftest maduin-test-dispatch-run-loop-no-sync-query ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--active nil)
+        (maduin-dispatch--draining nil)
+        (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--in-progress-async-fn
+         (lambda (callback) (funcall callback nil t) 'in-progress))
+        (maduin-dispatch--ready-async-fn
+         (lambda (callback) (funcall callback nil t) 'ready))
+        (maduin-dispatch--open-epics-async-fn
+         (lambda (callback) (funcall callback nil t) 'epics)))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (&rest _) (ert-fail "synchronous bd call")))
+              ((symbol-function 'call-process-shell-command)
+               (lambda (&rest _) (ert-fail "synchronous shell call"))))
+      (maduin-dispatch-run-loop)
+      (should-not maduin-dispatch--tick-in-flight))))
+
+(ert-deftest maduin-test-dispatch-run-loop-reentrancy ()
+  :tags '(maduin)
+  (let* ((queries 0) (implemented nil) callback
+        (maduin-dispatch--active nil)
+        (maduin-dispatch--draining nil)
+        (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--in-progress-async-fn
+         (lambda (continuation) (setq queries (1+ queries) callback continuation) 'in-progress))
+        (maduin-dispatch--ready-async-fn
+         (lambda (continuation) (funcall continuation '("ready") t) 'ready))
+        (maduin-dispatch--open-epics-async-fn
+         (lambda (continuation) (funcall continuation nil t) 'epics)))
+    (cl-letf (((symbol-function 'maduin-dispatch-implement)
+               (lambda (task) (push task implemented) task)))
+      (maduin-dispatch-run-loop)
+      (maduin-dispatch-run-loop)
+      (should (= queries 1))
+      (funcall callback nil t)
+      (should (equal implemented '("ready")))
+      (should-not maduin-dispatch--tick-in-flight))))
+
+(ert-deftest maduin-test-dispatch-run-loop-drain-midchain ()
+  :tags '(maduin)
+  (let ((implemented nil)
+        (maduin-dispatch--active nil)
+        (maduin-dispatch--draining nil)
+        (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--in-progress-async-fn
+         (lambda (callback) (funcall callback nil t) 'in-progress))
+        (maduin-dispatch--ready-async-fn
+         (lambda (callback)
+           (setq maduin-dispatch--draining t)
+           (funcall callback '("ready") t) 'ready))
+        (maduin-dispatch--open-epics-async-fn
+         (lambda (callback) (funcall callback '("epic") t) 'epics)))
+    (cl-letf (((symbol-function 'maduin-dispatch-implement)
+               (lambda (task) (push task implemented) task)))
+      (maduin-dispatch-run-loop)
+      (should-not implemented)
+      (should-not maduin-dispatch--tick-in-flight))))
+
+(ert-deftest maduin-test-dispatch-run-loop-query-failure ()
+  :tags '(maduin)
+  (let* ((queries 0)
+        (maduin-dispatch--active nil)
+        (maduin-dispatch--draining nil)
+        (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--in-progress-async-fn
+         (lambda (callback)
+           (setq queries (1+ queries))
+           (funcall callback nil (> queries 1))
+           'in-progress))
+        (maduin-dispatch--ready-async-fn
+         (lambda (callback) (funcall callback nil t) 'ready))
+        (maduin-dispatch--open-epics-async-fn
+         (lambda (callback) (funcall callback nil t) 'epics)))
+    (maduin-dispatch-run-loop)
+    (should-not maduin-dispatch--tick-in-flight)
+    (maduin-dispatch-run-loop)
+    (should (= queries 2))
+    (should-not maduin-dispatch--tick-in-flight)))
+
+
+(ert-deftest maduin-test-dispatch-stop-cancels-async-tick ()
+  :tags '(maduin)
+  (let ((timer (run-at-time 60 nil #'ignore))
+        (cancelled 0)
+        (maduin-dispatch--timer nil)
+        (maduin-dispatch--active nil)
+        (maduin-dispatch--draining nil)
+        (maduin-dispatch--tick-in-flight t))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-bd-async-cancel-all)
+                   (lambda () (setq cancelled (1+ cancelled)))))
+          (setq maduin-dispatch--timer timer)
+          (maduin-dispatch-stop)
+          (should (= cancelled 1))
+          (should-not maduin-dispatch--timer)
+          (should-not maduin-dispatch--tick-in-flight))
+      (when (timerp timer) (cancel-timer timer)))))
+
+
+(ert-deftest maduin-test-dispatch-run-loop-coalesces-notify ()
+  :tags '(maduin)
+  (let* ((count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count)))))
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--draining nil)
+         (maduin-dispatch--tick-in-flight nil)
+         (maduin-dispatch--tick-notify-pending nil)
+         (maduin-dispatch--in-progress-async-fn
+          (lambda (callback) (funcall callback '("orphan") t) 'in-progress))
+         (maduin-dispatch--ready-async-fn
+          (lambda (callback) (funcall callback '("ready") t) 'ready))
+         (maduin-dispatch--open-epics-async-fn
+          (lambda (callback) (funcall callback nil t) 'epics)))
+    (cl-letf (((symbol-function 'maduin-dispatch-implement)
+               (lambda (_task) (maduin-dispatch--notify) t)))
+      (maduin-dispatch-run-loop)
+      (should (= count 1)))))
