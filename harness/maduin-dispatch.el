@@ -39,9 +39,9 @@
 
 ;;; Injection seams (function-valued defvars; tests let-bind these).
 
-(defun maduin-dispatch--backend-run (workdir model agent plan backend)
-  "Run BACKEND in WORKDIR with MODEL, AGENT, and PLAN."
-  (maduin-backend-run backend workdir model agent plan))
+(defun maduin-dispatch--backend-run (workdir model agent plan backend &optional effort)
+  "Run BACKEND in WORKDIR with MODEL, AGENT, PLAN, and optional EFFORT."
+  (maduin-backend-run backend workdir model agent plan effort))
 
 (defun maduin-dispatch--backend-diff (backend sid)
   "Return BACKEND's diff for opaque session SID."
@@ -52,7 +52,8 @@
   (maduin-backend-delete backend sid))
 
 (defvar maduin-dispatch--session-run-fn #'maduin-dispatch--backend-run
-  "Function `(workdir model agent plan backend)' → session handle | nil.")
+  "Function `(workdir model agent plan backend &optional effort)' →
+session handle or nil.")
 
 (defvar maduin-dispatch--session-delete-fn #'maduin-dispatch--backend-delete
   "Function `(backend sid)' → boolean.")
@@ -82,6 +83,9 @@ DIR is the seat worktree the close output should land in.")
 
 (defvar maduin-dispatch--show-fn #'maduin-bd-show
   "Function `(task)' → plist (:title :desc :status :deps) | nil.")
+
+(defvar maduin-dispatch--difficulty-fn #'maduin-bd-difficulty
+  "Function `(task)' → `low', `high', or nil.")
 
 (defvar maduin-dispatch--comment-fn #'maduin-bd-comment
   "Function `(id text)' → boolean.")
@@ -128,7 +132,8 @@ Reuses maduin-designer machinery (Ramuh decomposition session).")
 Entry shape (additive — older entries missing new keys are tolerated):
 
   (:handle SID :seat SEAT :role ROLE :task TASK
-   :model MODEL :backend BACKEND :fallback-attempted BOOL
+   :model MODEL :backend BACKEND :difficulty SYMBOL|nil :effort STRING|nil
+   :fallback-attempted BOOL
    :started FLOAT      ; `float-time' at push
    :status SYMBOL      ; working | running | repairing | failed
    :phase  STRING|nil) ; last session phase
@@ -184,12 +189,16 @@ The run-loop picks up no new work while draining.")
                                  seats))))
     (or (and entry (alist-get 'model entry)) "default")))
 
-(defun maduin-dispatch--seat-model-for (role seat &optional backend)
-  "Return ROLE/SEAT's model for BACKEND or its current effective backend.
+(defun maduin-dispatch--seat-model-for (role seat &optional backend difficulty)
+  "Return ROLE/SEAT's model for BACKEND and optional DIFFICULTY tier.
 An explicit BACKEND keeps retry entries sticky; ordinary launches resolve
 through `maduin-config-seat-backend', including the crew-wide override."
-  (maduin-config-seat-model
-   role seat (or backend (maduin-config-seat-backend role seat))))
+  (maduin-config-difficulty-model
+   role seat (or backend (maduin-config-seat-backend role seat)) difficulty))
+
+(defun maduin-dispatch--seat-effort-for (role seat backend difficulty)
+  "Return ROLE/SEAT's optional BACKEND thinking effort for DIFFICULTY."
+  (maduin-config-difficulty-effort role seat backend difficulty))
 
 (defun maduin-dispatch--seat-agent-for (role)
   "Return agent string for ROLE, or nil."
@@ -372,24 +381,38 @@ PLAN overrides the role's default plan string (designer owns its prompt)."
           nil)))))
 
 (defun maduin-dispatch--spawn-session (task role seat model plan fallback-attempted
-                                            &optional backend)
+                                            &optional backend difficulty effort)
   "Spawn one claimed TASK for ROLE at SEAT and register its BACKEND.
 MODEL and PLAN override configured values.  BACKEND is resolved once for a
-new launch, then retained for fallback and completion lifecycle calls."
+new launch, then retained for fallback and completion lifecycle calls.
+Implementers with no explicit MODEL resolve DIFFICULTY, model, and effort
+at spawn; retries pass the stored tier and effort explicitly."
   (let ((backend (or backend (maduin-backend-resolve role seat))))
     (condition-case nil
-        (let* ((model (or model (maduin-dispatch--seat-model-for role seat backend)))
+        (let* ((resolve-tier (and (null model) (eq role 'implementer)))
+               (difficulty (if resolve-tier
+                               (condition-case nil
+                                   (funcall maduin-dispatch--difficulty-fn task)
+                                 (error nil))
+                             difficulty))
+               (model (or model
+                          (maduin-dispatch--seat-model-for
+                           role seat backend difficulty)))
+               (effort (if resolve-tier
+                           (maduin-dispatch--seat-effort-for
+                            role seat backend difficulty)
+                         effort))
                (agent (maduin-dispatch--seat-agent-for role))
                (workdir (funcall maduin-dispatch--workdir-fn seat))
                (plan (or plan (maduin-dispatch--plan-for role task seat)))
                (sid (and backend
                          (funcall maduin-dispatch--session-run-fn
-                                  workdir model agent plan backend))))
+                                  workdir model agent plan backend effort))))
           (if sid
               (progn
                 (push (list :handle sid :seat seat :role role :task task
-                            :model model :backend backend
-                            :fallback-attempted fallback-attempted
+                            :model model :backend backend :difficulty difficulty
+                            :effort effort :fallback-attempted fallback-attempted
                             :started (float-time) :status 'working :phase nil)
                       maduin-dispatch--active)
                 (maduin-dispatch--notify)
@@ -472,7 +495,8 @@ by `:fallback-attempted'.  Every other failure releases the claim."
           (funcall maduin-dispatch--comment-fn
                    task "usage limit — retrying with fallback model")
           (maduin-dispatch--spawn-session
-           task role seat fallback nil t backend)
+           task role seat fallback nil t backend
+           (plist-get entry :difficulty) (plist-get entry :effort))
           (maduin-dispatch--notify))
       (funcall maduin-dispatch--comment-fn task "session failed — task left open")
       (funcall maduin-dispatch--release-fn task)

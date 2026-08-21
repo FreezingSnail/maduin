@@ -19,6 +19,7 @@
 (require 'maduin-bd-async)
 (require 'maduin-bd-bridge)
 (require 'maduin-config)
+(require 'maduin-stamp)
 (require 'maduin-state)
 (require 'maduin-workspace)
 
@@ -148,23 +149,41 @@ Prefer the directory containing maduin.el, else
 (defvar maduin-pipeline--git-output-fn #'maduin-pipeline--git-output
   "Function `(dir &rest args)' → (STATUS . OUTPUT).  Injection seam for tests.")
 
-(defun maduin-pipeline-land-branch (seat-name)
-  "Commit SEAT-NAME worktree changes, rebase its branch onto main, then
-fast-forward main to the rebased branch tip.
-Return t on success, \\='conflict when the rebase failed and output
-indicates a conflict, nil on other failures (missing worktree, commit
-failure, missing seat branch, non-conflict rebase failure, failed
-fast-forward; logged, never forced).  Rebasing onto the current main
-guarantees the branch contains all of main's latest, so the merge can
-only add — never revert.  Conflicts are detected at the rebase step
-(not the merge step).  Steps: add -A in worktree; commit staged changes
-(\"nothing to commit\" is not a failure); verify the seat branch exists
-(`git rev-parse --verify'); `git rebase main <branch>' from the main
-repo (aborting and returning \\='conflict on a conflict); then
-`git merge --ff-only <branch>' from the main repo."
+(defun maduin-pipeline--rebase-branch (main branch &optional exec-command)
+  "Rebase BRANCH onto MAIN, optionally running EXEC-COMMAND per commit.
+Return t on success, `conflict' after aborting a conflict, `retry' after
+aborting a non-conflict stamped failure, or nil after an unstamped failure."
+  (let* ((args (append (list "rebase" "main" branch)
+                       (and exec-command (list "--exec" exec-command))))
+         (res (apply maduin-pipeline--git-output-fn main args)))
+    (cond
+     ((= 0 (car res)) t)
+     ((string-match-p "conflict" (downcase (cdr res)))
+      (funcall maduin-pipeline--git-fn main "rebase" "--abort")
+      'conflict)
+     (exec-command
+      (funcall maduin-pipeline--git-fn main "rebase" "--abort")
+      (maduin-workspace--log-warning
+       (format "land-branch: stamped rebase of %s onto main failed (exit %d): %s; retrying unstamped"
+               branch (car res) (cdr res)))
+      'retry)
+     (t
+      (maduin-workspace--log-warning
+       (format "land-branch: rebase of %s onto main failed (exit %d): %s"
+               branch (car res) (cdr res)))
+      nil))))
+
+(defun maduin-pipeline-land-branch (seat-name &optional stamp)
+  "Commit SEAT-NAME worktree changes, rebase its branch onto main, then land it.
+STAMP is a provenance plist consumed by `maduin-stamp-trailers'.  A nil or
+unusable STAMP preserves the unstamped rebase argv exactly.  A stamped rebase
+failure aborts and retries once unstamped; conflicts return `conflict'."
   (let* ((wt (funcall maduin-pipeline--worktree-path-fn seat-name))
          (branch (funcall maduin-pipeline--branch-fn seat-name))
-         (main (funcall maduin-pipeline--main-root-fn)))
+         (main (funcall maduin-pipeline--main-root-fn))
+         (exec-command (and stamp
+                            (maduin-stamp-exec-command
+                             (maduin-stamp-trailers stamp)))))
     (if (not (file-directory-p wt))
         (progn
           (maduin-workspace--log-warning
@@ -181,8 +200,6 @@ repo (aborting and returning \\='conflict on a conflict); then
                (format "land-branch: commit failed (exit %d): %s"
                        (car res) (cdr res)))
               nil)
-          ;; Commit done (or nothing to commit).  Verify the seat branch
-          ;; exists before rebasing; log and bail when it doesn't.
           (let ((verify (funcall maduin-pipeline--git-output-fn
                                  main "rev-parse" "--verify" branch)))
             (if (/= 0 (car verify))
@@ -191,14 +208,12 @@ repo (aborting and returning \\='conflict on a conflict); then
                    (format "land-branch: seat branch %s not found (exit %d): %s"
                            branch (car verify) (cdr verify)))
                   nil)
-              ;; Rebase the branch onto current main so it contains all of
-              ;; main's latest; its merge can only add, never revert.
-              (let ((res (funcall maduin-pipeline--git-output-fn
-                                  main "rebase" "main" branch)))
+              (let ((rebase (maduin-pipeline--rebase-branch
+                             main branch exec-command)))
+                (when (eq rebase 'retry)
+                  (setq rebase (maduin-pipeline--rebase-branch main branch)))
                 (cond
-                 ((= 0 (car res))
-                  ;; Rebase clean (a branch already containing main is a
-                  ;; no-op rebase that still exits 0).  Fast-forward main.
+                 ((eq rebase t)
                   (let ((ff (funcall maduin-pipeline--git-output-fn
                                      main "merge" "--ff-only" branch)))
                     (if (= 0 (car ff))
@@ -207,17 +222,8 @@ repo (aborting and returning \\='conflict on a conflict); then
                        (format "land-branch: merge --ff-only %s failed (exit %d): %s"
                                branch (car ff) (cdr ff)))
                       nil)))
-                 ((string-match-p "conflict" (downcase (cdr res)))
-                  ;; Rebase conflict: abort so main is left clean and the
-                  ;; branch is back to its pre-rebase state.
-                  (funcall maduin-pipeline--git-fn main "rebase" "--abort")
-                  'conflict)
-                 (t
-                  (maduin-workspace--log-warning
-                   (format "land-branch: rebase of %s onto main failed (exit %d): %s"
-                           branch (car res) (cdr res)))
-                  nil))))))))))
-
+                 ((eq rebase 'conflict) 'conflict)
+                 (t nil))))))))))
 (defun maduin-pipeline-landed-p (seat-name)
   "Return non-nil when SEAT-NAME's branch tip is an ancestor of main.
 Uses `git merge-base --is-ancestor <branch> main` from the main repo."
