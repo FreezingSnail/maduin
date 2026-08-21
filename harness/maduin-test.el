@@ -2782,6 +2782,117 @@
     (should (= 1 (length (cl-remove-if-not
                           (lambda (args) (equal args '("rebase" "--abort"))) calls))))))
 
+(defun maduin-test--stamp-git (dir &rest args)
+  "Run git with ARGS in DIR and return (STATUS . OUTPUT)."
+  (with-temp-buffer
+    (cons (apply #'process-file "git" nil t nil "-C" dir args)
+          (buffer-string))))
+
+(defun maduin-test--stamp-git-ok (dir &rest args)
+  "Run git with ARGS in DIR, asserting success, then return its output."
+  (let ((result (apply #'maduin-test--stamp-git dir args)))
+    (should (zerop (car result)))
+    (cdr result)))
+
+(defun maduin-test--stamp-integration-setup (root)
+  "Create a main repo plus two committed changes in a registered seat worktree.
+Return a plist containing the seat path and main's initial commit."
+  (let ((seat (expand-file-name "seat" root))
+        (hooks (expand-file-name "hooks" root)))
+    (make-directory hooks)
+    (maduin-test--stamp-git-ok root "init" "-b" "main")
+    (maduin-test--stamp-git-ok root "config" "user.name" "Maduin Test")
+    (maduin-test--stamp-git-ok root "config" "user.email" "maduin@example.test")
+    (maduin-test--stamp-git-ok root "config" "commit.gpgsign" "false")
+    (maduin-test--stamp-git-ok root "config" "core.hooksPath" hooks)
+    (with-temp-file (expand-file-name "README" root) (insert "initial\n"))
+    (maduin-test--stamp-git-ok root "add" "README")
+    (maduin-test--stamp-git-ok root "commit" "-m" "initial subject")
+    (let ((initial (string-trim
+                    (maduin-test--stamp-git-ok root "rev-parse" "HEAD"))))
+      (maduin-test--stamp-git-ok root "worktree" "add" "-b" "stamp-seat" seat)
+      (with-temp-file (expand-file-name "one.txt" seat) (insert "one\n"))
+      (maduin-test--stamp-git-ok seat "add" "one.txt")
+      (maduin-test--stamp-git-ok seat "commit" "-m" "first stamped subject")
+      (with-temp-file (expand-file-name "two.txt" seat) (insert "two\n"))
+      (maduin-test--stamp-git-ok seat "add" "two.txt")
+      (maduin-test--stamp-git-ok seat "commit" "-m" "second stamped subject")
+      (list :seat seat :initial initial))))
+
+(defun maduin-test--stamp-integration-land (root seat stamp)
+  "Land registered SEAT into ROOT using STAMP through real git seams."
+  (let ((maduin-pipeline--worktree-path-fn (lambda (_seat) seat))
+        (maduin-pipeline--branch-fn (lambda (_seat) "stamp-seat"))
+        (maduin-pipeline--main-root-fn (lambda () root))
+        (maduin-pipeline--git-fn #'maduin-pipeline--git)
+        (maduin-pipeline--git-output-fn #'maduin-pipeline--git-output))
+    (maduin-pipeline-land-branch "stamp-seat" stamp)))
+
+(defun maduin-test--stamp-integration-commits (root initial)
+  "Return landed commits after INITIAL, oldest first."
+  (split-string
+   (string-trim
+    (maduin-test--stamp-git-ok root "rev-list" "--reverse" "main"
+                                (concat "^" initial)))
+   "\n" t))
+
+(ert-deftest maduin-test-stamp-integration-land-stamps-commits ()
+  :tags '(maduin)
+  (skip-unless (executable-find "git"))
+  (let ((root (make-temp-file "maduin-stamp" t)))
+    (unwind-protect
+        (let* ((repo (maduin-test--stamp-integration-setup root))
+               (seat (plist-get repo :seat))
+               (initial (plist-get repo :initial))
+               (stamp '(:model "gpt-5.6-terra" :effort "high")))
+          (should (eq (maduin-test--stamp-integration-land root seat stamp) t))
+          (let ((commits (maduin-test--stamp-integration-commits root initial)))
+            (should (equal (mapcar (lambda (commit)
+                                     (car (split-string
+                                           (maduin-test--stamp-git-ok
+                                            root "show" "-s" "--format=%B" commit)
+                                           "\n")))
+                                   commits)
+                           '("first stamped subject" "second stamped subject")))
+            (should (= (length commits) 2))
+            (dolist (commit commits)
+              (should (zerop (car (maduin-test--stamp-git
+                                    root "merge-base" "--is-ancestor" commit "main"))))
+              (let ((trailers (maduin-stamp-parse
+                               (maduin-test--stamp-git-ok
+                                root "show" "-s" "--format=%B" commit))))
+                (should (equal (cdr (assoc-string "Maduin-Model" trailers))
+                               "gpt-5.6-terra"))
+                (should (equal (cdr (assoc-string "Maduin-Effort" trailers))
+                               "high"))))))
+      (ignore-errors (delete-directory root t)))))
+
+(ert-deftest maduin-test-stamp-integration-reland-no-duplicate-trailers ()
+  :tags '(maduin)
+  (skip-unless (executable-find "git"))
+  (let ((root (make-temp-file "maduin-stamp" t)))
+    (unwind-protect
+        (let* ((repo (maduin-test--stamp-integration-setup root))
+               (seat (plist-get repo :seat))
+               (initial (plist-get repo :initial))
+               (stamp '(:model "gpt-5.6-terra" :effort "high")))
+          (should (eq (maduin-test--stamp-integration-land root seat stamp) t))
+          (let ((first-land (maduin-test--stamp-integration-commits root initial)))
+            (should (eq (maduin-test--stamp-integration-land root seat stamp) t))
+            (let ((reland (maduin-test--stamp-integration-commits root initial)))
+              (should (equal reland first-land))
+              (should (= (length reland) 2))
+              (dolist (commit reland)
+                (let ((trailers (maduin-stamp-parse
+                                 (maduin-test--stamp-git-ok
+                                  root "show" "-s" "--format=%B" commit))))
+                  (should (= (cl-count-if
+                              (lambda (trailer)
+                                (equal (car trailer) "Maduin-Model"))
+                              trailers)
+                             1)))))))
+      (ignore-errors (delete-directory root t)))))
+
 (ert-deftest maduin-test-config-workspaces-land-on-stop ()
   :tags '(maduin)
   (let ((ws (cdr (assq 'workspaces maduin-config))))

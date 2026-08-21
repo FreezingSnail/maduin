@@ -124,19 +124,56 @@ continues to come from the selected effective backend's model mapping.
 - **concierge** — `slugineer-planner-concierge`
 - **designer** — `slugineer-planner-designer`
 - **fleet** — `slugineer-worker` (flash model; `poll-interval`,
-  `max-concurrent`, `fallback` for the paid flash bucket)
+  `max-concurrent`, `fallback` for the paid flash bucket). Difficulty routing
+  adds these tier keys:
+
+  | Key | Default | Value |
+  |---|---|---|
+  | `kiro-model-low` | `gpt-5.6-luna` | Kiro model ID for `difficulty:low` |
+  | `kiro-model-high` | `gpt-5.6-terra` | Kiro model ID for `difficulty:high` |
+  | `kiro-effort-low` | `medium` | Kiro `--effort` value for low |
+  | `kiro-effort-high` | `high` | Kiro `--effort` value for high |
+  | `effort-low` | unset (`nil`) | OpenCode `--variant` value for low |
+  | `effort-high` | unset (`nil`) | OpenCode `--variant` value for high |
+
+  Kiro accepts `low`, `medium`, `high`, `xhigh`, or `max` for `--effort`.
+  OpenCode accepts `minimal`, `low`, `medium`, `high`, or `max` for
+  `--variant`; both OpenCode values ship unset, preserving the known-good
+  flash command line. For Kiro, model precedence is seat tier key > role tier
+  key > `kiro-model`. Untagged or unrecognized tiers use the role default.
+  A tier never changes the OpenCode model.
 - **reviewer** — `slugineer-reviewer` (`max-retries`, `esper`)
 - **repairer** — `slugineer-repairer` (`max-retries`, `esper`)
 
 Other sections: `welfare` (handoff timeout, blamelessness),
 `workspaces` (path, `land-on-stop`), `harness` (name, version).
 
+### Difficulty tiers and provenance
+
+Ramuh labels every child bead exactly once as `difficulty:low` or
+`difficulty:high`; the harness, not the bead, maps that tier to its model and
+reasoning effort.
+
+Every landed commit carries these trailers: `Maduin-Model`, `Maduin-Backend`,
+`Maduin-Difficulty`, `Maduin-Effort`, `Maduin-Agent`, `Maduin-Seat`,
+`Maduin-Task`, `Maduin-Harness`, and `Maduin-Harness-Rev`. Query provenance
+with:
+
+```bash
+git log --grep '^Maduin-Model: gpt-5.6-terra'
+git log --format='%h %(trailers:key=Maduin-Model,valueonly)'
+```
+
+Trailers are stamped during land's existing rebase instead of by hooks because
+`core.hooksPath` is shared across worktrees and may already belong to another
+tool.
+
 ## Testing
 
 Single entry point:
 
 ```bash
-harness/check.sh                     # clean + byte-compile + ERT (291 tests)
+harness/check.sh                     # clean + byte-compile + ERT (354 tests)
 harness/check.sh -c                  # compile only
 harness/check.sh -k                  # skip clean
 harness/check.sh probe probes/<f>.el # + exploratory probe test
@@ -189,6 +226,8 @@ harness/
   `bd ready` re-surfaces orphaned work.
 - **Review UI lives in chaplet.** maduin has no approval gate. Use
   chaplet to approve (undefer) and reject staged work.
+- **Provenance is stamped, not self-reported.** Land records the
+  resolved model and effort in commit trailers.
 
 ## Inspiration
 

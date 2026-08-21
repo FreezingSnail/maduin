@@ -149,20 +149,24 @@ Prefer the directory containing maduin.el, else
 (defvar maduin-pipeline--git-output-fn #'maduin-pipeline--git-output
   "Function `(dir &rest args)' → (STATUS . OUTPUT).  Injection seam for tests.")
 
-(defun maduin-pipeline--rebase-branch (main branch &optional exec-command)
-  "Rebase BRANCH onto MAIN, optionally running EXEC-COMMAND per commit.
+(defun maduin-pipeline--rebase-branch (worktree branch &optional exec-command)
+  "Rebase checked-out BRANCH in WORKTREE onto main, running EXEC-COMMAND
+per commit.
 Return t on success, `conflict' after aborting a conflict, `retry' after
-aborting a non-conflict stamped failure, or nil after an unstamped failure."
+aborting a non-conflict stamped failure, or nil after an unstamped failure.
+
+The rebase must run from WORKTREE: rebasing BRANCH from main would try to
+update a branch registered to the seat worktree.  Git rejects that topology."
   (let* ((args (append (list "rebase" "main" branch)
                        (and exec-command (list "--exec" exec-command))))
-         (res (apply maduin-pipeline--git-output-fn main args)))
+         (res (apply maduin-pipeline--git-output-fn worktree args)))
     (cond
      ((= 0 (car res)) t)
      ((string-match-p "conflict" (downcase (cdr res)))
-      (funcall maduin-pipeline--git-fn main "rebase" "--abort")
+      (funcall maduin-pipeline--git-fn worktree "rebase" "--abort")
       'conflict)
      (exec-command
-      (funcall maduin-pipeline--git-fn main "rebase" "--abort")
+      (funcall maduin-pipeline--git-fn worktree "rebase" "--abort")
       (maduin-workspace--log-warning
        (format "land-branch: stamped rebase of %s onto main failed (exit %d): %s; retrying unstamped"
                branch (car res) (cdr res)))
@@ -209,9 +213,9 @@ failure aborts and retries once unstamped; conflicts return `conflict'."
                            branch (car verify) (cdr verify)))
                   nil)
               (let ((rebase (maduin-pipeline--rebase-branch
-                             main branch exec-command)))
+                             wt branch exec-command)))
                 (when (eq rebase 'retry)
-                  (setq rebase (maduin-pipeline--rebase-branch main branch)))
+                  (setq rebase (maduin-pipeline--rebase-branch wt branch)))
                 (cond
                  ((eq rebase t)
                   (let ((ff (funcall maduin-pipeline--git-output-fn
