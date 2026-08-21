@@ -2111,7 +2111,7 @@
          (maduin-dispatch--active
           (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1")))
          (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
-         (maduin-dispatch--land-fn (lambda (_seat) t))
+         (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) t))
          (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
          (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
@@ -2959,7 +2959,7 @@
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn
           (lambda (_backend _sid) (list '((file . "a.el") (patch . "+x")))))
-         (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
+         (maduin-dispatch--land-fn (lambda (seat &optional _stamp) (setq landed seat) t))
          (maduin-dispatch--landed-fn (lambda (_seat) t))
          (maduin-dispatch--close-fn (lambda (task out &optional _dir) (setq closed (cons task out)) t))
          (maduin-dispatch--session-delete-fn (lambda (_backend sid) (push sid deleted) t)))
@@ -3015,7 +3015,7 @@
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn
           (lambda (_backend _sid) (list '((file . "a.el") (patch . "+x")))))
-         (maduin-dispatch--land-fn (lambda (_seat) t))
+         (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) t))
          (maduin-dispatch--landed-fn (lambda (_seat) nil))
          (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
@@ -3087,7 +3087,7 @@
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
-         (maduin-dispatch--land-fn (lambda (_seat) 'conflict))
+         (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) 'conflict))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
          (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
          (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
@@ -3116,7 +3116,7 @@
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
-         (maduin-dispatch--land-fn (lambda (_seat) nil))
+         (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) nil))
          (maduin-dispatch--comment-fn (lambda (_task _text) t))
          (maduin-dispatch--close-fn (lambda (task _o &optional _dir) (setq closed task) t))
          (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
@@ -3211,7 +3211,7 @@
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
-         (maduin-dispatch--land-fn (lambda (_seat) t))
+         (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) t))
          (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
          (maduin-dispatch--session-delete-fn (lambda (_backend sid) (push sid deleted) t)))
     (unwind-protect
@@ -3327,7 +3327,7 @@
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
-         (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
+         (maduin-dispatch--land-fn (lambda (seat &optional _stamp) (setq landed seat) t))
          (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
          (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
@@ -3609,7 +3609,7 @@
              (maduin-dispatch--workdir-fn (lambda (_s) dir))
              (maduin-dispatch--diff-fn
               (lambda (_backend _sid) (list '((file . "x.el") (patch . "+1")))))
-             (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
+             (maduin-dispatch--land-fn (lambda (seat &optional _stamp) (setq landed seat) t))
              (maduin-dispatch--landed-fn (lambda (_seat) t))
              (maduin-dispatch--close-fn (lambda (t2 _out &optional _dir) (setq closed t2) t))
              (maduin-dispatch--session-delete-fn (lambda (_backend sid) (push sid deleted) t)))
@@ -4145,7 +4145,7 @@
           (lambda (backend sid) (push (list :diff backend sid) calls) nil))
          (maduin-dispatch--session-delete-fn
           (lambda (backend sid) (push (list :delete backend sid) calls) t))
-         (maduin-dispatch--land-fn (lambda (_seat) t))
+         (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) t))
          (maduin-dispatch--landed-fn (lambda (_seat) t))
          (maduin-dispatch--close-fn (lambda (&rest _args) t)))
     (unwind-protect
@@ -4527,6 +4527,99 @@
   (should-not (maduin-stamp-parse nil))
   (should-not (maduin-stamp-parse ""))
   (should-not (maduin-stamp-parse 42)))
+
+(ert-deftest maduin-test-dispatch-stamp-for-fields ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config))
+        (maduin-pipeline--main-root-fn (lambda () "/repo"))
+        (maduin-pipeline--git-output-fn
+         (lambda (_root &rest _args) '(0 . "5facf72\n"))))
+    (let ((stamp (maduin-dispatch--stamp-for
+                  '(:role implementer :model "gpt-5.6-luna" :backend kiro
+                    :difficulty low :effort "medium" :seat "ifrit"
+                    :task "maduin-2nv.12"))))
+      (should (equal stamp
+                     '(:model "gpt-5.6-luna" :backend kiro :difficulty low
+                       :effort "medium" :agent "slugineer-worker"
+                       :seat "ifrit" :task "maduin-2nv.12"
+                       :harness "maduin 0.3.0" :rev "5facf72"))))))
+
+(ert-deftest maduin-test-dispatch-stamp-for-tolerates-missing ()
+  :tags '(maduin)
+  (let ((maduin-pipeline--main-root-fn (lambda () "/repo"))
+        (maduin-pipeline--git-output-fn
+         (lambda (&rest _args) (error "git unavailable"))))
+    (let ((stamp (maduin-dispatch--stamp-for
+                  '(:role implementer :model "model" :backend kiro
+                    :seat "ifrit" :task "task-1"))))
+      (should (equal (plist-get stamp :difficulty) nil))
+      (should (equal (plist-get stamp :effort) nil))
+      (should (equal (plist-get stamp :rev) nil)))))
+
+(ert-deftest maduin-test-dispatch-complete-passes-stamp-to-land ()
+  :tags '(maduin)
+  (let* ((land-call nil)
+        (maduin-pipeline--main-root-fn (lambda () "/repo"))
+        (maduin-pipeline--git-output-fn
+         (lambda (_root &rest _args) '(0 . "5facf72\n")))
+        (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
+        (maduin-dispatch--land-fn
+         (lambda (seat &optional stamp) (setq land-call (list seat stamp)) t))
+        (maduin-dispatch--landed-fn (lambda (_seat) t))
+        (maduin-dispatch--close-fn (lambda (&rest _args) t))
+        (maduin-dispatch--workdir-fn (lambda (_seat) "/work")))
+    (maduin-dispatch--complete
+     '(:role implementer :model "gpt-5.6-luna" :backend kiro
+       :difficulty low :effort "medium" :seat "ifrit" :task "task-1")
+     "session-1")
+    (should (equal (car land-call) "ifrit"))
+    (let ((stamp (cadr land-call)))
+      (should (equal (plist-get stamp :model) "gpt-5.6-luna"))
+      (should (eq (plist-get stamp :backend) 'kiro))
+      (should (eq (plist-get stamp :difficulty) 'low))
+      (should (equal (plist-get stamp :effort) "medium")))))
+
+(ert-deftest maduin-test-dispatch-complete-close-output-has-provenance ()
+  :tags '(maduin)
+  (let* ((close-output nil)
+        (maduin-pipeline--main-root-fn (lambda () "/repo"))
+        (maduin-pipeline--git-output-fn
+         (lambda (_root &rest _args) '(0 . "5facf72\n")))
+        (maduin-dispatch--diff-fn (lambda (_backend _sid) "unchanged diff"))
+        (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) t))
+        (maduin-dispatch--landed-fn (lambda (_seat) t))
+        (maduin-dispatch--close-fn
+         (lambda (_task output &optional _dir) (setq close-output output) t))
+        (maduin-dispatch--workdir-fn (lambda (_seat) "/work")))
+    (maduin-dispatch--complete
+     '(:role implementer :model "gpt-5.6-luna" :backend kiro
+       :difficulty low :effort "medium" :seat "ifrit" :task "task-1")
+     "session-1")
+    (should (equal close-output
+                   "unchanged diff\nprovenance: gpt-5.6-luna/kiro/low/medium @ maduin 0.3.0 (5facf72)"))))
+
+(ert-deftest maduin-test-dispatch-complete-conflict-unchanged ()
+  :tags '(maduin)
+  (let* ((comment nil)
+        (repair nil)
+        (closed nil)
+        (maduin-pipeline--main-root-fn (lambda () "/repo"))
+        (maduin-pipeline--git-output-fn
+         (lambda (_root &rest _args) '(0 . "5facf72\n")))
+        (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
+        (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) 'conflict))
+        (maduin-dispatch--comment-fn
+         (lambda (task text) (setq comment (cons task text)) t))
+        (maduin-dispatch--close-fn (lambda (&rest _args) (setq closed t))))
+    (cl-letf (((symbol-function 'maduin-dispatch-repair)
+               (lambda (seat task) (setq repair (list seat task)) "repair-1")))
+      (maduin-dispatch--complete
+       '(:role implementer :model "gpt-5.6-luna" :backend kiro
+         :difficulty low :effort "medium" :seat "ifrit" :task "task-1")
+       "session-1"))
+    (should (equal comment '("task-1" . "merge conflict — repairer dispatched")))
+    (should (equal repair '("ifrit" "task-1")))
+    (should-not closed)))
 
 (provide 'maduin-test)
 

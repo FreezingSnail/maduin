@@ -62,7 +62,8 @@ session handle or nil.")
   "Function `(backend sid)' → list of diff alists | nil.")
 
 (defvar maduin-dispatch--land-fn #'maduin-pipeline-land-branch
-  "Function `(seat)' → t | `conflict' | nil.")
+  "Function `(seat &optional stamp)' → t | `conflict' | nil.
+Mocks must accept the optional provenance STAMP argument.")
 
 (defvar maduin-dispatch--landed-fn #'maduin-pipeline-landed-p
   "Function `(seat)' → non-nil when the seat's branch tip is an ancestor
@@ -430,6 +431,37 @@ at spawn; retries pass the stored tier and effort explicitly."
 
 ;;; Completion → land → close
 
+(defun maduin-dispatch--stamp-for (entry)
+  "Return provenance stamp plist for completed dispatch ENTRY.
+The attempt's stored model, backend, difficulty, effort, seat, and task are
+preserved.  Missing metadata and git lookup failures become nil; this helper
+never signals."
+  (condition-case nil
+      (let* ((role (plist-get entry :role))
+             (name (maduin-dispatch--config-get 'harness 'name))
+             (version (maduin-dispatch--config-get 'harness 'version))
+             (rev-result
+              (condition-case nil
+                  (funcall maduin-pipeline--git-output-fn
+                           (funcall maduin-pipeline--main-root-fn)
+                           "rev-parse" "--short" "HEAD")
+                (error nil)))
+             (rev (and (consp rev-result)
+                       (zerop (car rev-result))
+                       (stringp (cdr rev-result))
+                       (let ((value (string-trim (cdr rev-result))))
+                         (unless (string-empty-p value) value)))))
+        (list :model (plist-get entry :model)
+              :backend (plist-get entry :backend)
+              :difficulty (plist-get entry :difficulty)
+              :effort (plist-get entry :effort)
+              :agent (maduin-dispatch--seat-agent-for role)
+              :seat (plist-get entry :seat)
+              :task (plist-get entry :task)
+              :harness (and name version (format "%s %s" name version))
+              :rev rev))
+    (error nil)))
+
 (defun maduin-dispatch--format-diffs (diffs)
   "Format adapter DIFFS into a close-output string.
 OpenCode returns diff alists; Kiro returns a worktree diff string."
@@ -453,17 +485,23 @@ close: the epic stays open until its children are implemented."
          (task (plist-get entry :task))
          (role (plist-get entry :role))
          (backend (plist-get entry :backend))
+         (stamp (maduin-dispatch--stamp-for entry))
          (diffs (funcall maduin-dispatch--diff-fn backend sid))
          (output (maduin-dispatch--format-diffs diffs))
          (land (condition-case nil
-                   (funcall maduin-dispatch--land-fn seat)
+                   (funcall maduin-dispatch--land-fn seat stamp)
                  (error nil))))
     (cond
      ((eq land t)
       (unless (eq role 'designer)
         (if (funcall maduin-dispatch--landed-fn seat)
             (funcall maduin-dispatch--close-fn
-                     task output (funcall maduin-dispatch--workdir-fn seat))
+                     task
+                     (concat output
+                             (unless (string-suffix-p "\n" output) "\n")
+                             "provenance: "
+                             (maduin-stamp-format (maduin-stamp-trailers stamp)))
+                     (funcall maduin-dispatch--workdir-fn seat))
           (funcall maduin-dispatch--comment-fn task
                    "land reported success but branch not in main — left open")
           (funcall maduin-dispatch--release-fn task))))
