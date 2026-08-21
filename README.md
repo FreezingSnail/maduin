@@ -136,7 +136,7 @@ Other sections: `welfare` (handoff timeout, blamelessness),
 Single entry point:
 
 ```bash
-harness/check.sh                     # clean + byte-compile + ERT (173 tests)
+harness/check.sh                     # clean + byte-compile + ERT (291 tests)
 harness/check.sh -c                  # compile only
 harness/check.sh -k                  # skip clean
 harness/check.sh probe probes/<f>.el # + exploratory probe test
@@ -155,7 +155,7 @@ when they prove a real invariant.
 
 ```
 harness/
-├── maduin*.el        # 16 modules (config, session, agent, pipeline, …)
+├── maduin*.el        # 20 implementation modules (config, session, async bd, state, …)
 ├── maduin-test.el    # ERT test suite (permanent gate)
 ├── check.sh          # compile + test loop
 ├── install.sh        # Emacs wiring + agent symlinks
