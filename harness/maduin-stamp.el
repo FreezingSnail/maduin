@@ -62,6 +62,53 @@ Malformed input returns nil without signaling."
              (and entry (maduin-stamp--sanitize (cdr entry)))))
     (error nil)))
 
+(defun maduin-stamp-exec-command (trailers)
+  "Return git amend command that adds TRAILERS, or nil when none are usable.
+Each non-empty string (KEY . VALUE) pair becomes one shell-quoted
+`--trailer' argument.  TRAILERS are already sanitized by
+`maduin-stamp-trailers'; this function deliberately does not sanitize again."
+  (condition-case nil
+      (let ((arguments
+             (delq nil
+                   (mapcar
+                    (lambda (trailer)
+                      (let ((key (car-safe trailer))
+                            (value (cdr-safe trailer)))
+                        (when (and (stringp key) (not (string-empty-p key))
+                                   (stringp value) (not (string-empty-p value)))
+                          (concat "--trailer "
+                                  (shell-quote-argument
+                                   (concat key "=" value))))))
+                    trailers))))
+        (when arguments
+          (mapconcat #'identity
+                     (append '("git" "-c" "trailer.ifexists=replaceIfDifferent"
+                               "commit" "--amend" "--no-edit")
+                             arguments)
+                     " ")))
+    (error nil)))
+
+(defun maduin-stamp-parse (message)
+  "Return recognized maduin trailers found in MESSAGE in file order.
+Only keys named by `maduin-stamp--keys' are returned.  Values are trimmed,
+and nil or malformed MESSAGE returns nil without signaling."
+  (condition-case nil
+      (when (and (stringp message) (not (string-empty-p message)))
+        (let ((keys maduin-stamp--keys)
+              known-keys
+              trailers)
+          (while keys
+            (pop keys)
+            (push (pop keys) known-keys))
+          (dolist (line (split-string message (string 10)))
+            (when (string-match "^\\(Maduin-[A-Za-z-]+\\): \\(.*\\)$" line)
+              (let ((key (match-string 1 line))
+                    (value (string-trim (match-string 2 line))))
+                (when (member key known-keys)
+                  (push (cons key value) trailers)))))
+          (nreverse trailers)))
+    (error nil)))
+
 (defun maduin-stamp-format (trailers)
   "Render TRAILERS as a concise one-line human provenance summary.
 Model, backend, difficulty, and effort are slash-separated.  Harness and

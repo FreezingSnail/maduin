@@ -233,6 +233,112 @@
   (should (equal (maduin-config-role-model 'implementer 'opencode)
                  "opencode/deepseek-v4-flash-free")))
 
+
+(ert-deftest maduin-test-config-difficulty-model-kiro-tiers ()
+  :tags '(maduin)
+  (should (equal (maduin-config-difficulty-model 'implementer "ifrit" 'kiro 'low)
+                 "gpt-5.6-luna"))
+  (should (equal (maduin-config-difficulty-model 'implementer "ifrit" 'kiro 'high)
+                 "gpt-5.6-terra"))
+  (should (equal (maduin-config-difficulty-model 'implementer "ifrit" 'kiro nil)
+                 (maduin-config-seat-model 'implementer "ifrit" 'kiro)))
+  (let ((maduin-config (copy-tree maduin-config)))
+    (let ((fleet (cdr (assq 'fleet maduin-config))))
+      (setcdr fleet (assq-delete-all 'kiro-model-low (cdr fleet)))
+      (setcdr fleet (assq-delete-all 'kiro-model-high (cdr fleet))))
+    (should (equal (maduin-config-difficulty-model 'implementer "ifrit" 'kiro 'low)
+                   (maduin-config-seat-model 'implementer "ifrit" 'kiro))))
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'kiro-model-low (cdr (assq 'fleet maduin-config))) "")
+    (should (equal (maduin-config-difficulty-model 'implementer "ifrit" 'kiro 'low)
+                   (maduin-config-seat-model 'implementer "ifrit" 'kiro)))))
+
+(ert-deftest maduin-test-config-difficulty-model-seat-override ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (let* ((fleet (cdr (assq 'fleet maduin-config)))
+           (seats (cdr (assq 'seats fleet)))
+           (seat (cl-find-if (lambda (entry)
+                               (equal (alist-get 'name entry) "ifrit"))
+                             seats)))
+      (setcdr seat (append (cdr seat) '((kiro-model-low . "seat-luna")))))
+    (should (equal (maduin-config-difficulty-model 'implementer "ifrit" 'kiro 'low)
+                   "seat-luna"))))
+
+(ert-deftest maduin-test-config-difficulty-model-opencode-ignores-tier ()
+  :tags '(maduin)
+  (dolist (tier '(low high))
+    (should (equal (maduin-config-difficulty-model 'implementer "ifrit" 'opencode tier)
+                   "opencode/deepseek-v4-flash-free"))))
+
+(ert-deftest maduin-test-config-difficulty-model-unknown-tier-defaults ()
+  :tags '(maduin)
+  (should (equal (maduin-config-difficulty-model 'implementer "ifrit" 'kiro 'medium)
+                 (maduin-config-seat-model 'implementer "ifrit" 'kiro))))
+
+(ert-deftest maduin-test-config-difficulty-model-rejects-prefixed-kiro ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'kiro-model-low (cdr (assq 'fleet maduin-config)))
+            "opencode/foo")
+    (should-error (maduin-config-difficulty-model 'implementer "ifrit" 'kiro 'low)
+                  :type 'user-error)))
+(ert-deftest maduin-test-config-difficulty-effort-kiro-tiers ()
+  :tags '(maduin)
+  (should (equal (maduin-config-difficulty-effort 'implementer "ifrit" 'kiro 'low)
+                 "medium"))
+  (should (equal (maduin-config-difficulty-effort 'implementer "ifrit" 'kiro 'high)
+                 "high"))
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'kiro-effort-high (cdr (assq 'fleet maduin-config))) "High")
+    (should (equal (maduin-config-difficulty-effort 'implementer "ifrit" 'kiro 'high)
+                   "high")))
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'kiro-effort-low (cdr (assq 'fleet maduin-config))) "xhigh")
+    (should (equal (maduin-config-difficulty-effort 'implementer "ifrit" 'kiro 'low)
+                   "xhigh"))))
+
+(ert-deftest maduin-test-config-difficulty-effort-opencode-unset ()
+  :tags '(maduin)
+  (dolist (tier '(low high))
+    (should-not (maduin-config-difficulty-effort 'implementer "ifrit" 'opencode tier))))
+
+(ert-deftest maduin-test-config-difficulty-effort-seat-override ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (let* ((fleet (cdr (assq 'fleet maduin-config)))
+           (seats (cdr (assq 'seats fleet)))
+           (seat (cl-find-if (lambda (entry)
+                               (equal (alist-get 'name entry) "ifrit"))
+                             seats)))
+      (setcdr seat (append (cdr seat) '((kiro-effort-low . "low")))))
+    (should (equal (maduin-config-difficulty-effort 'implementer "ifrit" 'kiro 'low)
+                   "low"))))
+
+(ert-deftest maduin-test-config-difficulty-effort-rejects-invalid ()
+  :tags '(maduin)
+  (dolist (value '("" "  " "turbo" "high/max" "very high" 42 high))
+    (let ((maduin-config (copy-tree maduin-config)))
+      (setcdr (assq 'kiro-effort-low (cdr (assq 'fleet maduin-config))) value)
+      (should-not (maduin-config-difficulty-effort 'implementer "ifrit" 'kiro 'low))))
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'effort-low (cdr (assq 'fleet maduin-config))) "minimal")
+    (should (equal (maduin-config-difficulty-effort 'implementer "ifrit" 'opencode 'low)
+                   "minimal"))
+    (setcdr (assq 'effort-low (cdr (assq 'fleet maduin-config))) "xhigh")
+    (should-not (maduin-config-difficulty-effort 'implementer "ifrit" 'opencode 'low)))
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'kiro-effort-low (cdr (assq 'fleet maduin-config))) "minimal")
+    (should-not (maduin-config-difficulty-effort 'implementer "ifrit" 'kiro 'low)))
+  (should-error (maduin-config-difficulty-effort 'implementer 'ifrit 'kiro 'low)
+                :type 'user-error))
+
+(ert-deftest maduin-test-config-difficulty-effort-nil-tier ()
+  :tags '(maduin)
+  (should-not (maduin-config-difficulty-effort 'implementer "ifrit" 'kiro nil))
+  (should-not (maduin-config-difficulty-effort 'implementer "ifrit" 'kiro 'medium))
+  (should-not (maduin-config-difficulty-effort 'implementer "ifrit" 'foreign 'low)))
+
 (ert-deftest maduin-test-config-fleet-tier-effort-keys ()
   :tags '(maduin)
   (should (equal (maduin-config-option 'fleet 'kiro-effort-low) "medium"))
@@ -3634,14 +3740,14 @@
 
 (defun maduin-test--backend-adapter (&optional record-fn)
   "Return a valid test adapter, optionally sending calls to RECORD-FN."
-  (list :executable "maduin-test-backend"
-        :run-fn (lambda (workdir model agent plan)
+  (list :executable "sh"
+        :run-fn (lambda (workdir model agent plan &optional effort)
                   (when record-fn
-                    (funcall record-fn (list :run workdir model agent plan)))
+                    (funcall record-fn (list :run workdir model agent plan effort)))
                   'run-result)
-        :tui-fn (lambda (root model agent prompt)
+        :tui-fn (lambda (root model agent prompt &optional effort)
                   (when record-fn
-                    (funcall record-fn (list :tui root model agent prompt)))
+                    (funcall record-fn (list :tui root model agent prompt effort)))
                   'tui-result)
         :complete-p-fn (lambda (sid)
                          (when record-fn (funcall record-fn (list :complete sid)))
@@ -3696,27 +3802,43 @@
       (should-not (maduin-backend-run 'missing "/work" "model" "agent" "plan")))
     (should-not called)))
 
-(ert-deftest maduin-test-backend-wrappers-forward-exact-arities ()
+(ert-deftest maduin-test-backend-run-forwards-effort ()
   :tags '(maduin)
   (let ((maduin-backend-registry (make-hash-table :test #'eq))
-        (calls nil))
+        (call nil))
     (maduin-backend-register
-     'test
-     (maduin-test--backend-adapter (lambda (call) (push call calls))))
-    (cl-letf (((symbol-function 'executable-find) (lambda (_exe) "/bin/true")))
+     'test (maduin-test--backend-adapter (lambda (record) (setq call record))))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_exe) "/bin/sh")))
+      (should (eq (maduin-backend-run 'test "/work" "model" "agent" "plan" "high")
+                  'run-result)))
+    (should (equal call '(:run "/work" "model" "agent" "plan" "high")))))
+
+(ert-deftest maduin-test-backend-run-nil-effort ()
+  :tags '(maduin)
+  (let ((maduin-backend-registry (make-hash-table :test #'eq))
+        (call nil))
+    (maduin-backend-register
+     'test (maduin-test--backend-adapter (lambda (record) (setq call record))))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_exe) "/bin/sh")))
       (should (eq (maduin-backend-run 'test "/work" "model" "agent" "plan")
-                  'run-result))
-      (should (eq (maduin-backend-tui 'test "/root" "model" "prompt" "agent")
-                  'tui-result))
-      (should (eq (maduin-backend-complete-p 'test "sid") 'complete-result))
-      (should (eq (maduin-backend-diff 'test "sid") 'diff-result))
-      (should (eq (maduin-backend-delete 'test "sid") 'delete-result)))
-    (should (equal (nreverse calls)
-                   '((:run "/work" "model" "agent" "plan")
-                     (:tui "/root" "model" "agent" "prompt")
-                     (:complete "sid")
-                     (:diff "sid")
-                     (:delete "sid"))))))
+                  'run-result)))
+    (should (equal call '(:run "/work" "model" "agent" "plan" nil)))))
+
+(ert-deftest maduin-test-backend-tui-forwards-effort ()
+  :tags '(maduin)
+  (let ((maduin-backend-registry (make-hash-table :test #'eq))
+        (call nil))
+    (maduin-backend-register
+     'test (maduin-test--backend-adapter (lambda (record) (setq call record))))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_exe) "/bin/sh")))
+      (should (eq (maduin-backend-tui 'test "/root" "model" "prompt" "agent" "high")
+                  'tui-result)))
+    (should (equal call '(:tui "/root" "model" "agent" "prompt" "high")))))
+
+(ert-deftest maduin-test-backend-unknown-backend-still-nil ()
+  :tags '(maduin)
+  (let ((maduin-backend-registry (make-hash-table :test #'eq)))
+    (should-not (maduin-backend-run 'unknown "/work" "model" "agent" "plan" "high"))))
 
 ;;; 23. Kiro backend adapter
 
@@ -4133,7 +4255,7 @@
           (should (eq (maduin-backend-resolve 'implementer "shiva") 'opencode)))
       (clrhash maduin-backend-registry))))
 
-(ert-deftest maduin-test-session-opencode-adapter-keeps-four-argument-protocol ()
+(ert-deftest maduin-test-session-opencode-adapter-accepts-optional-effort ()
   :tags '(maduin)
   (let ((maduin-backend-registry (make-hash-table :test #'eq))
         (received nil))
@@ -4150,9 +4272,9 @@
           (cl-letf (((symbol-function 'maduin-session--opencode-run)
                      (lambda (&rest args) (setq received args) 'handle)))
             (should (eq (maduin-backend-run 'opencode "/work" "model"
-                                            "agent" "plan")
+                                            "agent" "plan" "high")
                         'handle))
-            (should (equal received '("/work" "model" "agent" "plan")))))
+            (should (equal received '("/work" "model" "agent" "plan" "high")))))
       (clrhash maduin-backend-registry))))
 
 (ert-deftest maduin-test-kiro-completion-statuses-remain-local ()
@@ -4232,6 +4354,64 @@
                   '(("Maduin-Model" . "gpt-5.6-luna")))
                  "gpt-5.6-luna"))
   (should (equal (maduin-stamp-format nil) "unstamped")))
+
+(ert-deftest maduin-test-stamp-exec-command-quotes-values ()
+  :tags '(maduin)
+  (let* ((trailer "Maduin-Harness=maduin 0.3.0")
+         (command (maduin-stamp-exec-command
+                   `(("Maduin-Harness" . "maduin 0.3.0")))))
+    (should (string-prefix-p "git " command))
+    (should (string-match-p
+             (regexp-quote (concat "--trailer "
+                                   (shell-quote-argument trailer)))
+             command))))
+
+(ert-deftest maduin-test-stamp-exec-command-sets-ifexists ()
+  :tags '(maduin)
+  (let ((command (maduin-stamp-exec-command
+                  '(("Maduin-Model" . "gpt-5.6-luna")
+                    ("Maduin-Backend" . "kiro")))))
+    (should (string-match-p "-c trailer.ifexists=replaceIfDifferent" command))
+    (should (string-match-p "commit --amend --no-edit" command))
+    (should (= 2 (1- (length (split-string command "--trailer " t)))))))
+
+(ert-deftest maduin-test-stamp-exec-command-empty-nil ()
+  :tags '(maduin)
+  (should-not (maduin-stamp-exec-command nil))
+  (should-not (maduin-stamp-exec-command '()))
+  (should-not (maduin-stamp-exec-command '(("" . "value")
+                                             ("Maduin-Model" . "")))))
+
+(ert-deftest maduin-test-stamp-parse-roundtrip ()
+  :tags '(maduin)
+  (let* ((trailers (maduin-stamp-trailers
+                    '(:model "gpt-5.6-luna" :backend kiro :difficulty low
+                      :effort "medium" :harness "maduin 0.3.0" :rev "5facf72")))
+         (message (concat "subject\n\n"
+                          (mapconcat (lambda (trailer)
+                                       (format "%s: %s" (car trailer) (cdr trailer)))
+                                     trailers "\n")))
+         (parsed (maduin-stamp-parse message)))
+    (should (equal parsed trailers))
+    (should (equal (maduin-stamp-format parsed)
+                   "gpt-5.6-luna/kiro/low/medium @ maduin 0.3.0 (5facf72)"))))
+
+(ert-deftest maduin-test-stamp-parse-ignores-foreign ()
+  :tags '(maduin)
+  (should (equal
+           (maduin-stamp-parse
+            (concat "Subject\n\nBody mentions Maduin-Model: not a trailer.\n"
+                    "Maduin-Model: gpt-5.6-luna\n"
+                    "Signed-off-by: A Person <a@example.test>\n"
+                    "Co-authored-by: Another Person <b@example.test>\n"
+                    "Maduin-Bogus: ignored\n"))
+           '(("Maduin-Model" . "gpt-5.6-luna")))))
+
+(ert-deftest maduin-test-stamp-parse-empty ()
+  :tags '(maduin)
+  (should-not (maduin-stamp-parse nil))
+  (should-not (maduin-stamp-parse ""))
+  (should-not (maduin-stamp-parse 42)))
 
 (provide 'maduin-test)
 

@@ -26,6 +26,38 @@
 (defconst maduin-config--supported-backends '(opencode kiro)
   "Backend symbols accepted by the runtime configuration API.")
 
+(defconst maduin-config--difficulty-tiers '(low high)
+  "Difficulty tiers with dedicated Kiro model configuration keys.")
+
+(defun maduin-config--tier-model-key (tier)
+  "Return Kiro model configuration key for difficulty TIER, or nil."
+  (pcase tier
+    ('low 'kiro-model-low)
+    ('high 'kiro-model-high)
+    (_ nil)))
+
+(defconst maduin-config--effort-allowlists
+  '((kiro . ("low" "medium" "high" "xhigh" "max"))
+    (opencode . ("minimal" "low" "medium" "high" "max")))
+  "Allowed reasoning-effort spellings by backend.")
+
+(defun maduin-config--tier-effort-key (backend tier)
+  "Return BACKEND's effort configuration key for difficulty TIER, or nil."
+  (pcase (list backend tier)
+    (`(opencode low) 'effort-low)
+    (`(opencode high) 'effort-high)
+    (`(kiro low) 'kiro-effort-low)
+    (`(kiro high) 'kiro-effort-high)
+    (_ nil)))
+
+(defun maduin-config--effort-valid-p (backend effort)
+  "Return non-nil when EFFORT is a safe allowed value for BACKEND."
+  (and (stringp effort)
+       (not (string-empty-p effort))
+       (not (string-match-p "[[:space:]/]" effort))
+       (member (downcase effort)
+               (cdr (assq backend maduin-config--effort-allowlists)))))
+
 (defun maduin-config--section-for-role (role)
   "Return config section for supported ROLE, or signal `user-error'."
   (let ((section (cdr (assq role maduin-config--role-sections))))
@@ -89,17 +121,21 @@ then ROLE's backend, which itself defaults to `opencode'."
     ('kiro 'kiro-model)
     (_ (user-error "Unsupported maduin backend: %S" backend))))
 
-(defun maduin-config--model (config backend)
-  "Return CONFIG's literal model for BACKEND, or nil.
+(defun maduin-config--model-style (model backend)
+  "Return literal MODEL for BACKEND, or nil when MODEL is not a string.
 Kiro models must be explicit bare IDs: OpenCode namespace prefixes are
 rejected rather than transformed."
-  (let ((model (cdr (assq (maduin-config--model-key backend) config))))
-    (when (and (eq backend 'kiro)
-               (stringp model)
-               (or (string-prefix-p "opencode/" model)
-                   (string-prefix-p "opencode-go/" model)))
-      (user-error "Kiro model must be a bare ID, not %S" model))
-    (and (stringp model) model)))
+  (when (and (eq backend 'kiro)
+             (stringp model)
+             (or (string-prefix-p "opencode/" model)
+                 (string-prefix-p "opencode-go/" model)))
+    (user-error "Kiro model must be a bare ID, not %S" model))
+  (and (stringp model) model))
+
+(defun maduin-config--model (config backend)
+  "Return CONFIG's literal model for BACKEND, or nil."
+  (maduin-config--model-style
+   (cdr (assq (maduin-config--model-key backend) config)) backend))
 
 (defun maduin-config-role-model (role backend)
   "Return ROLE's literal model configured for BACKEND, or nil.
@@ -120,6 +156,50 @@ falling back to an OpenCode model or Kiro's implicit default."
                (or (null model) (string-empty-p model)))
       (user-error "Missing Kiro model for role %S seat %S" role seat))
     model))
+
+(defun maduin-config-difficulty-model (role seat backend difficulty)
+  "Return effective model for ROLE, SEAT, BACKEND, and DIFFICULTY.
+Kiro tier models prefer named-seat values, then role values.  Unknown and
+unset difficulty values use `maduin-config-seat-model'.  OpenCode always
+uses `maduin-config-seat-model' unchanged."
+  (unless (stringp seat)
+    (user-error "Maduin seat name must be a string: %S" seat))
+  ;; Preserve `maduin-config--model-key' validation for unsupported backends.
+  (maduin-config--model-key backend)
+  (let ((tier-key (and (memq difficulty maduin-config--difficulty-tiers)
+                       (maduin-config--tier-model-key difficulty))))
+    (if (and (eq backend 'kiro) tier-key)
+        (or (let ((model (maduin-config--model-style
+                          (cdr (assq tier-key (maduin-config--seat role seat)))
+                          backend)))
+              (and model (not (string-empty-p model)) model))
+            (let ((model (maduin-config--model-style
+                          (cdr (assq tier-key (maduin-config--section role)))
+                          backend)))
+              (and model (not (string-empty-p model)) model))
+            (maduin-config-seat-model role seat backend))
+      (maduin-config-seat-model role seat backend))))
+
+(defun maduin-config-difficulty-effort (role seat backend difficulty)
+  "Return effective effort for ROLE, SEAT, BACKEND, and DIFFICULTY, or nil.
+Named-seat values override role values.  Invalid effort values are logged and
+omitted so they cannot make a spawned command line unsafe or invalid."
+  (unless (stringp seat)
+    (user-error "Maduin seat name must be a string: %S" seat))
+  (let ((tier-key (and (memq difficulty maduin-config--difficulty-tiers)
+                       (maduin-config--tier-effort-key backend difficulty))))
+    (when tier-key
+      (let ((effort
+             (condition-case nil
+                 (or (cdr (assq tier-key (maduin-config--seat role seat)))
+                     (cdr (assq tier-key (maduin-config--section role))))
+               (error nil))))
+        (cond
+         ((null effort) nil)
+         ((maduin-config--effort-valid-p backend effort) (downcase effort))
+         (t
+          (message "maduin-config: ignoring invalid %S effort %S" backend effort)
+          nil))))))
 
 (defun maduin-config-set-seat-backend (role seat backend)
   "Set existing ROLE/SEAT's runtime BACKEND and return BACKEND.

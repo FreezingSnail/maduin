@@ -11,8 +11,11 @@
 
 (defvar maduin-backend-registry (make-hash-table :test #'eq)
   "Map backend symbols to adapter plists.
-Each adapter supplies :run-fn, :tui-fn, :complete-p-fn, :diff-fn,
-:delete-fn, and :executable.")
+Each adapter supplies :run-fn (WORKDIR MODEL AGENT PLAN &optional EFFORT),
+:tui-fn (ROOT MODEL AGENT PROMPT &optional EFFORT), :complete-p-fn, :diff-fn,
+:delete-fn, and :executable.  Adapters written for the older signatures signal
+`wrong-number-of-arguments' when called with EFFORT; validation checks only
+that protocol entries are functions.")
 
 (defun maduin-backend--log (fmt &rest args)
   "Log backend FMT with ARGS."
@@ -90,13 +93,13 @@ backend never silently changes to another backend."
                                backend executable)
           nil)))))
 
-(defun maduin-backend-run (backend workdir model agent plan)
-  "Run BACKEND in WORKDIR with MODEL, AGENT, and PLAN."
-  (maduin-backend--call backend :run-fn workdir model agent plan))
+(defun maduin-backend-run (backend workdir model agent plan &optional effort)
+  "Run BACKEND in WORKDIR with MODEL, AGENT, PLAN, and optional EFFORT."
+  (maduin-backend--call backend :run-fn workdir model agent plan effort))
 
-(defun maduin-backend-tui (backend root model prompt &optional agent)
-  "Open BACKEND TUI at ROOT with MODEL, PROMPT, and optional AGENT."
-  (maduin-backend--call backend :tui-fn root model agent prompt))
+(defun maduin-backend-tui (backend root model prompt &optional agent effort)
+  "Open BACKEND TUI at ROOT with MODEL, PROMPT, AGENT, and optional EFFORT."
+  (maduin-backend--call backend :tui-fn root model agent prompt effort))
 
 (defun maduin-backend-complete-p (backend sid)
   "Return BACKEND completion state for opaque session handle SID."
