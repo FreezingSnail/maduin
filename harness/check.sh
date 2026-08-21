@@ -30,6 +30,8 @@ FILES=(
   "maduin-config.el"
   "maduin-bd-bridge.el"
   "maduin-session.el"
+  "maduin-backend.el"
+  "maduin-kiro.el"
   "maduin-workspace.el"
   "maduin-terminal.el"
   "maduin-pipeline.el"

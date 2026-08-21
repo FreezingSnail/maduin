@@ -16,6 +16,7 @@
 (require 'json)
 
 (require 'maduin-config nil t)
+(require 'maduin-backend)
 
 (condition-case nil
     (require 'maduin-logging)
@@ -182,17 +183,17 @@ Return nil when no live session matches."
     (when buf
       (buffer-local-value 'maduin-session--session-id buf))))
 
-(defun maduin-session-run (workdir model agent plan)
-  "Run one autonomous task in WORKDIR with MODEL, AGENT and PLAN via
-`opencode run'.  Spawns `opencode run --dir WORKDIR -m MODEL --agent
-AGENT --format json --auto --title <handle> PLAN' asynchronously (the
-`--agent AGENT' pair is omitted when AGENT is nil or empty); a
-process-filter consumes the NDJSON event stream and a sentinel fires
-`maduin-session-on-complete-hook'.
+(defun maduin-session--opencode-run-command (executable workdir model agent handle plan)
+  "Build autonomous opencode argv for WORKDIR, MODEL, AGENT, HANDLE and PLAN.
+EXECUTABLE is the resolved opencode program.  Omit `--agent' for an empty
+AGENT, preserving the established autonomous command line."
+  (append (list executable "run" "--dir" workdir "-m" model)
+          (when (and agent (not (string-empty-p agent)))
+            (list "--agent" agent))
+          (list "--format" "json" "--auto" "--title" handle plan)))
 
-Return a session handle (string) for `maduin-session-complete-p',
-`maduin-session-diff' and `maduin-session-delete', or nil when the
-opencode CLI is unavailable or the process cannot be spawned."
+(defun maduin-session--opencode-run (workdir model agent plan)
+  "Run the autonomous opencode adapter in WORKDIR with MODEL, AGENT and PLAN."
   (cl-block nil
     (let ((exe (executable-find maduin-opencode-command)))
       (unless exe
@@ -204,11 +205,8 @@ opencode CLI is unavailable or the process cannot be spawned."
                        (make-process
                         :name (format "maduin-run-%d" maduin-session--seq)
                         :buffer buf
-                        :command (append (list exe "run" "--dir" workdir "-m" model)
-                                         (when (and agent (not (string-empty-p agent)))
-                                           (list "--agent" agent))
-                                         (list "--format" "json" "--auto"
-                                               "--title" handle plan))
+                        :command (maduin-session--opencode-run-command
+                                  exe workdir model agent handle plan)
                         :filter #'maduin-session--run-filter
                         :sentinel #'maduin-session--run-sentinel
                         :noquery t)
@@ -226,6 +224,12 @@ opencode CLI is unavailable or the process cannot be spawned."
           (setq-local maduin-session--usage-limited nil))
         (puthash handle buf maduin-session--registry)
         handle))))
+
+(defun maduin-session-run (workdir model agent plan)
+  "Run one autonomous task in WORKDIR with MODEL, AGENT and PLAN.
+Compatibility façade for the opencode adapter.  Return its opaque session
+handle, or nil when opencode is unavailable or cannot be spawned."
+  (maduin-session--opencode-run workdir model agent plan))
 
 (defun maduin-session-complete-p (sid)
   "Return completion status of autonomous session SID.
@@ -312,6 +316,19 @@ when the opencode session was deleted, nil otherwise."
                       (list maduin-opencode-command "session" "delete" real))))
             (and res (= 0 (car res))))
         nil))))
+
+(defun maduin-session--opencode-tui-unavailable (&rest _args)
+  "Return nil: interactive opencode TUI ownership remains in `maduin-terminal'."
+  nil)
+
+(maduin-backend-register
+ 'opencode
+ (list :executable (or maduin-opencode-command "opencode")
+       :run-fn #'maduin-session--opencode-run
+       :tui-fn #'maduin-session--opencode-tui-unavailable
+       :complete-p-fn #'maduin-session-complete-p
+       :diff-fn #'maduin-session-diff
+       :delete-fn #'maduin-session-delete))
 
 (provide 'maduin-session)
 

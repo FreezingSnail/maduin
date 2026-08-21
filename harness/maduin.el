@@ -20,6 +20,7 @@
 
 (require 'maduin-config)
 (require 'maduin-session)
+(require 'maduin-kiro)
 (require 'maduin-pipeline)
 (require 'maduin-workspace)
 (require 'maduin-terminal)
@@ -168,7 +169,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 (defvar maduin--feature-list
   '(maduin-designer maduin-dispatch
     maduin-cockpit-face maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline
-    maduin-session
+    maduin-session maduin-kiro
     maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")
 

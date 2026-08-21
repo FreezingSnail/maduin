@@ -521,6 +521,83 @@
       (ignore-errors (maduin-session-delete sid))
       (delete-directory dir t))))
 
+(ert-deftest maduin-test-session-opencode-adapter-registered ()
+  :tags '(maduin)
+  (let ((adapter (maduin-backend-get 'opencode)))
+    (should adapter)
+    (should (string= (plist-get adapter :executable) maduin-opencode-command))
+    (should (eq (plist-get adapter :run-fn) #'maduin-session--opencode-run))
+    (should (eq (plist-get adapter :complete-p-fn) #'maduin-session-complete-p))
+    (should (eq (plist-get adapter :diff-fn) #'maduin-session-diff))
+    (should (eq (plist-get adapter :delete-fn) #'maduin-session-delete))
+    (dolist (key '(:run-fn :tui-fn :complete-p-fn :diff-fn :delete-fn))
+      (should (functionp (plist-get adapter key))))))
+
+(ert-deftest maduin-test-session-opencode-command-and-ndjson-contract ()
+  :tags '(maduin)
+  (should
+   (equal (maduin-session--opencode-run-command
+           "opencode" "/work" "model" "agent" "handle" "plan")
+          '("opencode" "run" "--dir" "/work" "-m" "model"
+            "--agent" "agent" "--format" "json" "--auto"
+            "--title" "handle" "plan")))
+  (should
+   (equal (maduin-session--opencode-run-command
+           "opencode" "/work" "model" nil "handle" "plan")
+          '("opencode" "run" "--dir" "/work" "-m" "model"
+            "--format" "json" "--auto" "--title" "handle" "plan")))
+  ;; Only terminal NDJSON events decide success; process exit code is irrelevant.
+  (should (eq (plist-get (maduin-session--parse-line
+                          "{\"type\":\"step_finish\",\"part\":{\"reason\":\"stop\"}}")
+                         :terminal)
+              'completed))
+  (should (eq (plist-get (maduin-session--parse-line
+                          "{\"type\":\"tool_use\",\"part\":{\"state\":{\"status\":\"error\"}}}")
+                         :terminal)
+              'failed)))
+
+(ert-deftest maduin-test-session-completion-hook-runs-once ()
+  :tags '(maduin)
+  (let* ((shim (maduin-test--fake-opencode-shim))
+         (maduin-opencode-command shim)
+         (calls 0)
+         (maduin-session-on-complete-hook
+          (list (lambda (_sid _status) (cl-incf calls))))
+         (dir (maduin-test--temp-dir))
+         (sid (maduin-session-run dir "test-model" nil "say hi"))
+         (buf (and sid (maduin-session--run-buffer sid)))
+         (proc (and buf (get-buffer-process buf))))
+    (unwind-protect
+        (progn
+          (while (and proc (process-live-p proc))
+            (accept-process-output proc 0.05))
+          ;; A duplicate sentinel notification cannot repeat the hook.
+          (maduin-session--run-sentinel proc "finished\n")
+          (should (= calls 1)))
+      (ignore-errors (maduin-session-delete sid))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-session-diff-delete-cleans-registry ()
+  :tags '(maduin)
+  (let* ((shim (maduin-test--fake-opencode-shim))
+         (maduin-opencode-command shim)
+         (dir (maduin-test--temp-dir))
+         (sid (maduin-session-run dir "test-model" nil "say hi"))
+         (buf (and sid (maduin-session--run-buffer sid)))
+         (proc (and buf (get-buffer-process buf))))
+    (unwind-protect
+        (progn
+          (while (and proc (process-live-p proc))
+            (accept-process-output proc 0.05))
+          (should (maduin-session-diff sid))
+          (should (maduin-session-delete sid))
+          (should-not (gethash sid maduin-session--registry))
+          (should-not (buffer-live-p buf))
+          (should-not (maduin-session-diff sid))
+          (should-not (maduin-session-delete sid)))
+      (ignore-errors (maduin-session-delete sid))
+      (delete-directory dir t))))
+
 ;;; 6. handoff
 
 (ert-deftest maduin-test-handoff-write-read ()
@@ -2729,6 +2806,114 @@
                      (:complete "sid")
                      (:diff "sid")
                      (:delete "sid"))))))
+
+;;; 23. Kiro backend adapter
+
+(ert-deftest maduin-test-kiro-run-uses-required-argv-and-workdir ()
+  :tags '(maduin)
+  (let ((maduin-kiro--registry (make-hash-table :test #'equal))
+        (maduin-kiro--seq 0)
+        (workdir (expand-file-name ".." maduin-test--dir))
+        command cwd handle)
+    (unwind-protect
+        (cl-letf (((symbol-function 'executable-find) (lambda (_command) t))
+                  ((symbol-function 'make-process)
+                   (lambda (&rest arguments)
+                     (setq command (plist-get arguments :command)
+                           cwd default-directory)
+                     'fake-process))
+                  ((symbol-function 'process-put) (lambda (&rest _arguments) nil)))
+          (setq handle (maduin-kiro-run workdir "model" "slugineer-worker" "plan"))
+          (should handle)
+          (should (equal command
+                         '("kiro-cli-chat" "chat" "--no-interactive"
+                           "--agent" "slugineer-worker" "--model" "model"
+                           "--trust-all-tools" "plan")))
+          (should (equal cwd (file-name-as-directory workdir)))
+          (should-not (member "--dir" command))
+          (should-not (member "--format" command))
+          (should-not (member "--auto" command)))
+      (let ((entry (and handle (gethash handle maduin-kiro--registry))))
+        (when (buffer-live-p (plist-get entry :buffer))
+          (kill-buffer (plist-get entry :buffer)))))))
+
+(ert-deftest maduin-test-kiro-run-refuses-invalid-agent-and-model-without-spawn ()
+  :tags '(maduin)
+  (let ((maduin-kiro--registry (make-hash-table :test #'equal))
+        (spawned nil))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_command) t))
+              ((symbol-function 'make-process)
+               (lambda (&rest _arguments) (setq spawned t) 'fake-process)))
+      (should-not (maduin-kiro-run default-directory "model" "missing-agent" "plan"))
+      (should-not (maduin-kiro-run default-directory "vendor/model"
+                                   "slugineer-worker" "plan")))
+    (should-not spawned)))
+
+(ert-deftest maduin-test-kiro-sentinel-rejects-false-success-and-hooks-once ()
+  :tags '(maduin)
+  (let* ((maduin-kiro--registry (make-hash-table :test #'equal))
+         (maduin-session-on-complete-hook nil)
+         (buffer (generate-new-buffer " *maduin-kiro-false-success*"))
+         (calls 0)
+         (handle "false-success"))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert "\e[31mUsage limit reached\e[0m"))
+          (puthash handle (list :process 'fake-process :buffer buffer
+                                :workdir default-directory :status 'running :done nil)
+                   maduin-kiro--registry)
+          (add-hook 'maduin-session-on-complete-hook
+                    (lambda (_handle _status) (setq calls (1+ calls))))
+          (cl-letf (((symbol-function 'process-status) (lambda (_process) 'exit))
+                    ((symbol-function 'process-exit-status) (lambda (_process) 0))
+                    ((symbol-function 'process-get)
+                     (lambda (_process property)
+                       (and (eq property 'maduin-kiro-handle) handle))))
+            (maduin-kiro--run-sentinel 'fake-process "finished\n")
+            (maduin-kiro--run-sentinel 'fake-process "finished\n"))
+          (should (eq (maduin-kiro-complete-p handle) 'failed))
+          (should (= calls 1))
+          (should-not (string-match-p "\e" (plist-get (gethash handle maduin-kiro--registry)
+                                                        :output))))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest maduin-test-kiro-diff-includes-unstaged-staged-and-untracked ()
+  :tags '(maduin)
+  (let ((maduin-kiro--registry (make-hash-table :test #'equal))
+        (handle "diff")
+        calls)
+    (puthash handle (list :workdir "/work/" :status 'completed :done t)
+             maduin-kiro--registry)
+    (cl-letf (((symbol-function 'maduin-kiro--git)
+               (lambda (workdir &rest arguments)
+                 (push (cons workdir arguments) calls)
+                 (cond
+                  ((equal arguments '("diff" "--no-ext-diff")) '(0 . "unstaged\n"))
+                  ((equal arguments '("diff" "--cached" "--no-ext-diff")) '(0 . "staged\n"))
+                  ((equal arguments '("ls-files" "--others" "--exclude-standard" "-z"))
+                   '(0 . "new.el\0"))
+                  ((equal arguments '("diff" "--no-index" "--" "/dev/null" "new.el"))
+                   '(1 . "untracked\n"))))))
+      (should (equal (maduin-kiro-diff handle) "unstaged\nstaged\nuntracked\n"))
+      (should (member '("/work/" . ("diff" "--no-index" "--" "/dev/null" "new.el")) calls)))))
+
+(ert-deftest maduin-test-kiro-delete-kills-local-state-only ()
+  :tags '(maduin)
+  (let* ((maduin-kiro--registry (make-hash-table :test #'equal))
+         (handle "delete")
+         (buffer (generate-new-buffer " *maduin-kiro-delete*"))
+         (killed nil))
+    (puthash handle (list :process 'fake-process :buffer buffer :workdir "/work/"
+                          :status 'running :done nil)
+             maduin-kiro--registry)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'delete-process)
+               (lambda (_process) (setq killed t))))
+      (should (maduin-kiro-delete handle)))
+    (should killed)
+    (should-not (gethash handle maduin-kiro--registry))
+    (should-not (buffer-live-p buffer))))
 
 (provide 'maduin-test)
 
