@@ -88,6 +88,15 @@ and chaplet's own focus hook.")
 Single source of truth; mirrored into evil normal/motion states when
 evil is available.")
 
+(defconst maduin-cockpit--chip-glyphs
+  '((queued "◐" "q") (active "◉" "*") (completed "✓" "+")
+    (blocked "✗" "x") (fleet-free "○" "-") (fleet-busy "●" "#"))
+  "Pipeline chip glyphs as (KEY UNICODE ASCII).")
+
+(defconst maduin-cockpit--role-order
+  '("concierge" "designer" "implementer")
+  "Stable default role grouping order for cockpit rows.")
+
 (defconst maduin-cockpit--evil-suppress-keys
   '("v" "V" "C-v" "C" "d" "D" "s" "S" "x" "X" "R")
   "Single-char motions suppressed in evil states only.
@@ -229,19 +238,31 @@ backends reflect current runtime configuration.  Never signals."
                            (plist-get entry :uptime)))
           :phase (and entry (plist-get entry :phase)))))
 
+(defun maduin-cockpit--placeholder ()
+  "Return a dim em-dash placeholder for an unavailable cockpit value."
+  (propertize "—" 'face 'maduin-cockpit-placeholder))
+
 (defun maduin-cockpit--task-string (status)
-  "Return \"TASK-ID — TITLE\" from rich STATUS plist, or \"—\"."
+  "Return a styled, 30-column task cell from rich STATUS, or a placeholder."
   (let ((id (plist-get status :task-id))
         (title (plist-get status :task-title)))
-    (cond ((null id) "—")
-          (title (format "%s — %s" id title))
-          (t (format "%s —" id)))))
+    (if (null id)
+        (maduin-cockpit--placeholder)
+      (let ((styled-id (propertize id 'face 'maduin-cockpit-task-id)))
+        (if title
+            (let* ((available (max 0 (- 30 (string-width id) 3)))
+                   (short-title (truncate-string-to-width
+                                 title available 0 nil "…")))
+              (concat styled-id " — "
+                      (propertize short-title
+                                  'face 'maduin-cockpit-task-title)))
+          (concat styled-id " " (maduin-cockpit--placeholder)))))))
 
 (defun maduin-cockpit--uptime-string (status)
-  "Return formatted elapsed uptime from STATUS, or \"—\" when absent."
+  "Return formatted elapsed uptime from STATUS, or a placeholder when absent."
   (let ((uptime (and status (plist-get status :uptime))))
     (if (null uptime)
-        "—"
+        (maduin-cockpit--placeholder)
       (let* ((seconds (max 0 (floor uptime)))
              (hours (/ seconds 3600))
              (minutes (% (/ seconds 60) 60))
@@ -250,24 +271,42 @@ backends reflect current runtime configuration.  Never signals."
             (format "%02d:%02d:%02d" hours minutes secs)
           (format "%02d:%02d" minutes secs))))))
 
+(defun maduin-cockpit--ordered-seats ()
+  "Return configured seats in stable, explicit role-group order."
+  (let ((seats (maduin-cockpit--seats)))
+    (append
+     (cl-loop for role in maduin-cockpit--role-order
+              append (cl-remove-if-not
+                      (lambda (seat) (equal (cdr seat) role)) seats))
+     (cl-remove-if (lambda (seat)
+                     (member (cdr seat) maduin-cockpit--role-order))
+                   seats))))
+
 (defun maduin-cockpit--rows ()
-  "Return tabulated-list rows for all configured seats."
-  (cl-loop for (seat . role) in (maduin-cockpit--seats)
+  "Return tabulated-list rows for all configured seats, grouped by role."
+  (cl-loop for (seat . role) in (maduin-cockpit--ordered-seats)
            for st = (maduin-cockpit--seat-status seat)
            collect (list seat
                          (vector seat
                                  (let ((display-role (or (plist-get st :role) role)))
-                                   (if (symbolp display-role)
-                                       (symbol-name display-role)
-                                     display-role))
+                                   (propertize
+                                    (if (symbolp display-role)
+                                        (symbol-name display-role)
+                                      display-role)
+                                    'face 'maduin-cockpit-role))
                                  (maduin-cockpit--status-pill
                                   (plist-get st :status))
                                  (maduin-cockpit--task-string st)
-                                 (or (plist-get st :model) "—")
+                                 (or (plist-get st :model)
+                                     (maduin-cockpit--placeholder))
                                  (let ((backend (plist-get st :backend)))
-                                   (if backend (symbol-name backend) "—"))
+                                   (if backend
+                                       (propertize (symbol-name backend)
+                                                   'face 'maduin-cockpit-backend)
+                                     (maduin-cockpit--placeholder)))
                                  (maduin-cockpit--uptime-string st)
-                                 (or (plist-get st :phase) "—")))))
+                                 (or (plist-get st :phase)
+                                     (maduin-cockpit--placeholder))))))
 
 (defun maduin-cockpit--toggle-backend ()
   "Cycle the selected idle seat's runtime backend and refresh the cockpit."
@@ -287,24 +326,25 @@ backends reflect current runtime configuration.  Never signals."
        (_ (user-error "Unsupported backend for seat %s" seat))))
     (maduin-cockpit-refresh)))
 
+(defun maduin-cockpit--glyph (key)
+  "Return KEY's displayable Unicode chip glyph, or its ASCII fallback."
+  (let ((glyphs (assq key maduin-cockpit--chip-glyphs)))
+    (when glyphs
+      (if (char-displayable-p (string-to-char (nth 1 glyphs)))
+          (nth 1 glyphs)
+        (nth 2 glyphs)))))
+
 (defun maduin-cockpit--pipeline-summary ()
-  "Return pipeline stat chips (icon + label + count), space-separated.
-Each chip carries its `maduin-cockpit-chip-face' text property."
-  (let* ((ps (maduin-pipeline-status))
-         (specs '((queued . "◐")
-                  (active . "◉")
-                  (completed . "✓")
-                  (blocked . "✗")
-                  (fleet-free . "○")
-                  (fleet-busy . "●"))))
+  "Return pipeline stat chips (icon + label + count), space-separated."
+  (let ((ps (maduin-pipeline-status)))
     (mapconcat
      (lambda (spec)
        (let* ((k (car spec))
               (n (or (plist-get ps (intern (format ":%s" k))) 0))
-              (chip (format "%s %s %d" (cdr spec) k n))
+              (chip (format "%s %s %d" (maduin-cockpit--glyph k) k n))
               (face (maduin-cockpit-chip-face k)))
          (if face (propertize chip 'face face) chip)))
-     specs " ")))
+     maduin-cockpit--chip-glyphs " ")))
 
 (defun maduin-cockpit--idle-p ()
   "Return non-nil when no dispatch work or queued pipeline work exists."
@@ -328,9 +368,11 @@ Each chip carries its `maduin-cockpit-chip-face' text property."
   "Return cached-header content for the current cockpit state."
   (let* ((harness (cdr (assq 'harness maduin-config)))
          (name (or (cdr (assq 'name harness)) "maduin"))
-         (version (or (cdr (assq 'version harness)) "—")))
-    (format "%s %s · %s · %s"
-            name version (maduin-cockpit--run-state)
+         (version (or (cdr (assq 'version harness))
+                      (maduin-cockpit--placeholder))))
+    (concat (propertize (format "%s %s · %s · "
+                               name version (maduin-cockpit--run-state))
+                        'face 'maduin-cockpit-header)
             (maduin-cockpit--pipeline-summary))))
 
 (defun maduin-cockpit--render-header ()

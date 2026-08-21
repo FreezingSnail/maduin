@@ -43,6 +43,11 @@
   "Face for repairing seats."
   :group 'maduin-cockpit)
 
+(defface maduin-cockpit-state-failed
+  '((t :foreground "#e06c75" :background "#4a2226" :box t))
+  "Face for failed seats."
+  :group 'maduin-cockpit)
+
 ;; Pipeline chip faces.
 
 (defface maduin-cockpit-chip-queued
@@ -85,43 +90,87 @@
   "Face for the cockpit mode-line hint bar."
   :group 'maduin-cockpit)
 
+(defface maduin-cockpit-role
+  '((t :foreground "#c678dd"))
+  "Face for cockpit seat role text."
+  :group 'maduin-cockpit)
+
+(defface maduin-cockpit-backend
+  '((t :foreground "#56b6c2"))
+  "Face for cockpit backend text."
+  :group 'maduin-cockpit)
+
+(defface maduin-cockpit-task-id
+  '((t :foreground "#61afef"))
+  "Face for task identifiers in cockpit task cells."
+  :group 'maduin-cockpit)
+
+(defface maduin-cockpit-task-title
+  '((t :foreground "#abb2bf"))
+  "Face for task titles in cockpit task cells."
+  :group 'maduin-cockpit)
+
+(defface maduin-cockpit-placeholder
+  '((t :foreground "#5c6370"))
+  "Face for unavailable cockpit cell values."
+  :group 'maduin-cockpit)
+
+(defface maduin-cockpit-header
+  '((t :foreground "#abb2bf"))
+  "Face for cockpit header identity and run-state text."
+  :group 'maduin-cockpit)
+
 ;;; Palettes
 
 (defconst maduin-cockpit-face--palette
   '((dark
-     (maduin-cockpit-state-dead     . "#5c6370")
-     (maduin-cockpit-state-idle     . "#61afef")
-     (maduin-cockpit-state-working  . "#98c379")
-     (maduin-cockpit-state-running  . "#56b6c2")
+     (maduin-cockpit-state-dead      . "#5c6370")
+     (maduin-cockpit-state-idle      . "#61afef")
+     (maduin-cockpit-state-working   . "#98c379")
+     (maduin-cockpit-state-running   . "#56b6c2")
      (maduin-cockpit-state-repairing . "#e06c75")
-     (maduin-cockpit-chip-queued    . "#5c6370")
-     (maduin-cockpit-chip-active    . "#61afef")
-     (maduin-cockpit-chip-completed . "#98c379")
-     (maduin-cockpit-chip-blocked   . "#e06c75")
+     (maduin-cockpit-state-failed    . "#e06c75")
+     (maduin-cockpit-chip-queued     . "#5c6370")
+     (maduin-cockpit-chip-active     . "#61afef")
+     (maduin-cockpit-chip-completed  . "#98c379")
+     (maduin-cockpit-chip-blocked    . "#e06c75")
      (maduin-cockpit-chip-fleet-free . "#98c379")
      (maduin-cockpit-chip-fleet-busy . "#c678dd")
      (maduin-cockpit-cue             . "#7f849c")
-     (maduin-cockpit-bar             . "#7f849c"))
+     (maduin-cockpit-bar             . "#7f849c")
+     (maduin-cockpit-role            . "#c678dd")
+     (maduin-cockpit-backend         . "#56b6c2")
+     (maduin-cockpit-task-id         . "#61afef")
+     (maduin-cockpit-task-title      . "#abb2bf")
+     (maduin-cockpit-placeholder     . "#5c6370")
+     (maduin-cockpit-header          . "#abb2bf"))
     (light
-     (maduin-cockpit-state-dead     . "#6e7278")
-     (maduin-cockpit-state-idle     . "#1f6fb2")
-     (maduin-cockpit-state-working  . "#1f7a3d")
-     (maduin-cockpit-state-running  . "#007c84")
+     (maduin-cockpit-state-dead      . "#6e7278")
+     (maduin-cockpit-state-idle      . "#1f6fb2")
+     (maduin-cockpit-state-working   . "#1f7a3d")
+     (maduin-cockpit-state-running   . "#007c84")
      (maduin-cockpit-state-repairing . "#b3261e")
-     (maduin-cockpit-chip-queued    . "#6e7278")
-     (maduin-cockpit-chip-active    . "#1f6fb2")
-     (maduin-cockpit-chip-completed . "#1f7a3d")
-     (maduin-cockpit-chip-blocked   . "#b3261e")
+     (maduin-cockpit-state-failed    . "#b3261e")
+     (maduin-cockpit-chip-queued     . "#6e7278")
+     (maduin-cockpit-chip-active     . "#1f6fb2")
+     (maduin-cockpit-chip-completed  . "#1f7a3d")
+     (maduin-cockpit-chip-blocked    . "#b3261e")
      (maduin-cockpit-chip-fleet-free . "#1f7a3d")
      (maduin-cockpit-chip-fleet-busy . "#7b2d8b")
      (maduin-cockpit-cue             . "#6c7086")
-     (maduin-cockpit-bar . "#6e7278")))
+     (maduin-cockpit-bar             . "#6e7278")
+     (maduin-cockpit-role            . "#7b2d8b")
+     (maduin-cockpit-backend         . "#007c84")
+     (maduin-cockpit-task-id         . "#1f6fb2")
+     (maduin-cockpit-task-title      . "#4c4f69")
+     (maduin-cockpit-placeholder     . "#6e7278")
+     (maduin-cockpit-header          . "#4c4f69")))
   "Palettes keyed by theme: ((dark (face . color) ...) (light ...)).")
 
 (defconst maduin-cockpit-face--pill-faces
   '(maduin-cockpit-state-dead maduin-cockpit-state-idle
     maduin-cockpit-state-working maduin-cockpit-state-running
-    maduin-cockpit-state-repairing
+    maduin-cockpit-state-repairing maduin-cockpit-state-failed
     maduin-cockpit-chip-queued maduin-cockpit-chip-active
     maduin-cockpit-chip-completed maduin-cockpit-chip-blocked
     maduin-cockpit-chip-fleet-free maduin-cockpit-chip-fleet-busy)
@@ -210,6 +259,7 @@ Idempotent: `after-load-theme-hook' is registered at most once."
     ('working   'maduin-cockpit-state-working)
     ('running   'maduin-cockpit-state-running)
     ('repairing 'maduin-cockpit-state-repairing)
+    ('failed    'maduin-cockpit-state-failed)
     (_ nil)))
 
 (defun maduin-cockpit-state-color (status)
