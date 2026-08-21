@@ -170,11 +170,23 @@ Without BACKEND retain the historical OpenCode lookup for compatibility."
     ('repairer (maduin-dispatch--config-get 'repairer 'agent))
     (_ nil)))
 
-(defun maduin-dispatch--seat-fallback (role)
-  "Return fallback model for ROLE, or nil.
-Only the fleet (implementer) role has a fallback (free-flash → go flash)."
-  (and (eq role 'implementer)
-       (maduin-dispatch--config-get 'fleet 'fallback)))
+(defun maduin-dispatch--seat-fallback (role &optional backend)
+  "Return configured fallback model for ROLE on BACKEND, or nil.
+BACKEND defaults to `opencode' for compatibility.  The caller supplies the
+session entry's sticky backend so mutable seat configuration cannot redirect a
+retry.  Kiro fallbacks stay in Kiro's bare-model namespace; OpenCode fallbacks
+remain available only where that backend has an explicit configured fallback."
+  (let ((section (pcase role
+                   ('implementer 'fleet)
+                   ('designer 'designer)
+                   ('concierge 'concierge)
+                   ('reviewer 'reviewer)
+                   ('repairer 'repairer)
+                   (_ nil))))
+    (and section
+         (pcase (or backend 'opencode)
+           ('opencode (maduin-dispatch--config-get section 'fallback))
+           ('kiro (maduin-dispatch--config-get section 'kiro-fallback))))))
 
 ;;; Concurrency
 
@@ -346,26 +358,24 @@ close: the epic stays open until its children are implemented."
       ;; staying in_progress forever.
       (funcall maduin-dispatch--release-fn task)))))
 
-(defun maduin-dispatch--fail (entry sid)
-  "Handle failed session for ENTRY: report and release the claim so the
-task returns to open (bd ready) rather than staying claimed in_progress.
-A usage/rate-limit failure on an implementer session that has a
-fallback model (and has not already used it) is instead re-dispatched
-with the fallback model, keeping the claim in place."
-  (let ((role (plist-get entry :role))
-        (seat (plist-get entry :seat))
-        (task (plist-get entry :task))
-        (backend (plist-get entry :backend)))
-    (if (and (eq backend 'opencode)
-             (not (plist-get entry :fallback-attempted))
-             (maduin-session-usage-limited-p sid)
-             (maduin-dispatch--seat-fallback role))
+(defun maduin-dispatch--fail (entry sid status)
+  "Handle failed STATUS for ENTRY, retrying one limited session on fallback.
+The retry uses ENTRY's sticky backend, keeps its existing claim, and is bounded
+by `:fallback-attempted'.  Every other failure releases the claim."
+  (let* ((role (plist-get entry :role))
+         (seat (plist-get entry :seat))
+         (task (plist-get entry :task))
+         (backend (plist-get entry :backend))
+         (fallback (maduin-dispatch--seat-fallback role backend))
+         (limited (or (eq status 'limited)
+                      (and (eq backend 'opencode)
+                           (maduin-session-usage-limited-p sid)))))
+    (if (and (not (plist-get entry :fallback-attempted)) limited fallback)
         (progn
           (funcall maduin-dispatch--comment-fn
                    task "usage limit — retrying with fallback model")
           (maduin-dispatch--spawn-session
-           task 'implementer seat
-           (maduin-dispatch--seat-fallback role) nil t backend))
+           task role seat fallback nil t backend))
       (funcall maduin-dispatch--comment-fn task "session failed — task left open")
       (funcall maduin-dispatch--release-fn task))))
 
@@ -382,7 +392,7 @@ while work is in flight)."
       (unwind-protect
           (if (eq status 'completed)
               (maduin-dispatch--complete entry sid)
-            (maduin-dispatch--fail entry sid))
+            (maduin-dispatch--fail entry sid status))
         (funcall maduin-dispatch--session-delete-fn
                  (plist-get entry :backend) sid))
       (maduin-dispatch--maybe-drained)

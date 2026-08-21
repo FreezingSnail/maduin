@@ -70,7 +70,8 @@ and chaplet's own focus hook.")
 (defconst maduin-cockpit--bindings
   '(("r"   . maduin-cockpit-refresh)
     ("q"   . quit-window)
-    ("i"   . maduin-cockpit-inbox))
+    ("i"   . maduin-cockpit-inbox)
+    ("b"   . maduin-cockpit--toggle-backend))
   "Cockpit keybindings as ((KEY . DEF) ...), KEY a `kbd' string.
 Single source of truth; mirrored into evil normal/motion states when
 evil is available.")
@@ -160,14 +161,21 @@ nil statuses render as plain text (\"dead\" when nil)."
         (propertize text 'face face)
       text)))
 
+(defun maduin-cockpit--seat-role (seat)
+  "Return configured role symbol for SEAT, or nil when SEAT is unknown."
+  (let ((role (cdr (assoc seat (maduin-cockpit--seats)))))
+    (and role (intern role))))
+
 (defun maduin-cockpit--seat-status (seat)
   "Return rich plist for SEAT:
-\(:seat :role :status :task-id :task-title :model :uptime :phase).
+\(:seat :role :status :task-id :task-title :model :backend :uptime :phase).
 Fields come solely from the dispatch entry (`maduin-dispatch--active');
-no entry → idle row.  :phase stays nil until sessions expose it.
-Never signals."
+no entry → idle row.  Active backends are launch-time values; idle
+backends reflect current runtime configuration.  :phase stays nil until
+sessions expose it.  Never signals."
   (let* ((entry (cl-find-if (lambda (e) (equal (plist-get e :seat) seat))
-                            maduin-dispatch--active)))
+                            maduin-dispatch--active))
+         (role (maduin-cockpit--seat-role seat)))
     (list :seat seat
           :role (and entry (plist-get entry :role))
           :status (and entry (or (plist-get entry :status) 'working))
@@ -175,6 +183,9 @@ Never signals."
           :task-title (maduin-cockpit--task-title
                        (and entry (plist-get entry :task)))
           :model (and entry (plist-get entry :model))
+          :backend (if entry
+                       (plist-get entry :backend)
+                     (and role (maduin-config-seat-backend role seat)))
           :uptime (and entry (plist-get entry :uptime))
           :phase nil)))
 
@@ -202,8 +213,28 @@ Never signals."
                                   (plist-get st :status))
                                  (maduin-cockpit--task-string st)
                                  (or (plist-get st :model) "—")
+                                 (let ((backend (plist-get st :backend)))
+                                   (if backend (symbol-name backend) "—"))
                                  (maduin-cockpit--uptime-string st)
                                  (or (plist-get st :phase) "—")))))
+
+(defun maduin-cockpit--toggle-backend ()
+  "Cycle the selected idle seat's runtime backend and refresh the cockpit."
+  (interactive)
+  (let* ((seat (tabulated-list-get-id))
+         (role (and (stringp seat) (maduin-cockpit--seat-role seat))))
+    (unless role
+      (user-error "No configured maduin seat at point"))
+    (when (cl-find-if (lambda (entry) (equal (plist-get entry :seat) seat))
+                      maduin-dispatch--active)
+      (user-error "Cannot change backend for active seat %s" seat))
+    (maduin-config-set-seat-backend
+     role seat
+     (pcase (maduin-config-seat-backend role seat)
+       ('opencode 'kiro)
+       ('kiro 'opencode)
+       (_ (user-error "Unsupported backend for seat %s" seat))))
+    (maduin-cockpit-refresh)))
 
 (defun maduin-cockpit--pipeline-summary ()
   "Return pipeline stat chips (icon + label + count), space-separated.
@@ -257,6 +288,7 @@ focus-driven path can throttle rapid window switches."
                 '("Status" 12 t)
                 '("Task" 30 nil)
                 '("Model" 16 t)
+                '("Backend" 10 t)
                 '("Uptime(s)" 10 t)
                 '("Activity" 12 t)))
   (setq tabulated-list-entries (maduin-cockpit--rows))

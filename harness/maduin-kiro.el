@@ -46,12 +46,26 @@
   "Return TEXT with terminal escape sequences removed."
   (ansi-color-filter-apply (or text "")))
 
+(defconst maduin-kiro--limit-patterns
+  '("\\busage[- ]?limit\\(?: reached\\| exceeded\\)?\\b"
+    "\\busage exceeded\\b"
+    "\\bcredits?[- ]?limit\\(?: reached\\| exceeded\\)?\\b"
+    "\\bcredits? exceeded\\b")
+  "Regexps identifying Kiro usage or credit-limit output.")
+
+(defun maduin-kiro--limited-tail-p (output)
+  "Return non-nil when OUTPUT's tail reports a Kiro usage limit."
+  (let ((tail (downcase (substring output (max 0 (- (length output) 2048))))))
+    (cl-some (lambda (pattern) (string-match-p pattern tail))
+             maduin-kiro--limit-patterns)))
+
 (defun maduin-kiro--failure-tail-p (output)
   "Return non-nil when OUTPUT ends in a Kiro quota or auth failure."
-  (let ((tail (substring output (max 0 (- (length output) 2048)))))
-    (string-match-p
-     "\\b\\(?:usage\\(?:[- ]?limit\\| exceeded\\)?\\|credit\\(?:[- ]?limit\\|s\\)?\\|auth\\(?:entication\\|orization\\)?\\|unauthorized\\|not authenticated\\|invalid api key\\)\\b"
-     (downcase tail))))
+  (let ((tail (downcase (substring output (max 0 (- (length output) 2048))))))
+    (or (maduin-kiro--limited-tail-p output)
+        (string-match-p
+         "\\b\\(?:auth\\(?:entication\\|orization\\)?\\|unauthorized\\|not authenticated\\|invalid api key\\)\\b"
+         tail))))
 
 (defun maduin-kiro--entry (handle)
   "Return local process-state entry for HANDLE."
@@ -72,11 +86,14 @@
                         (if (buffer-live-p buffer)
                             (with-current-buffer buffer (buffer-string))
                           "")))
+               (limited (maduin-kiro--limited-tail-p output))
                (completed (and (eq (process-status process) 'exit)
                                (zerop (process-exit-status process))
                                (not (string-empty-p (string-trim output)))
                                (not (maduin-kiro--failure-tail-p output))))
-               (status (if completed 'completed 'failed)))
+               (status (cond (limited 'limited)
+                             (completed 'completed)
+                             (t 'failed))))
           (setq entry (plist-put entry :output output))
           (setq entry (plist-put entry :status status))
           ;; Mark before hooks: a hook may synchronously revisit this handle.
@@ -122,12 +139,12 @@ Kiro exposes no separate TUI process contract, so this shares `maduin-kiro-run'.
   (maduin-kiro-run root model agent prompt))
 
 (defun maduin-kiro-complete-p (handle)
-  "Return `running', `completed', or `failed' for HANDLE.
+  "Return `running', `completed', `limited', or `failed' for HANDLE.
 Unknown handles and dead processes that escaped their sentinel are failed."
   (let ((entry (maduin-kiro--entry handle)))
     (cond
      ((not entry) 'failed)
-     ((memq (plist-get entry :status) '(completed failed))
+     ((memq (plist-get entry :status) '(completed limited failed))
       (plist-get entry :status))
      ((process-live-p (plist-get entry :process)) 'running)
      (t 'failed))))
