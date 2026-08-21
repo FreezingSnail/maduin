@@ -13,6 +13,9 @@
 (defvar maduin-state-ttl 5.0
   "Default number of seconds a state snapshot remains fresh.")
 
+(defvar maduin-state-invalidate-hook nil
+  "Hook run with the invalidated KEY, or nil when every snapshot is reset.")
+
 (defun maduin-state--stamp-key (key)
   "Return the timestamp plist key for symbol KEY, or nil for malformed input."
   (when (symbolp key)
@@ -65,7 +68,8 @@ A snapshot exactly TTL seconds old remains fresh."
     (nreverse result)))
 
 (defun maduin-state-invalidate (&optional key)
-  "Drop KEY and its timestamp, or reset every snapshot when KEY is nil."
+  "Drop KEY and its timestamp, or reset every snapshot when KEY is nil.
+Runs `maduin-state-invalidate-hook' with KEY after the reset."
   (if (null key)
       (setq maduin-state--data nil)
     (let ((stamp-key (maduin-state--stamp-key key)))
@@ -73,7 +77,8 @@ A snapshot exactly TTL seconds old remains fresh."
         (setq maduin-state--data
               (maduin-state--remove
                stamp-key
-               (maduin-state--remove key maduin-state--data)))))))
+               (maduin-state--remove key maduin-state--data))))))
+  (run-hook-with-args 'maduin-state-invalidate-hook key))
 
 (provide 'maduin-state)
 

@@ -16,6 +16,7 @@
 
 (require 'maduin-session)
 (require 'maduin-pipeline)
+(require 'maduin-state)
 (require 'maduin-config)
 (require 'maduin-bd-bridge)
 (require 'maduin-dispatch)
@@ -149,6 +150,9 @@ across refreshes; it is cleared on task completion via
 
 (defvar-local maduin-cockpit--header-installed nil
   "Non-nil after the cockpit has installed its header line form.")
+
+(defvar-local maduin-cockpit--render-signature nil
+  "Hash of the rows and pipeline snapshot last rendered in this buffer.")
 
 (defun maduin-cockpit--task-title (task-id)
   "Return title string for TASK-ID via `bd show', or nil on failure.
@@ -347,9 +351,10 @@ backends reflect current runtime configuration.  Never signals."
           (nth 1 glyphs)
         (nth 2 glyphs)))))
 
-(defun maduin-cockpit--pipeline-summary ()
-  "Return pipeline stat chips (icon + label + count), space-separated."
-  (let ((ps (maduin-pipeline-status)))
+(defun maduin-cockpit--pipeline-summary (&optional status)
+  "Return STATUS pipeline stat chips (icon + label + count), space-separated.
+When STATUS is nil, read the current snapshot for compatibility callers."
+  (let ((ps (or status (maduin-pipeline-status))))
     (mapconcat
      (lambda (spec)
        (let* ((k (car spec))
@@ -359,11 +364,12 @@ backends reflect current runtime configuration.  Never signals."
          (if face (propertize chip 'face face) chip)))
      maduin-cockpit--chip-glyphs " ")))
 
-(defun maduin-cockpit--idle-p ()
-  "Return non-nil when no dispatch work or queued pipeline work exists."
+(defun maduin-cockpit--idle-p (&optional status)
+  "Return non-nil when no dispatch work or queued STATUS work exists.
+When STATUS is nil, read the current snapshot for compatibility callers."
   (condition-case nil
       (and (null maduin-dispatch--active)
-           (equal (plist-get (maduin-pipeline-status) :queued) 0))
+           (equal (plist-get (or status (maduin-pipeline-status)) :queued) 0))
     (error nil)))
 
 (defun maduin-cockpit--cue ()
@@ -377,8 +383,9 @@ backends reflect current runtime configuration.  Never signals."
         ((timerp maduin-dispatch--timer) "running")
         (t "stopped")))
 
-(defun maduin-cockpit--header-string ()
-  "Return cached-header content for the current cockpit state."
+(defun maduin-cockpit--header-string (&optional status)
+  "Return cached-header content for STATUS.
+When STATUS is nil, read the current snapshot for compatibility callers."
   (let* ((harness (cdr (assq 'harness maduin-config)))
          (name (or (cdr (assq 'name harness)) "maduin"))
          (version (or (cdr (assq 'version harness))
@@ -386,14 +393,17 @@ backends reflect current runtime configuration.  Never signals."
     (concat (propertize (format "%s %s · %s · "
                                name version (maduin-cockpit--run-state))
                         'face 'maduin-cockpit-header)
-            (maduin-cockpit--pipeline-summary))))
+            (maduin-cockpit--pipeline-summary status))))
 
-(defun maduin-cockpit--render-header ()
-  "Install the cheap header evaluator and update its cached string."
+(defun maduin-cockpit--render-header (status)
+  "Install the cheap header evaluator and update its cache from STATUS."
   (unless maduin-cockpit--header-installed
     (setq-local header-line-format '((:eval maduin-cockpit--header-cache)))
     (setq-local maduin-cockpit--header-installed t))
-  (setq-local maduin-cockpit--header-cache (maduin-cockpit--header-string)))
+  (let ((header (maduin-cockpit--header-string status)))
+    (unless (equal header maduin-cockpit--header-cache)
+      (setq-local maduin-cockpit--header-cache header)
+      (force-mode-line-update))))
 
 (defun maduin-cockpit--ensure-format ()
   "Establish the constant tabulated-list format without resetting sorting."
@@ -406,20 +416,21 @@ backends reflect current runtime configuration.  Never signals."
                   '("Model" 16 t)
                   '("Backend" 10 t)
                   '("Uptime" 10 t)
-                  '("Activity" 12 t)))))
+                  '("Activity" 12 t)))
+    (setq-local maduin-cockpit--render-signature nil)))
 
-(defun maduin-cockpit--print-rows ()
-  "Update table entries and print them while retaining the current row."
-  (setq tabulated-list-entries (maduin-cockpit--rows))
+(defun maduin-cockpit--print-rows (rows)
+  "Print ROWS while retaining the current row."
+  (setq tabulated-list-entries rows)
   (tabulated-list-print t))
 
-(defun maduin-cockpit--render-footer ()
-  "Render the empty-state cue after the seat table without moving point."
+(defun maduin-cockpit--render-footer (status)
+  "Render the empty-state cue for STATUS after the table without moving point."
   (condition-case nil
       (let ((inhibit-read-only t))
         (save-excursion
           (goto-char (point-max))
-          (when (maduin-cockpit--idle-p)
+          (when (maduin-cockpit--idle-p status)
             (insert "\n" (maduin-cockpit--cue)))))
     (error nil)))
 
@@ -438,25 +449,29 @@ Return the cockpit buffer."
     (with-current-buffer buf
       (add-hook 'kill-buffer-hook #'maduin-cockpit--stop-timer nil t))
     (maduin-cockpit--register-live-updates)
+    (maduin-pipeline-status-refresh #'maduin-cockpit--schedule-refresh)
     (maduin-cockpit-refresh)
     (maduin-cockpit--start-timer)
     (maduin-cockpit--embed-inbox)
     buf))
 
 (defun maduin-cockpit-refresh ()
-  "Refresh cockpit rows, cached header, and empty-state cue without jumping.
-The task-title cache persists across refreshes (titles are immutable
-within a task lifetime) and is only cleared on task completion.  Records
-the refresh time in `maduin-cockpit--last-refresh' so the focus-driven
-path can throttle rapid window switches."
+  "Render the current cockpit snapshot without synchronous pipeline I/O.
+Records the refresh time for focus throttling.  Rows and footer are rebuilt
+only when their rows-plus-status signature changes."
   (interactive)
   (setq maduin-cockpit--last-refresh (float-time))
   (let* ((window (get-buffer-window (current-buffer) 'visible))
-         (window-start (and (window-live-p window) (window-start window))))
+         (window-start (and (window-live-p window) (window-start window)))
+         (status (maduin-pipeline-status))
+         (rows (maduin-cockpit--rows))
+         (signature (sxhash-equal (list rows status))))
     (maduin-cockpit--ensure-format)
-    (maduin-cockpit--print-rows)
-    (maduin-cockpit--render-header)
-    (maduin-cockpit--render-footer)
+    (unless (equal signature maduin-cockpit--render-signature)
+      (maduin-cockpit--print-rows rows)
+      (maduin-cockpit--render-footer status)
+      (setq-local maduin-cockpit--render-signature signature))
+    (maduin-cockpit--render-header status)
     (when (and window-start (window-live-p window))
       (set-window-start window window-start t))))
 
@@ -487,6 +502,7 @@ it here unconditionally double-refreshes."
     (if (or (null buf) (null (get-buffer-window buf 'visible)))
         (maduin-cockpit--stop-timer)
       (with-current-buffer buf
+        (maduin-pipeline-status-refresh #'maduin-cockpit--schedule-refresh)
         (maduin-cockpit-refresh)
         (when chaplet-auto-refresh
           (maduin-cockpit--inbox-refresh))))))
@@ -536,6 +552,14 @@ When the inbox is absent, message politely and do nothing."
         (select-window win)
       (message "maduin-cockpit: no inbox present"))))
 
+(defun maduin-cockpit--invalidate-render-signatures (&rest _ignored)
+  "Force the next refresh to repaint every live cockpit buffer."
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-live-p buffer)
+               (local-variable-p 'maduin-cockpit--render-signature buffer))
+      (with-current-buffer buffer
+        (setq-local maduin-cockpit--render-signature nil)))))
+
 (defun maduin-cockpit--schedule-refresh ()
   "Schedule a debounced single-shot idle-timer refresh of the cockpit.
 No-op when the cockpit buffer is absent or not visible (buried/hidden),
@@ -559,6 +583,7 @@ a buried or absent buffer is a no-op."
       (let ((buf (get-buffer maduin-cockpit-buffer-name)))
         (when (and buf (get-buffer-window buf 'visible))
           (with-current-buffer buf
+            (maduin-pipeline-status-refresh #'maduin-cockpit--schedule-refresh)
             (maduin-cockpit-refresh))))
     (error nil)))
 
@@ -604,6 +629,10 @@ Wires the refresh-hook consumer, the session completion nudge, and the
 focus refresh (when `window-buffer-change-functions' is available;
 older Emacs falls back to the timer-only poll)."
   (add-hook 'maduin-cockpit-refresh-hook #'maduin-cockpit--schedule-refresh)
+  (add-hook 'maduin-state-invalidate-hook
+            #'maduin-cockpit--invalidate-render-signatures)
+  (add-hook 'maduin-cockpit-face-adapt-hook
+            #'maduin-cockpit--invalidate-render-signatures)
   (unless (memq #'maduin-cockpit--on-complete maduin-session-on-complete-hook)
     (add-hook 'maduin-session-on-complete-hook #'maduin-cockpit--on-complete))
   (when (boundp 'window-buffer-change-functions)

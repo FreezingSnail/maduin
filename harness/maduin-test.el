@@ -968,6 +968,134 @@
   (when (get-buffer "*maduin-cockpit*")
     (kill-buffer "*maduin-cockpit*")))
 
+(ert-deftest maduin-test-cockpit-refresh-no-subprocess ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-no-subprocess*"))
+        (maduin-dispatch--active nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'call-process)
+                   (lambda (&rest _) (error "unexpected subprocess")))
+                  ((symbol-function 'call-process-shell-command)
+                   (lambda (&rest _) (error "unexpected subprocess")))
+                  ((symbol-function 'make-process)
+                   (lambda (&rest _) (error "unexpected subprocess")))
+                  ((symbol-function 'maduin-pipeline-status)
+                   (lambda () '(:queued 0 :active 0 :completed 0 :blocked 0
+                                :fleet-free 0 :fleet-busy 0))))
+          (with-current-buffer buf
+            (tabulated-list-mode)
+            (maduin-cockpit-refresh)
+            (maduin-cockpit-refresh)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-refresh-single-status-read ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-one-status*"))
+        (reads 0)
+        (maduin-dispatch--active nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-pipeline-status)
+                   (lambda ()
+                     (cl-incf reads)
+                     '(:queued 0 :active 0 :completed 0 :blocked 0
+                       :fleet-free 0 :fleet-busy 0))))
+          (with-current-buffer buf
+            (tabulated-list-mode)
+            (maduin-cockpit-refresh)
+            (should (= reads 1))
+            (maduin-cockpit-refresh)
+            (should (= reads 2))))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-refresh-skips-print-when-unchanged ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-dirty-check*"))
+        (prints 0)
+        (maduin-dispatch--active nil))
+    (unwind-protect
+        (let ((print (symbol-function 'tabulated-list-print)))
+          (cl-letf (((symbol-function 'maduin-pipeline-status)
+                     (lambda () '(:queued 0 :active 0 :completed 0 :blocked 0
+                                  :fleet-free 0 :fleet-busy 0)))
+                    ((symbol-function 'tabulated-list-print)
+                     (lambda (&rest args)
+                       (cl-incf prints)
+                       (apply print args))))
+            (with-current-buffer buf
+              (tabulated-list-mode)
+              (maduin-cockpit-refresh)
+              (maduin-cockpit-refresh)
+              (should (= prints 1)))))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-refresh-prints-on-change ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-dirty-change*"))
+        (prints 0)
+        (status '(:queued 0 :active 0 :completed 0 :blocked 0
+                  :fleet-free 0 :fleet-busy 0))
+        (maduin-dispatch--active nil))
+    (unwind-protect
+        (let ((print (symbol-function 'tabulated-list-print)))
+          (cl-letf (((symbol-function 'maduin-pipeline-status)
+                     (lambda () status))
+                    ((symbol-function 'tabulated-list-print)
+                     (lambda (&rest args)
+                       (cl-incf prints)
+                       (apply print args))))
+            (with-current-buffer buf
+              (tabulated-list-mode)
+              (maduin-cockpit-refresh)
+              (setq status '(:queued 1 :active 0 :completed 0 :blocked 0
+                             :fleet-free 0 :fleet-busy 0))
+              (maduin-cockpit-refresh)
+              (should (= prints 2)))))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-header-cache-updates ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-header-cache*"))
+        (updates 0)
+        (status '(:queued 0 :active 0 :completed 0 :blocked 0
+                  :fleet-free 0 :fleet-busy 0))
+        (maduin-dispatch--active nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'force-mode-line-update)
+                   (lambda (&optional _) (cl-incf updates))))
+          (with-current-buffer buf
+            (tabulated-list-mode)
+            (setq updates 0)
+            (maduin-cockpit--render-header status)
+            (should (string-match-p "queued 0" maduin-cockpit--header-cache))
+            (should (= updates 1))
+            (maduin-cockpit--render-header status)
+            (should (= updates 1))
+            (setq status '(:queued 2 :active 0 :completed 0 :blocked 0
+                           :fleet-free 0 :fleet-busy 0))
+            (maduin-cockpit--render-header status)
+            (should (string-match-p "queued 2" maduin-cockpit--header-cache))
+            (should (= updates 2))))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-render-signature-invalidates-on-format-state-and-face ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-signature*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (tabulated-list-mode)
+          (setq-local maduin-cockpit--render-signature 'old)
+          (setq tabulated-list-format nil)
+          (maduin-cockpit--ensure-format)
+          (should-not maduin-cockpit--render-signature)
+          (setq-local maduin-cockpit--render-signature 'old)
+          (maduin-cockpit--register-live-updates)
+          (maduin-state-invalidate 'pipeline)
+          (should-not maduin-cockpit--render-signature)
+          (setq-local maduin-cockpit--render-signature 'old)
+          (run-hooks 'maduin-cockpit-face-adapt-hook)
+          (should-not maduin-cockpit--render-signature))
+      (kill-buffer buf))))
+
 (ert-deftest maduin-test-cockpit-refresh-no-error ()
   :tags '(maduin)
   (let ((buf (get-buffer-create "*maduin-cockpit*")))
@@ -1392,7 +1520,7 @@
                                     (maduin-cockpit--header-string)))))
       (cancel-timer timer))))
 
-(ert-deftest maduin-test-cockpit-live-refresh-preserves-position-sort-and-window ()
+(ert-deftest maduin-test-cockpit-refresh-preserves-point-and-window-start ()
   :tags '(maduin)
   (let* ((buf (generate-new-buffer " *maduin-cockpit-live-refresh*"))
          (window (selected-window))

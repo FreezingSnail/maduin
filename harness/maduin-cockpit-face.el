@@ -212,6 +212,9 @@ Mixes COLOR (18%) into the `default' face background for a subtle pill."
 (defvar maduin-cockpit-face--idle-timer nil
   "Pending idle timer for `maduin-cockpit-face-adapt'.")
 
+(defvar maduin-cockpit-face-adapt-hook nil
+  "Hook run after cockpit faces adapt to a theme.")
+
 (defun maduin-cockpit-face-adapt ()
   "Re-spec every cockpit face from the active dark/light palette.
 Idempotent, batch-safe, and never signals: failures are logged and
@@ -231,6 +234,7 @@ ignored (chaplet-face pattern).  Only calls `face-spec-set'."
                       :box t))
                `((t :foreground ,color)))
              'face-defface-spec)))
+        (run-hooks 'maduin-cockpit-face-adapt-hook)
         (message "maduin-cockpit-face: adapted palette (%s)" mode))
     (error (message "maduin-cockpit-face: adapt failed: %s"
                     (error-message-string err)))))
