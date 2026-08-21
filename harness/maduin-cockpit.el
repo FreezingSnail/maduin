@@ -135,6 +135,12 @@ Titles are immutable during a task lifetime, so the cache persists
 across refreshes; it is cleared on task completion via
 `maduin-cockpit--on-complete'.")
 
+(defvar-local maduin-cockpit--header-cache ""
+  "Cached header line rendered by `maduin-cockpit--render-header'.")
+
+(defvar-local maduin-cockpit--header-installed nil
+  "Non-nil after the cockpit has installed its header line form.")
+
 (defun maduin-cockpit--task-title (task-id)
   "Return title string for TASK-ID via `bd show', or nil on failure.
 Results are cached in `maduin-cockpit--title-cache'; failures are not.
@@ -190,13 +196,17 @@ cockpit refresh."
             (get-buffer (maduin-terminal--buffer-name 'concierge seat))))
     (error nil)))
 
+(defun maduin-cockpit--uptime (entry)
+  "Return elapsed seconds since ENTRY's :started timestamp, or nil."
+  (let ((started (plist-get entry :started)))
+    (and started (- (float-time) started))))
+
 (defun maduin-cockpit--seat-status (seat)
   "Return rich plist for SEAT:
 \(:seat :role :status :task-id :task-title :model :backend :uptime :phase).
 Fields come solely from the dispatch entry (`maduin-dispatch--active');
 no entry → idle row.  Active backends are launch-time values; idle
-backends reflect current runtime configuration.  :phase stays nil until
-sessions expose it.  Never signals."
+backends reflect current runtime configuration.  Never signals."
   (let* ((entry (cl-find-if (lambda (e) (equal (plist-get e :seat) seat))
                             maduin-dispatch--active))
          (role (maduin-cockpit--seat-role seat)))
@@ -214,8 +224,10 @@ sessions expose it.  Never signals."
           :backend (if entry
                        (plist-get entry :backend)
                      (and role (maduin-config-seat-backend role seat)))
-          :uptime (and entry (plist-get entry :uptime))
-          :phase nil)))
+          :uptime (and entry
+                       (or (maduin-cockpit--uptime entry)
+                           (plist-get entry :uptime)))
+          :phase (and entry (plist-get entry :phase)))))
 
 (defun maduin-cockpit--task-string (status)
   "Return \"TASK-ID — TITLE\" from rich STATUS plist, or \"—\"."
@@ -226,9 +238,17 @@ sessions expose it.  Never signals."
           (t (format "%s —" id)))))
 
 (defun maduin-cockpit--uptime-string (status)
-  "Return integer uptime seconds from STATUS plist, or \"—\"."
+  "Return formatted elapsed uptime from STATUS, or \"—\" when absent."
   (let ((uptime (and status (plist-get status :uptime))))
-    (if uptime (number-to-string (round uptime)) "—")))
+    (if (null uptime)
+        "—"
+      (let* ((seconds (max 0 (floor uptime)))
+             (hours (/ seconds 3600))
+             (minutes (% (/ seconds 60) 60))
+             (secs (% seconds 60)))
+        (if (> hours 0)
+            (format "%02d:%02d:%02d" hours minutes secs)
+          (format "%02d:%02d" minutes secs))))))
 
 (defun maduin-cockpit--rows ()
   "Return tabulated-list rows for all configured seats."
@@ -298,14 +318,54 @@ Each chip carries its `maduin-cockpit-chip-face' text property."
   (propertize "no work in flight · [a] summon concierge · [c] config"
               'face 'maduin-cockpit-cue))
 
+(defun maduin-cockpit--run-state ()
+  "Return the current dispatch run state as a display string."
+  (cond (maduin-dispatch--draining "draining")
+        ((timerp maduin-dispatch--timer) "running")
+        (t "stopped")))
+
+(defun maduin-cockpit--header-string ()
+  "Return cached-header content for the current cockpit state."
+  (let* ((harness (cdr (assq 'harness maduin-config)))
+         (name (or (cdr (assq 'name harness)) "maduin"))
+         (version (or (cdr (assq 'version harness)) "—")))
+    (format "%s %s · %s · %s"
+            name version (maduin-cockpit--run-state)
+            (maduin-cockpit--pipeline-summary))))
+
+(defun maduin-cockpit--render-header ()
+  "Install the cheap header evaluator and update its cached string."
+  (unless maduin-cockpit--header-installed
+    (setq-local header-line-format '((:eval maduin-cockpit--header-cache)))
+    (setq-local maduin-cockpit--header-installed t))
+  (setq-local maduin-cockpit--header-cache (maduin-cockpit--header-string)))
+
+(defun maduin-cockpit--ensure-format ()
+  "Establish the constant tabulated-list format without resetting sorting."
+  (unless tabulated-list-format
+    (setq tabulated-list-format
+          (vector '("Seat" 13 t)
+                  '("Role" 9 t)
+                  '("Status" 12 t)
+                  '("Task" 30 nil)
+                  '("Model" 16 t)
+                  '("Backend" 10 t)
+                  '("Uptime" 10 t)
+                  '("Activity" 12 t)))))
+
+(defun maduin-cockpit--print-rows ()
+  "Update table entries and print them while retaining the current row."
+  (setq tabulated-list-entries (maduin-cockpit--rows))
+  (tabulated-list-print t))
+
 (defun maduin-cockpit--render-footer ()
-  "Render all content after the seat table without disturbing row ids."
+  "Render the empty-state cue after the seat table without moving point."
   (condition-case nil
       (let ((inhibit-read-only t))
-        (goto-char (point-max))
-        (insert (maduin-cockpit--pipeline-summary))
-        (when (maduin-cockpit--idle-p)
-          (insert "\n" (maduin-cockpit--cue))))
+        (save-excursion
+          (goto-char (point-max))
+          (when (maduin-cockpit--idle-p)
+            (insert "\n" (maduin-cockpit--cue)))))
     (error nil)))
 
 ;;;###autoload
@@ -329,26 +389,21 @@ Return the cockpit buffer."
     buf))
 
 (defun maduin-cockpit-refresh ()
-  "Rebuild cockpit rows and pipeline chip summary.
+  "Refresh cockpit rows, cached header, and empty-state cue without jumping.
 The task-title cache persists across refreshes (titles are immutable
-during a task lifetime) and is only cleared on task completion.
-Records the refresh time in `maduin-cockpit--last-refresh' so the
-focus-driven path can throttle rapid window switches."
+within a task lifetime) and is only cleared on task completion.  Records
+the refresh time in `maduin-cockpit--last-refresh' so the focus-driven
+path can throttle rapid window switches."
   (interactive)
   (setq maduin-cockpit--last-refresh (float-time))
-  (setq tabulated-list-format
-        (vector '("Seat" 13 t)
-                '("Role" 9 t)
-                '("Status" 12 t)
-                '("Task" 30 nil)
-                '("Model" 16 t)
-                '("Backend" 10 t)
-                '("Uptime(s)" 10 t)
-                '("Activity" 12 t)))
-  (setq tabulated-list-entries (maduin-cockpit--rows))
-  (tabulated-list-print t)
-  (maduin-cockpit--render-footer)
-  (goto-char (point-min)))
+  (let* ((window (get-buffer-window (current-buffer) 'visible))
+         (window-start (and (window-live-p window) (window-start window))))
+    (maduin-cockpit--ensure-format)
+    (maduin-cockpit--print-rows)
+    (maduin-cockpit--render-header)
+    (maduin-cockpit--render-footer)
+    (when (and window-start (window-live-p window))
+      (set-window-start window window-start t))))
 
 (defun maduin-cockpit--start-timer ()
   "Ensure the cockpit auto-refresh timer is running."

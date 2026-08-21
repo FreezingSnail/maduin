@@ -1029,7 +1029,7 @@
           (should (equal (elt (aref tabulated-list-format 3) 0) "Task"))
           (should (equal (elt (aref tabulated-list-format 4) 0) "Model"))
           (should (equal (elt (aref tabulated-list-format 5) 0) "Backend"))
-          (should (equal (elt (aref tabulated-list-format 6) 0) "Uptime(s)"))
+          (should (equal (elt (aref tabulated-list-format 6) 0) "Uptime"))
           (should (equal (elt (aref tabulated-list-format 7) 0) "Activity"))
           (should (equal maduin-cockpit--title-cache
                          (list (cons "stale" "old")))))
@@ -1062,6 +1062,93 @@
           (should (= (length maduin-cockpit--title-cache) 2)))
       (kill-buffer buf)
       (setq maduin-cockpit--title-cache nil))))
+
+(ert-deftest maduin-test-cockpit-live-derived-uptime-phase-and-status ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--active
+         (list (list :seat "ifrit" :role 'implementer :status 'repairing
+                     :phase "tool" :started 100.0))))
+    (cl-letf (((symbol-function 'float-time) (lambda () 347.0)))
+      (let ((status (maduin-cockpit--seat-status "ifrit")))
+        (should (= (plist-get status :uptime) 247.0))
+        (should (equal (maduin-cockpit--uptime-string status) "04:07"))
+        (should (equal (plist-get status :phase) "tool"))
+        (should (equal (maduin-cockpit--status-pill
+                        (plist-get status :status)) "repairing")))))
+  (should (equal (maduin-cockpit--uptime-string '(:uptime 3847))
+                 "01:04:07"))
+  (should (equal (maduin-cockpit--uptime-string '(:uptime nil)) "—")))
+
+(ert-deftest maduin-test-cockpit-live-header-holds-chips-not-body ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-live-header*"))
+        (maduin-dispatch--active nil)
+        (maduin-dispatch--timer nil)
+        (maduin-dispatch--draining nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-cockpit--seats)
+                   (lambda () '(("alexander" . "concierge"))))
+                  ((symbol-function 'maduin-pipeline-status)
+                   (lambda () '(:queued 2 :active 1 :completed 3 :blocked 4
+                                :fleet-free 5 :fleet-busy 6))))
+          (with-current-buffer buf
+            (tabulated-list-mode)
+            (maduin-cockpit-refresh)
+            (should (equal header-line-format
+                           '((:eval maduin-cockpit--header-cache))))
+            (should (string-match-p "maduin 0.3.0 · stopped" 
+                                    maduin-cockpit--header-cache))
+            (should (string-match-p "queued 2" maduin-cockpit--header-cache))
+            (should-not (string-match-p "queued 2" (buffer-string)))))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-live-header-run-state ()
+  :tags '(maduin)
+  (let ((timer (run-at-time 60 nil #'ignore)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-pipeline-status)
+                   (lambda () '(:queued 0 :active 0 :completed 0 :blocked 0
+                                :fleet-free 0 :fleet-busy 0))))
+          (let ((maduin-dispatch--timer timer)
+                (maduin-dispatch--draining nil))
+            (should (string-match-p " · running ·"
+                                    (maduin-cockpit--header-string))))
+          (let ((maduin-dispatch--timer nil)
+                (maduin-dispatch--draining t))
+            (should (string-match-p " · draining ·"
+                                    (maduin-cockpit--header-string)))))
+      (cancel-timer timer))))
+
+(ert-deftest maduin-test-cockpit-live-refresh-preserves-position-sort-and-window ()
+  :tags '(maduin)
+  (let* ((buf (generate-new-buffer " *maduin-cockpit-live-refresh*"))
+         (window (selected-window))
+         (original (window-buffer window))
+         (maduin-dispatch--active nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-cockpit--seats)
+                   (lambda () '(("alexander" . "concierge")
+                                ("ramuh" . "designer")
+                                ("ifrit" . "implementer"))))
+                  ((symbol-function 'maduin-pipeline-status)
+                   (lambda () '(:queued 0 :active 0 :completed 0 :blocked 0
+                                :fleet-free 0 :fleet-busy 0))))
+          (set-window-buffer window buf)
+          (with-current-buffer buf
+            (tabulated-list-mode)
+            (maduin-cockpit-refresh)
+            (goto-char (point-min))
+            (search-forward "ifrit")
+            (setq tabulated-list-sort-key '("Role" . nil))
+            (let ((point-before (point))
+                  (start-before (window-start window)))
+              (maduin-cockpit-refresh)
+              (maduin-cockpit-refresh)
+              (should (= (point) point-before))
+              (should (equal tabulated-list-sort-key '("Role" . nil)))
+              (should (= (window-start window) start-before)))))
+      (set-window-buffer window original)
+      (kill-buffer buf))))
 
 ;;; 8d. cockpit-live
 
