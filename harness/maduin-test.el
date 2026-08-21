@@ -3163,6 +3163,58 @@
           (should-not maduin-dispatch--active))
       (delete-directory dir t))))
 
+(ert-deftest maduin-test-backend-resolve-uses-concrete-config-precedence ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config))
+        (maduin-backend-registry (make-hash-table :test #'eq)))
+    (unwind-protect
+        (progn
+          (maduin-backend-register 'opencode (maduin-test--backend-adapter))
+          (maduin-backend-register 'kiro (maduin-test--backend-adapter))
+          (setcdr (assq 'backend (cdr (assq 'fleet maduin-config))) 'kiro)
+          (maduin-config-set-seat-backend 'implementer "ifrit" 'opencode)
+          (should (eq (maduin-backend-resolve 'implementer "ifrit") 'opencode))
+          (should (eq (maduin-backend-resolve 'implementer "shiva") 'kiro))
+          (setcdr (assq 'backend (cdr (assq 'fleet maduin-config))) 'invalid)
+          (should (eq (maduin-backend-resolve 'implementer "shiva") 'opencode)))
+      (clrhash maduin-backend-registry))))
+
+(ert-deftest maduin-test-session-opencode-adapter-keeps-four-argument-protocol ()
+  :tags '(maduin)
+  (let ((maduin-backend-registry (make-hash-table :test #'eq))
+        (received nil))
+    (unwind-protect
+        (progn
+          (maduin-backend-register
+           'opencode
+           (list :executable "opencode"
+                 :run-fn #'maduin-session--opencode-run
+                 :tui-fn #'maduin-session--opencode-tui
+                 :complete-p-fn #'maduin-session-complete-p
+                 :diff-fn #'maduin-session-diff
+                 :delete-fn #'maduin-session-delete))
+          (cl-letf (((symbol-function 'maduin-session--opencode-run)
+                     (lambda (&rest args) (setq received args) 'handle)))
+            (should (eq (maduin-backend-run 'opencode "/work" "model"
+                                            "agent" "plan")
+                        'handle))
+            (should (equal received '("/work" "model" "agent" "plan")))))
+      (clrhash maduin-backend-registry))))
+
+(ert-deftest maduin-test-kiro-completion-statuses-remain-local ()
+  :tags '(maduin)
+  (let ((maduin-kiro--registry (make-hash-table :test #'equal)))
+    (puthash "running" (list :process 'process :status 'running :done nil)
+             maduin-kiro--registry)
+    (puthash "limited" (list :process 'process :status 'limited :done t)
+             maduin-kiro--registry)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t)))
+      (should (eq (maduin-kiro-complete-p "running") 'running)))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) nil)))
+      (should (eq (maduin-kiro-complete-p "running") 'failed)))
+    (should (eq (maduin-kiro-complete-p "limited") 'limited))
+    (should (eq (maduin-kiro-complete-p "unknown") 'failed))))
+
 (provide 'maduin-test)
 
 ;;; maduin-test.el ends here
