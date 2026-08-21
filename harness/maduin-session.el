@@ -317,15 +317,23 @@ when the opencode session was deleted, nil otherwise."
             (and res (= 0 (car res))))
         nil))))
 
-(defun maduin-session--opencode-tui-unavailable (&rest _args)
-  "Return nil: interactive opencode TUI ownership remains in `maduin-terminal'."
-  nil)
+(defun maduin-session--opencode-tui (root model _agent prompt)
+  "Return the established OpenCode TUI command for ROOT, MODEL, and PROMPT.
+AGENT is deliberately ignored: OpenCode's historical interactive command
+never included it, and preserving that command is part of this adapter's
+compatibility contract."
+  (mapconcat #'identity
+             (list (or (bound-and-true-p maduin-opencode-command) "opencode")
+                   (shell-quote-argument root)
+                   "-m" (shell-quote-argument model)
+                   "--prompt" (shell-quote-argument prompt))
+             " "))
 
 (maduin-backend-register
  'opencode
  (list :executable (or maduin-opencode-command "opencode")
        :run-fn #'maduin-session--opencode-run
-       :tui-fn #'maduin-session--opencode-tui-unavailable
+       :tui-fn #'maduin-session--opencode-tui
        :complete-p-fn #'maduin-session-complete-p
        :diff-fn #'maduin-session-diff
        :delete-fn #'maduin-session-delete))

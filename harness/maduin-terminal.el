@@ -22,6 +22,7 @@
 (add-to-list 'load-path maduin-terminal--dir)
 
 (require 'maduin-config)
+(require 'maduin-backend)
 
 ;; Optional vterm dependency (declared to keep byte-compile clean).
 (declare-function vterm "vterm" (&optional arg))
@@ -39,9 +40,20 @@
 (defvar maduin-terminal-role nil)
 (defvar maduin-terminal-model nil)
 (defvar maduin-terminal-root nil)
+(defvar maduin-terminal-backend nil)
 (defvar maduin-terminal-session-id nil)
 (defvar maduin-terminal-started-at nil)
 (defvar maduin-terminal-known-ids nil)
+
+(defun maduin-terminal--backend-tui (backend root model agent prompt)
+  "Open BACKEND TUI with ROOT, MODEL, AGENT, and PROMPT."
+  (maduin-backend-tui backend root model prompt agent))
+
+(defvar maduin-terminal--tui-fn #'maduin-terminal--backend-tui
+  "Function `(backend root model agent prompt)' → command or opaque handle.")
+
+(defvar maduin-terminal--delete-fn #'maduin-backend-delete
+  "Function `(backend sid)' → boolean.")
 
 ;;; Pure helpers (unit-testable)
 
@@ -168,6 +180,20 @@ SINCE is a minimum created time (epoch seconds); EXCLUDE ids to skip."
   (format "<!-- maduin interactive session export -->\n# Interactive session %s\n\nExported: %s\n\n```json\n%s\n```\n"
           sid (format-time-string "%Y-%m-%dT%H:%M:%S%z" (current-time)) json))
 
+(defun maduin-terminal--agent (role)
+  "Return configured agent for ROLE, or nil."
+  (let ((section (cdr (assq role maduin-config--role-sections))))
+    (and section (cdr (assq 'agent (cdr (assq section maduin-config)))))))
+
+(defun maduin-terminal--local-handoff-note (backend sid)
+  "Return clear handoff text for BACKEND without an export API."
+  (format "<!-- maduin interactive session -->\n# Interactive session %s\n\nBackend: %s\n\nNo conversation export is available; local session %s was dismissed.\n"
+          (or sid "unknown") backend (or sid "unknown")))
+
+(defun maduin-terminal--open-local-buffer (role seat)
+  "Create a visible local buffer for non-terminal backend ROLE/SEAT."
+  (get-buffer-create (maduin-terminal--buffer-name role seat)))
+
 ;;; Terminal backend I/O
 
 (defun maduin-terminal--open-buffer (backend role seat)
@@ -240,41 +266,63 @@ under ROOT directly.  Return t on success, nil on failure."
 
 ;;;###autoload
 (defun maduin-terminal-open (seat role model)
-  "Open an interactive opencode TUI for SEAT (ROLE, MODEL) in a
-terminal buffer (vterm preferred, term fallback), primed with the role
-template.  Return the buffer."
-  (let* ((backend (maduin-terminal--backend))
+  "Open configured BACKEND for SEAT/ROLE; return its visible buffer.
+The public MODEL argument remains compatible, but a selected backend always
+uses its configured backend-specific model."
+  (let* ((backend (maduin-backend-resolve role seat))
+         (selected-model (and backend
+                              (maduin-config-seat-model role seat backend)))
          (root (maduin-project-root))
-         (prompt (maduin-terminal--prompt seat role model))
-         (cmd (maduin-terminal--command-line root model prompt))
-         (buf (maduin-terminal--open-buffer backend role seat)))
-    (with-current-buffer buf
-      (setq-local maduin-terminal-seat seat)
-      (setq-local maduin-terminal-role (maduin-terminal--role-name role))
-      (setq-local maduin-terminal-model model)
-      (setq-local maduin-terminal-root root)
-      (setq-local maduin-terminal-session-id nil)
-      (setq-local maduin-terminal-started-at (float-time))
-      (setq-local maduin-terminal-known-ids
-                  (maduin-terminal--session-ids root)))
-    (maduin-terminal--send buf backend cmd)
-    buf))
+         (agent (maduin-terminal--agent role))
+         (prompt (maduin-terminal--prompt seat role (or selected-model model))))
+    (unless backend
+      (user-error "maduin: no backend available for %s/%s" role seat))
+    (let ((result (funcall maduin-terminal--tui-fn
+                           backend root selected-model agent prompt)))
+      (unless result
+        (user-error "maduin: failed to start %s backend" backend))
+      (let ((transport (and (eq backend 'opencode) (maduin-terminal--backend)))
+            (buf nil))
+        (setq buf (if transport
+                      (maduin-terminal--open-buffer transport role seat)
+                    (maduin-terminal--open-local-buffer role seat)))
+        (with-current-buffer buf
+          (setq-local maduin-terminal-seat seat)
+          (setq-local maduin-terminal-role (maduin-terminal--role-name role))
+          (setq-local maduin-terminal-model selected-model)
+          (setq-local maduin-terminal-root root)
+          (setq-local maduin-terminal-backend backend)
+          (setq-local maduin-terminal-session-id
+                      (unless (eq backend 'opencode) result))
+          (setq-local maduin-terminal-started-at (float-time))
+          (setq-local maduin-terminal-known-ids
+                      (and (eq backend 'opencode)
+                           (maduin-terminal--session-ids root))))
+        (when transport
+          (maduin-terminal--send buf transport result))
+        buf))))
 
 ;;;###autoload
 (defun maduin-terminal-dismiss (seat)
-  "Dismiss the interactive session for SEAT.
-Export the opencode conversation to .agents/handoff/SEAT.md, then kill
-the terminal buffer.  Return the handoff note string, or nil."
+  "Dismiss SEAT and write its handoff without crossing backend APIs."
   (let ((buf (maduin-terminal--find-buffer seat)))
     (when buf
       (let* ((root (or (buffer-local-value 'maduin-terminal-root buf)
                        (maduin-project-root)))
+             (backend (buffer-local-value 'maduin-terminal-backend buf))
              (started (buffer-local-value 'maduin-terminal-started-at buf))
              (known (buffer-local-value 'maduin-terminal-known-ids buf))
-             (sid (or (buffer-local-value 'maduin-terminal-session-id buf)
-                      (maduin-terminal--session-id root started known)))
-             (json (and sid (maduin-terminal--export sid)))
-             (note (and json (maduin-terminal--handoff-note sid json))))
+             (saved (buffer-local-value 'maduin-terminal-session-id buf))
+             (sid (if (eq backend 'opencode)
+                      (or saved (maduin-terminal--session-id root started known))
+                    saved))
+             (note
+              (if (eq backend 'opencode)
+                  (let ((json (and sid (maduin-terminal--export sid))) )
+                    (and json (maduin-terminal--handoff-note sid json)))
+                (prog1 (maduin-terminal--local-handoff-note backend sid)
+                  (when sid
+                    (funcall maduin-terminal--delete-fn backend sid))))))
         (when note
           (maduin-terminal--write-handoff seat note root))
         (maduin-terminal--kill-buffer buf)

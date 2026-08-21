@@ -31,20 +31,33 @@
 
 (require 'maduin-config)
 (require 'maduin-session)
+(require 'maduin-backend)
 (require 'maduin-bd-bridge)
 (require 'maduin-workspace)
 (require 'maduin-pipeline)
 
 ;;; Injection seams (function-valued defvars; tests let-bind these).
 
-(defvar maduin-dispatch--session-run-fn #'maduin-session-run
-  "Function `(workdir model agent plan)' → session handle | nil.")
+(defun maduin-dispatch--backend-run (workdir model agent plan backend)
+  "Run BACKEND in WORKDIR with MODEL, AGENT, and PLAN."
+  (maduin-backend-run backend workdir model agent plan))
 
-(defvar maduin-dispatch--session-delete-fn #'maduin-session-delete
-  "Function `(sid)' → boolean.")
+(defun maduin-dispatch--backend-diff (backend sid)
+  "Return BACKEND's diff for opaque session SID."
+  (maduin-backend-diff backend sid))
 
-(defvar maduin-dispatch--diff-fn #'maduin-session-diff
-  "Function `(sid)' → list of diff alists | nil.")
+(defun maduin-dispatch--backend-delete (backend sid)
+  "Delete opaque session SID through its stored BACKEND."
+  (maduin-backend-delete backend sid))
+
+(defvar maduin-dispatch--session-run-fn #'maduin-dispatch--backend-run
+  "Function `(workdir model agent plan backend)' → session handle | nil.")
+
+(defvar maduin-dispatch--session-delete-fn #'maduin-dispatch--backend-delete
+  "Function `(backend sid)' → boolean.")
+
+(defvar maduin-dispatch--diff-fn #'maduin-dispatch--backend-diff
+  "Function `(backend sid)' → list of diff alists | nil.")
 
 (defvar maduin-dispatch--land-fn #'maduin-pipeline-land-branch
   "Function `(seat)' → t | `conflict' | nil.")
@@ -138,13 +151,16 @@ The run-loop picks up no new work while draining.")
                                  seats))))
     (or (and entry (alist-get 'model entry)) "default")))
 
-(defun maduin-dispatch--seat-model-for (role seat)
-  "Return model for ROLE seat SEAT."
-  (pcase role
-    ('implementer (maduin-dispatch--seat-model 'fleet seat))
-    ('designer (maduin-dispatch--seat-model 'designer seat))
-    ('repairer (or (maduin-dispatch--config-get 'repairer 'model) "default"))
-    (_ "default")))
+(defun maduin-dispatch--seat-model-for (role seat &optional backend)
+  "Return configured model for ROLE seat SEAT and optional BACKEND.
+Without BACKEND retain the historical OpenCode lookup for compatibility."
+  (if backend
+      (maduin-config-seat-model role seat backend)
+    (pcase role
+      ('implementer (maduin-dispatch--seat-model 'fleet seat))
+      ('designer (maduin-dispatch--seat-model 'designer seat))
+      ('repairer (or (maduin-dispatch--config-get 'repairer 'model) "default"))
+      (_ "default"))))
 
 (defun maduin-dispatch--seat-agent-for (role)
   "Return agent string for ROLE, or nil."
@@ -249,35 +265,52 @@ PLAN overrides the role's default plan string (designer owns its prompt)."
       (when (and seat (funcall maduin-dispatch--claim-fn task))
         (maduin-dispatch--spawn-session task role seat model plan nil)))))
 
-(defun maduin-dispatch--spawn-session (task role seat model plan fallback-attempted)
-  "Spawn one ROLE session for TASK at SEAT (task already claimed) and
-register it in `maduin-dispatch--active'.  MODEL and PLAN override the
-seat defaults when non-nil.  FALLBACK-ATTEMPTED flags a re-dispatch
-using the seat's fallback model.  Return handle, or nil on spawn failure."
-  (let* ((model (or model (maduin-dispatch--seat-model-for role seat)))
-         (agent (maduin-dispatch--seat-agent-for role))
-         (workdir (funcall maduin-dispatch--workdir-fn seat))
-         (plan (or plan (maduin-dispatch--plan-for role task seat)))
-         (sid (funcall maduin-dispatch--session-run-fn workdir model agent plan)))
-    (when sid
-      (push (list :handle sid :seat seat :role role :task task
-                  :model model :fallback-attempted fallback-attempted)
-            maduin-dispatch--active)
-      (when (boundp 'maduin-cockpit-refresh-hook)
-        (run-hook-with-args 'maduin-cockpit-refresh-hook))
-      sid)))
+(defun maduin-dispatch--spawn-session (task role seat model plan fallback-attempted
+                                            &optional backend)
+  "Spawn one claimed TASK for ROLE at SEAT and register its BACKEND.
+MODEL and PLAN override configured values.  BACKEND is resolved once for a
+new launch, then retained for fallback and completion lifecycle calls."
+  (let ((backend (or backend (maduin-backend-resolve role seat))))
+    (condition-case nil
+        (let* ((model (or model (maduin-dispatch--seat-model-for role seat backend)))
+               (agent (maduin-dispatch--seat-agent-for role))
+               (workdir (funcall maduin-dispatch--workdir-fn seat))
+               (plan (or plan (maduin-dispatch--plan-for role task seat)))
+               (sid (and backend
+                         (funcall maduin-dispatch--session-run-fn
+                                  workdir model agent plan backend))))
+          (if sid
+              (progn
+                (push (list :handle sid :seat seat :role role :task task
+                            :model model :backend backend
+                            :fallback-attempted fallback-attempted)
+                      maduin-dispatch--active)
+                (when (boundp 'maduin-cockpit-refresh-hook)
+                  (run-hook-with-args 'maduin-cockpit-refresh-hook))
+                sid)
+            (funcall maduin-dispatch--comment-fn
+                     task "session failed — task left open")
+            (funcall maduin-dispatch--release-fn task)
+            nil))
+      (error
+       (funcall maduin-dispatch--comment-fn task "session failed — task left open")
+       (funcall maduin-dispatch--release-fn task)
+       nil))))
 
 ;;; Completion → land → close
 
 (defun maduin-dispatch--format-diffs (diffs)
-  "Format DIFFS (list of diff alists) into a close-output string."
-  (if (null diffs)
-      "no diffs reported"
+  "Format adapter DIFFS into a close-output string.
+OpenCode returns diff alists; Kiro returns a worktree diff string."
+  (cond
+   ((null diffs) "no diffs reported")
+   ((stringp diffs) diffs)
+   (t
     (mapconcat (lambda (d)
                  (format "%s:\n%s"
                          (or (cdr (assq 'file d)) "?")
                          (or (cdr (assq 'patch d)) "")))
-               diffs "\n\n")))
+               diffs "\n\n"))))
 
 (defun maduin-dispatch--complete (entry sid)
   "Handle successful completion of session for ENTRY (plist) with SID.
@@ -288,7 +321,8 @@ close: the epic stays open until its children are implemented."
   (let* ((seat (plist-get entry :seat))
          (task (plist-get entry :task))
          (role (plist-get entry :role))
-         (diffs (funcall maduin-dispatch--diff-fn sid))
+         (backend (plist-get entry :backend))
+         (diffs (funcall maduin-dispatch--diff-fn backend sid))
          (output (maduin-dispatch--format-diffs diffs))
          (land (condition-case nil
                    (funcall maduin-dispatch--land-fn seat)
@@ -320,8 +354,10 @@ fallback model (and has not already used it) is instead re-dispatched
 with the fallback model, keeping the claim in place."
   (let ((role (plist-get entry :role))
         (seat (plist-get entry :seat))
-        (task (plist-get entry :task)))
-    (if (and (not (plist-get entry :fallback-attempted))
+        (task (plist-get entry :task))
+        (backend (plist-get entry :backend)))
+    (if (and (eq backend 'opencode)
+             (not (plist-get entry :fallback-attempted))
              (maduin-session-usage-limited-p sid)
              (maduin-dispatch--seat-fallback role))
         (progn
@@ -329,7 +365,7 @@ with the fallback model, keeping the claim in place."
                    task "usage limit — retrying with fallback model")
           (maduin-dispatch--spawn-session
            task 'implementer seat
-           (maduin-dispatch--seat-fallback role) nil t))
+           (maduin-dispatch--seat-fallback role) nil t backend))
       (funcall maduin-dispatch--comment-fn task "session failed — task left open")
       (funcall maduin-dispatch--release-fn task))))
 
@@ -347,7 +383,8 @@ while work is in flight)."
           (if (eq status 'completed)
               (maduin-dispatch--complete entry sid)
             (maduin-dispatch--fail entry sid))
-        (funcall maduin-dispatch--session-delete-fn sid))
+        (funcall maduin-dispatch--session-delete-fn
+                 (plist-get entry :backend) sid))
       (maduin-dispatch--maybe-drained)
       (when (boundp 'maduin-cockpit-refresh-hook)
         (run-hook-with-args 'maduin-cockpit-refresh-hook)))))
@@ -439,7 +476,8 @@ concurrency cap is reached.  No-op while draining (soft stop in progress)."
   "Delete all in-flight sessions and clear the registry.
 Tasks are left open; their worktree changes persist for the next run."
   (dolist (entry (copy-sequence maduin-dispatch--active))
-    (funcall maduin-dispatch--session-delete-fn (plist-get entry :handle)))
+    (funcall maduin-dispatch--session-delete-fn
+             (plist-get entry :backend) (plist-get entry :handle)))
   (setq maduin-dispatch--active nil))
 
 (defun maduin-dispatch-start ()

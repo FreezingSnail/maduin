@@ -1035,7 +1035,7 @@
          (count 0)
          (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count)))))
          (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir)))
@@ -1053,10 +1053,10 @@
          (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count)))))
          (maduin-dispatch--active
           (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1")))
-         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
          (maduin-dispatch--land-fn (lambda (_seat) t))
          (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
-         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
         (progn
           (maduin-dispatch--on-complete "s-1" 'completed)
@@ -1816,7 +1816,7 @@
           (list (list :handle "s-ifrit" :seat "ifrit" :role 'implementer :task "t0")
                 (list :handle "s-shiva" :seat "shiva" :role 'implementer :task "t0")))
          (maduin-dispatch--session-run-fn
-          (lambda (_w _m _a _p)
+          (lambda (_w _m _a _p _b)
             (setq run-count (1+ run-count))
             (format "s-%d" run-count)))
          (maduin-dispatch--claim-fn (lambda (_t) t))
@@ -1843,16 +1843,16 @@
          (closed nil)
          (deleted '())
          (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn
-          (lambda (_sid) (list '((file . "a.el") (patch . "+x")))))
+          (lambda (_backend _sid) (list '((file . "a.el") (patch . "+x")))))
          (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
          (maduin-dispatch--landed-fn (lambda (_seat) t))
          (maduin-dispatch--close-fn (lambda (task out &optional _dir) (setq closed (cons task out)) t))
-         (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend sid) (push sid deleted) t)))
     (unwind-protect
         (progn
           (should (equal (maduin-dispatch-implement "t1") "s-1"))
@@ -1871,14 +1871,14 @@
          (released nil)
          (closed nil)
          (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
           (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
-         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
         (progn
           (maduin-dispatch-implement "t1")
@@ -1899,18 +1899,18 @@
          (released nil)
          (closed nil)
          (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-landed"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-landed"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--diff-fn
-          (lambda (_sid) (list '((file . "a.el") (patch . "+x")))))
+          (lambda (_backend _sid) (list '((file . "a.el") (patch . "+x")))))
          (maduin-dispatch--land-fn (lambda (_seat) t))
          (maduin-dispatch--landed-fn (lambda (_seat) nil))
          (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
          (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
-         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
         (progn
           (maduin-dispatch-implement "t1")
@@ -1933,7 +1933,7 @@
          (released nil)
          (maduin-dispatch--active nil)
          (maduin-dispatch--session-run-fn
-          (lambda (_w m _a _p)
+          (lambda (_w m _a _p _b)
             (setq run-count (1+ run-count))
             (setq last-model m)
             (format "s-%d" run-count)))
@@ -1942,7 +1942,7 @@
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
-         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
         (cl-letf (((symbol-function 'maduin-session-usage-limited-p)
                    (lambda (_sid) t)))
@@ -1970,17 +1970,17 @@
          (commented nil)
          (maduin-dispatch--active nil)
          (maduin-dispatch--session-run-fn
-          (lambda (_w _m _a _p)
+          (lambda (_w _m _a _p _b)
             (setq run-count (1+ run-count))
             (format "s-%d" run-count)))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
-         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
          (maduin-dispatch--land-fn (lambda (_seat) 'conflict))
          (maduin-dispatch--comment-fn (lambda (task text) (setq commented (cons task text)) t))
          (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
-         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
         (progn
           (maduin-dispatch-implement "t1")   ; run-count 1, seat ifrit
@@ -2000,16 +2000,16 @@
          (released nil)
          (closed nil)
          (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
-         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
          (maduin-dispatch--land-fn (lambda (_seat) nil))
          (maduin-dispatch--comment-fn (lambda (_task _text) t))
          (maduin-dispatch--close-fn (lambda (task _o &optional _dir) (setq closed task) t))
-         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
         (progn
           (maduin-dispatch-implement "t1")
@@ -2024,7 +2024,7 @@
          (run-count 0)
          (maduin-dispatch--active nil)
          (maduin-dispatch--session-run-fn
-          (lambda (_w _m _a _p)
+          (lambda (_w _m _a _p _b)
             (setq run-count (1+ run-count))
             (format "s-%d" run-count)))
          (maduin-dispatch--claim-fn (lambda (_t) t))
@@ -2055,7 +2055,7 @@
          (maduin-dispatch--active nil)
          (maduin-dispatch--in-progress-fn (lambda () '("orphan-1")))
          (maduin-dispatch--session-run-fn
-          (lambda (_w _m _a _p)
+          (lambda (_w _m _a _p _b)
             (setq run-count (1+ run-count))
             (format "s-%d" run-count)))
          (maduin-dispatch--claim-fn (lambda (_t) t))
@@ -2074,7 +2074,7 @@
   (let ((maduin-dispatch--timer nil)
         (maduin-dispatch--active nil)
         (maduin-dispatch--in-progress-fn (lambda () nil))
-        (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+        (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
         (progn
           (maduin-dispatch-start)
@@ -2090,14 +2090,14 @@
          (maduin-dispatch--active nil)
          (maduin-dispatch--draining nil)
          (maduin-dispatch--timer nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
-         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
          (maduin-dispatch--land-fn (lambda (_seat) t))
          (maduin-dispatch--close-fn (lambda (_t _o &optional _dir) t))
-         (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend sid) (push sid deleted) t)))
     (unwind-protect
         (progn
           (maduin-dispatch-implement "t1")
@@ -2125,11 +2125,11 @@
          (maduin-dispatch--active nil)
          (maduin-dispatch--draining nil)
          (maduin-dispatch--timer nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-1"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
-         (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend sid) (push sid deleted) t)))
     (unwind-protect
         (progn
           (maduin-dispatch-implement "t1")
@@ -2164,7 +2164,7 @@
          (run-count 0)
          (maduin-dispatch--active nil)
          (maduin-dispatch--session-run-fn
-          (lambda (_w _m _a _p)
+          (lambda (_w _m _a _p _b)
             (setq run-count (1+ run-count))
             (format "s-%d" run-count)))
          (maduin-dispatch--claim-fn (lambda (_t) t))
@@ -2196,14 +2196,14 @@
          (landed nil)
          (closed nil)
          (maduin-dispatch--active nil)
-         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-des-1"))
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-des-1"))
          (maduin-dispatch--claim-fn (lambda (_t) t))
          (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
          (maduin-dispatch--workdir-fn (lambda (_s) dir))
-         (maduin-dispatch--diff-fn (lambda (_sid) nil))
+         (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
          (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
          (maduin-dispatch--close-fn (lambda (task _out &optional _dir) (setq closed task) t))
-         (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
         (progn
           (maduin-dispatch-design "epic-z")
@@ -2410,8 +2410,8 @@
         (maduin-dispatch--active nil)
         (maduin-dispatch--in-progress-fn (lambda () nil))
         (maduin-dispatch--session-run-fn
-         (lambda (_w _m _a _p) (ert-fail "maduin-start must not spawn sessions")))
-        (maduin-dispatch--session-delete-fn (lambda (_sid) t)))
+         (lambda (_w _m _a _p _b) (ert-fail "maduin-start must not spawn sessions")))
+        (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t)))
     (unwind-protect
         (progn
           (maduin-start)
@@ -2425,7 +2425,7 @@
          (maduin-dispatch--active
           (list (list :handle "s-stop-1" :seat "ifrit" :role 'implementer :task "t1")))
          (deleted '())
-         (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend sid) (push sid deleted) t)))
     (unwind-protect
         (progn
           (maduin-stop t)                  ; hard stop tears down live sessions
@@ -2471,16 +2471,16 @@
              (maduin-dispatch--ready-fn (lambda () (list task)))
              (maduin-dispatch--in-progress-fn (lambda () nil))
              (maduin-dispatch--open-epics-fn (lambda () nil))
-             (maduin-dispatch--session-run-fn (lambda (_w _m _a _p) "s-loop-1"))
+             (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "s-loop-1"))
              (maduin-dispatch--claim-fn (lambda (_t) t))
              (maduin-dispatch--show-fn (lambda (_t) (list :title "T" :desc "D")))
              (maduin-dispatch--workdir-fn (lambda (_s) dir))
              (maduin-dispatch--diff-fn
-              (lambda (_sid) (list '((file . "x.el") (patch . "+1")))))
+              (lambda (_backend _sid) (list '((file . "x.el") (patch . "+1")))))
              (maduin-dispatch--land-fn (lambda (seat) (setq landed seat) t))
              (maduin-dispatch--landed-fn (lambda (_seat) t))
              (maduin-dispatch--close-fn (lambda (t2 _out &optional _dir) (setq closed t2) t))
-             (maduin-dispatch--session-delete-fn (lambda (sid) (push sid deleted) t)))
+             (maduin-dispatch--session-delete-fn (lambda (_backend sid) (push sid deleted) t)))
         (unwind-protect
             (progn
               (maduin-dispatch-run-loop)
@@ -2914,6 +2914,112 @@
     (should killed)
     (should-not (gethash handle maduin-kiro--registry))
     (should-not (buffer-live-p buffer))))
+
+;;; 24. backend launch routing
+
+(ert-deftest maduin-test-dispatch-seat-backend-routing-records-backend ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (seen nil)
+         (maduin-config (copy-tree maduin-config))
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--claim-fn (lambda (_task) t))
+         (maduin-dispatch--show-fn (lambda (_task) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_seat) dir))
+         (maduin-dispatch--session-run-fn
+          (lambda (workdir model agent plan backend)
+            (setq seen (list workdir model agent plan backend))
+            "kiro-1")))
+    (unwind-protect
+        (progn
+          (maduin-config-set-seat-backend 'implementer "ifrit" 'kiro)
+          (should (equal (maduin-dispatch-implement "t1") "kiro-1"))
+          (should (equal (nth 1 seen) "qwen3-coder-next"))
+          (should (eq (nth 4 seen) 'kiro))
+          (should (eq (plist-get (car maduin-dispatch--active) :backend) 'kiro)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-sticky-backend-for-diff-and-delete ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (calls nil)
+         (maduin-config (copy-tree maduin-config))
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--claim-fn (lambda (_task) t))
+         (maduin-dispatch--show-fn (lambda (_task) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_seat) dir))
+         (maduin-dispatch--session-run-fn (lambda (&rest _args) "opencode-1"))
+         (maduin-dispatch--diff-fn
+          (lambda (backend sid) (push (list :diff backend sid) calls) nil))
+         (maduin-dispatch--session-delete-fn
+          (lambda (backend sid) (push (list :delete backend sid) calls) t))
+         (maduin-dispatch--land-fn (lambda (_seat) t))
+         (maduin-dispatch--landed-fn (lambda (_seat) t))
+         (maduin-dispatch--close-fn (lambda (&rest _args) t)))
+    (unwind-protect
+        (progn
+          (maduin-dispatch-implement "t1")
+          (maduin-config-set-seat-backend 'implementer "ifrit" 'kiro)
+          (maduin-dispatch--on-complete "opencode-1" 'completed)
+          (should (equal (nreverse calls)
+                         '((:diff opencode "opencode-1")
+                           (:delete opencode "opencode-1")))))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-spawn-failure-releases-claim ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (released nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--claim-fn (lambda (_task) t))
+         (maduin-dispatch--show-fn (lambda (_task) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_seat) dir))
+         (maduin-dispatch--session-run-fn (lambda (&rest _args) nil))
+         (maduin-dispatch--release-fn (lambda (task) (setq released task) t))
+         (maduin-dispatch--comment-fn (lambda (&rest _args) t)))
+    (unwind-protect
+        (progn
+          (should-not (maduin-dispatch-implement "t1"))
+          (should (equal released "t1"))
+          (should-not maduin-dispatch--active))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-format-kiro-diff-string ()
+  :tags '(maduin)
+  (should (equal (maduin-dispatch--format-diffs "diff --git a/a.el b/a.el\n")
+                 "diff --git a/a.el b/a.el\n")))
+
+(ert-deftest maduin-test-terminal-kiro-dismiss-never-exports-opencode ()
+  :tags '(maduin)
+  (let* ((saved nil)
+         (deleted nil)
+         (buf nil)
+         (maduin-config (copy-tree maduin-config))
+         (maduin-terminal--tui-fn
+          (lambda (backend root model agent prompt)
+            (should (eq backend 'kiro))
+            (should (stringp root))
+            (should (equal model "gpt-5.6-terra"))
+            (should (equal agent "slugineer-planner-concierge"))
+            (should (stringp prompt))
+            "kiro-1"))
+         (maduin-terminal--delete-fn
+          (lambda (backend sid) (setq deleted (list backend sid)) t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-backend-resolve)
+                   (lambda (_role _seat) 'kiro))
+                  ((symbol-function 'maduin-config-seat-model)
+                   (lambda (_role _seat _backend) "gpt-5.6-terra"))
+                  ((symbol-function 'maduin-terminal--write-handoff)
+                   (lambda (_seat note _root) (setq saved note) t)))
+          (setq buf (maduin-terminal-open "alexander" 'concierge "ignored"))
+          (should (buffer-live-p buf))
+          (should (string-match-p "No conversation export"
+                                  (maduin-terminal-dismiss "alexander")))
+          (should (string-match-p "No conversation export" saved))
+          (should (equal deleted '(kiro "kiro-1"))))
+      (when (and buf (buffer-live-p buf))
+        (kill-buffer buf)))))
 
 (provide 'maduin-test)
 
