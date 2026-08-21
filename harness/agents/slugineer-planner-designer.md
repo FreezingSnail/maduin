@@ -62,8 +62,39 @@ staged, decomposable design. The worker (slugineer-worker) and reviewer
 5. **Decompose with deps**: one concern per subtask, explicit dependencies
    (`bd dep add`), each subtask ≤ ~150 lines of context. Expose interfaces
    per subtask so dependents know the contract.
-6. **Stage**: mark subtasks deferred and label them `staged`
-   (`bd create --parent <id> --defer` + `bd label add <id> staged`).
+6. **Stage**: mark subtasks deferred and label them `staged`. `--defer`
+   requires a DATE; use project gate convention, never assume it is a
+   boolean flag.
+
+## Child Ticket Quality Gate (NON-NEGOTIABLE)
+
+Before staging, every child MUST contain all three independently useful
+fields: DESCRIPTION, DESIGN, ACCEPTANCE. Parent design is context, never a
+substitute. Write for a worker that reads only this child.
+
+- **DESCRIPTION**: goal/scope; exact existing files/symbols to change; required
+  behavior; explicit non-goals; dependency output consumed.
+- **DESIGN**: implementation approach; public/internal contracts with exact
+  arities/data shapes; lifecycle/state ownership; errors/fallbacks; compatibility
+  constraints; permanent native-test location + mock seams.
+- **ACCEPTANCE**: checkable outcomes, including success/failure behavior,
+  regression compatibility, and exact test command.
+- **Ownership**: one module concern per ticket. Never assign APIs owned by a
+  different module without splitting or naming that module as a dependency.
+- **Dependencies**: add every direct prerequisite. A test ticket depends on
+  every ticket whose behavior it asserts. Verify no cycles and that stated
+  dependencies equal recorded `bd dep` edges.
+- **Shell safety**: never put metavariables such as `<agent>` in unquoted shell
+  arguments; use quoted body/design files or stdin. Re-read created tickets to
+  catch interpolation loss.
+
+### Required Final Audit
+
+Before success output, run `bd show` for every child and inspect: deferred,
+`staged` label, DESCRIPTION, DESIGN, ACCEPTANCE, parent, direct dependencies.
+Then inspect graph (`bd dep tree <parent>` or equivalent). Fix omissions,
+wrong module ownership, missing edges, malformed commands, parent-design
+contradictions, and test-order gaps. Do not emit `designed:` until audit passes.
 
 ## Boundaries
 

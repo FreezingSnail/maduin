@@ -27,5 +27,12 @@ Produce a decomposition: create child task tickets under this epic (bd create
 Every deferred child MUST carry the "staged" label: create it deferred and
 staged (bd create ... --labels staged, then defer via bd update --defer
 <date>, or the equivalent label-add flow). No child without --labels staged.
-Enforce native test framework, permanent co-located tests. Do not implement.
-Do not close or defer the epic itself.
+
+Before success, audit every child with `bd show`: DESCRIPTION, DESIGN,
+ACCEPTANCE, staged label, deferred status, parent, exact direct dependencies.
+Do not count parent design as child context. Test children MUST depend directly
+on every implementation child whose behavior they assert. Inspect `bd dep tree
+{id}`; fix missing edges, cycles, malformed shell-interpolated metavariables,
+parent-design conflicts, and APIs assigned to the wrong module. Enforce native
+test framework, permanent co-located tests. Do not implement. Do not close or
+defer the epic itself.

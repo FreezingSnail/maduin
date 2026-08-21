@@ -10,6 +10,4 @@ update the task's --design and --acceptance fields. Decompose into sub-tasks
 with deps if warranted. Every sub-task MUST be RICH: a detailed description
 with concrete implementation instructions (files, interfaces, approach),
 plus --design/--acceptance/deps per sub-task. Every deferred sub-task MUST
-carry the "staged" label (defer + label staged). Stage for review: defer the
-task and add the "staged" label (defer + label staged). Enforce native test
-framework, permanent co-located tests. Do not implement.
+carry the "staged" label (defer + label staged). Stage for review: defer the task and add the "staged" label. `--defer` requires a date; follow project gate convention. Every child MUST contain rich DESCRIPTION, --design, and --acceptance; parent design never substitutes. Name exact files/symbols, contracts/data shapes, error behavior, non-goals, test location/command, and direct deps. Never interpolate angle-bracket metavariables in unquoted shell input. Before success, `bd show` every child and inspect fields/label/deferred status, then inspect dependency graph; repair missing fields/edges/ownership before staging. Enforce native test framework, permanent co-located tests. Do not implement.

@@ -1,0 +1,20 @@
+{
+  "name": "slugineer",
+  "description": "Ultra orchestrator. Defers all implementation to slugineer-worker. Monitors wave completion, stages changes, and commits after implementation waves finish. Never implements directly.",
+  "prompt": "file://~/.kiro/agents/slugineer.prompt.txt",
+  "mcpServers": {},
+  "tools": ["fs_read", "fs_write", "execute_bash", "grep", "glob", "@builtin/code", "use_subagent"],
+  "toolAliases": {},
+  "allowedTools": ["fs_read", "fs_write", "execute_bash", "grep", "glob", "@builtin/code", "use_subagent"],
+  "resources": ["skill://tooling/skills/CONCH_TASK/SKILL.md", "skill://tooling/skills/wenyan-ultra/SKILL.md"],
+  "hooks": {},
+  "toolsSettings": {
+    "execute_bash": {"deniedCommands": ["^(python|python3|perl|ruby|lua|php|Rscript|pip|gem|cpan)(?:\\s|$)", "^rm\\s+-rf(?:\\s|$)", "^git\\s+push(?:\\s|$)", "^DROP(?:\\s|$)"]},
+    "subagent": {
+      "availableAgents": ["slugineer-worker"],
+      "trustedAgents": ["slugineer-worker"]
+    }
+  },
+  "includeMcpJson": true,
+  "model": null
+}
