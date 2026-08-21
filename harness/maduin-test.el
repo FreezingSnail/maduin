@@ -1142,6 +1142,112 @@
       (cancel-timer maduin-cockpit--timer)
       (setq maduin-cockpit--timer nil))))
 
+(ert-deftest maduin-test-cockpit-auto-refresh-skips-inbox ()
+  :tags '(maduin)
+  (let ((maduin-cockpit-buffer-name " *maduin-cockpit-auto-inbox*")
+        (maduin-cockpit--inbox-buffer-name " *maduin-cockpit-auto-chaplet*")
+        (calls 0))
+    (let ((cockpit (get-buffer-create maduin-cockpit-buffer-name))
+          (inbox (get-buffer-create maduin-cockpit--inbox-buffer-name)))
+      (unwind-protect
+          (progn
+            (with-current-buffer inbox
+              (setq-local major-mode 'chaplet-list-mode))
+            (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t))
+                      ((symbol-function 'maduin-pipeline-status-refresh) #'ignore)
+                      ((symbol-function 'maduin-cockpit--schedule-refresh) #'ignore)
+                      ((symbol-function 'chaplet-list-refresh)
+                       (lambda () (cl-incf calls))))
+              (maduin-cockpit--auto-refresh)
+              (should (= calls 0))))
+        (when (buffer-live-p cockpit) (kill-buffer cockpit))
+        (when (buffer-live-p inbox) (kill-buffer inbox))))))
+
+(ert-deftest maduin-test-cockpit-interactive-refresh-refreshes-inbox ()
+  :tags '(maduin)
+  (let ((maduin-cockpit--inbox-buffer-name " *maduin-cockpit-refresh-chaplet*")
+        (calls 0))
+    (let ((cockpit (generate-new-buffer " *maduin-cockpit-interactive*"))
+          (inbox (get-buffer-create maduin-cockpit--inbox-buffer-name)))
+      (unwind-protect
+          (progn
+            (with-current-buffer inbox
+              (setq-local major-mode 'chaplet-list-mode))
+            (cl-letf (((symbol-function 'maduin-pipeline-status)
+                       (lambda () '(:queued 0 :active 0 :completed 0 :blocked 0
+                                    :fleet-free 0 :fleet-busy 0)))
+                      ((symbol-function 'maduin-cockpit--rows) (lambda () nil))
+                      ((symbol-function 'chaplet-list-refresh)
+                       (lambda () (cl-incf calls))))
+              (with-current-buffer cockpit
+                (tabulated-list-mode)
+                (maduin-cockpit-refresh)
+                (should (= calls 0))
+                ;; The command supplies this explicit argument via its
+                ;; interactive form; scheduled callers leave it nil.
+                (maduin-cockpit-refresh t)
+                (should (= calls 1)))))
+        (when (buffer-live-p cockpit) (kill-buffer cockpit))
+        (when (buffer-live-p inbox) (kill-buffer inbox))))))
+
+(ert-deftest maduin-test-cockpit-inbox-command-refreshes ()
+  :tags '(maduin)
+  (let ((maduin-cockpit--inbox-buffer-name " *maduin-cockpit-command-chaplet*")
+        (calls 0)
+        (message-text nil))
+    (let ((cockpit (generate-new-buffer " *maduin-cockpit-command*"))
+          (inbox (get-buffer-create maduin-cockpit--inbox-buffer-name)))
+      (unwind-protect
+          (save-window-excursion
+            (switch-to-buffer cockpit)
+            (let ((inbox-window (split-window-below)))
+              (set-window-buffer inbox-window inbox)
+              (with-current-buffer inbox
+                (setq-local major-mode 'chaplet-list-mode))
+              (cl-letf (((symbol-function 'chaplet-list-refresh)
+                         (lambda () (cl-incf calls))))
+                (maduin-cockpit-inbox)
+                (should (eq (selected-window) inbox-window))
+                (should (= calls 1)))
+              (kill-buffer inbox)
+              (setq calls 0)
+              (cl-letf (((symbol-function 'message)
+                         (lambda (format-string &rest args)
+                           (setq message-text (apply #'format format-string args))))
+                        ((symbol-function 'chaplet-list-refresh)
+                         (lambda () (cl-incf calls))))
+                (maduin-cockpit-inbox)
+                (should (= calls 0))
+                (should (equal message-text "maduin-cockpit: no inbox present")))))
+        (when (buffer-live-p cockpit) (kill-buffer cockpit))
+        (when (buffer-live-p inbox) (kill-buffer inbox))))))
+
+(ert-deftest maduin-test-cockpit-inbox-timer-optional ()
+  :tags '(maduin)
+  (let ((maduin-cockpit-inbox-refresh-interval nil)
+        (maduin-cockpit--inbox-timer nil))
+    (maduin-cockpit--start-inbox-timer)
+    (should-not maduin-cockpit--inbox-timer))
+  (let ((maduin-cockpit-buffer-name " *maduin-cockpit-inbox-timer*")
+        (maduin-cockpit-inbox-refresh-interval 60)
+        (maduin-cockpit--timer nil)
+        (maduin-cockpit--inbox-timer nil)
+        (maduin-cockpit--pending-render nil))
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'maduin-cockpit--register-live-updates) #'ignore)
+                    ((symbol-function 'maduin-pipeline-status-refresh) #'ignore)
+                    ((symbol-function 'maduin-cockpit-refresh) #'ignore)
+                    ((symbol-function 'maduin-cockpit--start-timer) #'ignore)
+                    ((symbol-function 'maduin-cockpit--embed-inbox) #'ignore))
+            (maduin-cockpit-show)
+            (should (timerp maduin-cockpit--inbox-timer))
+            (kill-buffer (get-buffer maduin-cockpit-buffer-name))
+            (should-not maduin-cockpit--inbox-timer)))
+      (when maduin-cockpit--inbox-timer
+        (cancel-timer maduin-cockpit--inbox-timer)
+        (setq maduin-cockpit--inbox-timer nil)))))
+
 ;;; 8a. cockpit-concierge-entry
 
 (ert-deftest maduin-test-cockpit-concierge-bindings ()
@@ -1290,19 +1396,21 @@
 
 (ert-deftest maduin-test-cockpit-seat-status-rich ()
   :tags '(maduin)
-  (cl-letf (((symbol-value 'maduin-dispatch--active)
-             (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1")))
-            ((symbol-function 'maduin-bd--call)
-             (lambda (_prog &rest _args) (cons 0 "[{\"title\": \"T1 title\"}]"))))
-    (let ((st (maduin-cockpit--seat-status "ifrit")))
-      (should (equal (plist-get st :seat) "ifrit"))
-      (should (eq (plist-get st :role) 'implementer))
-      (should (eq (plist-get st :status) 'working))      ; dispatch ⇒ working
-      (should (equal (plist-get st :task-id) "t1"))
-      (should (equal (plist-get st :task-title) "T1 title"))
-      (should (null (plist-get st :model)))              ; dispatch entry has none
-      (should (null (plist-get st :uptime)))
-      (should (null (plist-get st :phase))))))
+  (let ((maduin-state--data nil)
+        (maduin-cockpit--title-queue nil)
+        (maduin-cockpit--title-requested (make-hash-table :test #'equal))
+        (maduin-dispatch--active
+         (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "t1"))))
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+      (let ((st (maduin-cockpit--seat-status "ifrit")))
+        (should (equal (plist-get st :seat) "ifrit"))
+        (should (eq (plist-get st :role) 'implementer))
+        (should (eq (plist-get st :status) 'working))
+        (should (equal (plist-get st :task-id) "t1"))
+        (should-not (plist-get st :task-title))
+        (should (null (plist-get st :model)))
+        (should (null (plist-get st :uptime)))
+        (should (null (plist-get st :phase)))))))
 
 (ert-deftest maduin-test-cockpit-idle-models-use-effective-config ()
   :tags '(maduin)
@@ -1359,36 +1467,93 @@
       (should (equal (plist-get status :model) "launch-model"))
       (should (equal (aref (cadr row) 4) "launch-model")))))
 
-(ert-deftest maduin-test-cockpit-task-title-success ()
+(ert-deftest maduin-test-cockpit-title-pure-read ()
   :tags '(maduin)
-  (setq maduin-cockpit--title-cache nil)
-  (let ((calls 0))
-    (cl-letf (((symbol-function 'maduin-bd--call)
-               (lambda (&rest _args)
-                 (cl-incf calls)
-                 (cons 0 "[{\"title\": \"Big Title\"}]"))))
-      (should (equal (maduin-cockpit--task-title "maduin-x") "Big Title"))
-      (should (= calls 1))
-      ;; Cache hit: second call must not re-run bd.
-      (should (equal (maduin-cockpit--task-title "maduin-x") "Big Title"))
-      (should (= calls 1))))
-  (setq maduin-cockpit--title-cache nil))
+  (let ((maduin-state--data nil)
+        (maduin-cockpit--title-queue nil)
+        (maduin-cockpit--title-requested (make-hash-table :test #'equal))
+        (maduin-dispatch--active
+         (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "maduin-x"))))
+    (cl-letf (((symbol-function 'call-process) (lambda (&rest _) (error "spawned")))
+              ((symbol-function 'make-process) (lambda (&rest _) (error "spawned")))
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+      (let* ((rows (maduin-cockpit--rows))
+             (row (assoc "ifrit" rows))
+             (task (aref (cadr row) 3)))
+        (should (string-match-p "maduin-x" task))
+        (should-not (string-match-p " — " task))))))
 
-(ert-deftest maduin-test-cockpit-task-title-object-shape ()
+(ert-deftest maduin-test-cockpit-title-async-resolves ()
   :tags '(maduin)
-  (setq maduin-cockpit--title-cache nil)
-  (cl-letf (((symbol-function 'maduin-bd--call)
-             (lambda (&rest _args) (cons 0 "{\"title\": \"Obj Title\"}"))))
-    (should (equal (maduin-cockpit--task-title "maduin-z") "Obj Title")))
-  (setq maduin-cockpit--title-cache nil))
+  (let ((maduin-state--data nil)
+        (maduin-cockpit--title-queue nil)
+        (maduin-cockpit--title-requested (make-hash-table :test #'equal))
+        (maduin-dispatch--active
+         (list (list :handle "s-1" :seat "ifrit" :role 'implementer :task "maduin-x")))
+        (refreshes 0))
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+              ((symbol-function 'maduin-bd-async-call)
+               (lambda (_args callback)
+                 (funcall callback 0 "[{\"title\":\"Big Title\"}]")
+                 "title-request"))
+              ((symbol-function 'maduin-cockpit--schedule-refresh)
+               (lambda () (cl-incf refreshes))))
+      (should-not (plist-get (maduin-cockpit--seat-status "ifrit") :task-title))
+      (maduin-cockpit--title-drain)
+      (should (equal (maduin-cockpit--title "maduin-x") "Big Title"))
+      (should (= refreshes 1))
+      (should (string-match-p "maduin-x — Big Title"
+                              (maduin-cockpit--task-string
+                               (maduin-cockpit--seat-status "ifrit")))))))
 
-(ert-deftest maduin-test-cockpit-task-title-failure ()
+(ert-deftest maduin-test-cockpit-title-bare-object-shape ()
   :tags '(maduin)
-  (setq maduin-cockpit--title-cache nil)
-  (cl-letf (((symbol-function 'maduin-bd--call)
-             (lambda (&rest _args) (cons 1 "error output"))))
-    (should (null (maduin-cockpit--task-title "maduin-y"))))
-  (setq maduin-cockpit--title-cache nil))
+  (let ((maduin-state--data nil)
+        (maduin-cockpit--title-queue nil)
+        (maduin-cockpit--title-requested (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+              ((symbol-function 'maduin-bd-async-call)
+               (lambda (_args callback)
+                 (funcall callback 0 "{\"title\":\"Obj Title\"}")
+                 "title-request"))
+              ((symbol-function 'maduin-cockpit--schedule-refresh) #'ignore))
+      (maduin-cockpit--title-request "maduin-z")
+      (maduin-cockpit--title-drain)
+      (should (equal (maduin-cockpit--title "maduin-z") "Obj Title")))))
+
+(ert-deftest maduin-test-cockpit-title-negative-cache ()
+  :tags '(maduin)
+  (let ((maduin-state--data nil)
+        (maduin-cockpit--title-queue nil)
+        (maduin-cockpit--title-requested (make-hash-table :test #'equal))
+        (maduin-cockpit-title-negative-ttl 60.0)
+        (now 100.0)
+        (requests 0))
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now))
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+              ((symbol-function 'maduin-bd-async-call)
+               (lambda (_args callback)
+                 (cl-incf requests)
+                 (funcall callback 1 "failed")
+                 "title-request"))
+              ((symbol-function 'maduin-cockpit--schedule-refresh) #'ignore))
+      (dotimes (_ 5)
+        (maduin-cockpit--title-request "maduin-y")
+        (maduin-cockpit--title-drain))
+      (should (= requests 1))
+      (setq now 161.0)
+      (maduin-cockpit--title-request "maduin-y")
+      (maduin-cockpit--title-drain)
+      (should (= requests 2)))))
+
+(ert-deftest maduin-test-cockpit-title-invalidated-on-complete ()
+  :tags '(maduin)
+  (let ((maduin-state--data nil)
+        (maduin-cockpit-refresh-hook nil))
+    (maduin-cockpit--title-put "maduin-x" "Big Title")
+    (should (hash-table-p (maduin-state-get 'titles)))
+    (maduin-cockpit--on-complete "s-1" 'completed)
+    (should-not (maduin-state-get 'titles))))
 
 (ert-deftest maduin-test-cockpit-status-pill-known ()
   :tags '(maduin)
@@ -1417,11 +1582,12 @@
 
 (ert-deftest maduin-test-cockpit-refresh-format-8-columns ()
   :tags '(maduin)
-  (let ((buf (get-buffer-create "*maduin-cockpit*")))
+  (let ((buf (get-buffer-create "*maduin-cockpit*"))
+        (maduin-state--data nil))
     (unwind-protect
         (with-current-buffer buf
           (tabulated-list-mode)
-          (setq maduin-cockpit--title-cache (list (cons "stale" "old")))
+          (maduin-cockpit--title-put "stale" "old")
           (maduin-cockpit-refresh)
           (should (= (length tabulated-list-format) 8))
           (should (equal (elt (aref tabulated-list-format 0) 0) "Seat"))
@@ -1432,37 +1598,30 @@
           (should (equal (elt (aref tabulated-list-format 5) 0) "Backend"))
           (should (equal (elt (aref tabulated-list-format 6) 0) "Uptime"))
           (should (equal (elt (aref tabulated-list-format 7) 0) "Activity"))
-          (should (equal maduin-cockpit--title-cache
-                         (list (cons "stale" "old")))))
+          (should (equal (maduin-cockpit--title "stale") "old")))
       (kill-buffer buf))))
 
 (ert-deftest maduin-test-cockpit-refresh-keeps-title-cache ()
   :tags '(maduin)
-  ;; Repeated refreshes with unchanged dispatch entries must NOT re-run
-  ;; bd show: the title cache persists across refreshes.
   (let ((buf (get-buffer-create "*maduin-cockpit*"))
         (calls 0)
+        (maduin-state--data nil)
         (maduin-dispatch--active
          (list (list :handle "s-1" :seat "ifrit" :role "implementer" :task "t1")
                (list :handle "s-2" :seat "shiva" :role "designer" :task "t2"))))
     (unwind-protect
-        (cl-letf (((symbol-function 'maduin-bd--call)
-                   (lambda (&rest args)
-                     ;; Count only bd show title fetches; pipeline
-                     ;; summary also calls bd ready/list.
-                     (when (member "show" args) (cl-incf calls))
-                     (cons 0 "[{\"title\": \"T\"}]"))))
+        (cl-letf (((symbol-function 'maduin-bd-async-call)
+                   (lambda (&rest _) (cl-incf calls)))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+          (maduin-cockpit--title-put "t1" "T1")
+          (maduin-cockpit--title-put "t2" "T2")
           (with-current-buffer buf (tabulated-list-mode))
-          (setq maduin-cockpit--title-cache nil)
-          (maduin-cockpit-refresh)
-          (should (= calls 2))                  ; one bd show per task id
-          (should (= (length maduin-cockpit--title-cache) 2))
           (maduin-cockpit-refresh)
           (maduin-cockpit-refresh)
-          (should (= calls 2))                  ; zero new bd show calls
-          (should (= (length maduin-cockpit--title-cache) 2)))
-      (kill-buffer buf)
-      (setq maduin-cockpit--title-cache nil))))
+          (maduin-cockpit-refresh)
+          (should (= calls 0))
+          (should (= (hash-table-count (maduin-state-get 'titles)) 2)))
+      (kill-buffer buf))))
 
 (ert-deftest maduin-test-cockpit-live-derived-uptime-phase-and-status ()
   :tags '(maduin)
@@ -1571,105 +1730,15 @@
                        maduin-session-on-complete-hook)
              1)))
 
-(ert-deftest maduin-test-cockpit-live-schedule-refresh-visible ()
-  :tags '(maduin)
-  ;; Visible cockpit buffer → schedule a single-shot idle timer.
-  (let ((buf (get-buffer-create "*maduin-cockpit*"))
-        (maduin-cockpit--idle-timer nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t)))
-          (maduin-cockpit--schedule-refresh)
-          (should (timerp maduin-cockpit--idle-timer)))
-      (when (timerp maduin-cockpit--idle-timer)
-        (cancel-timer maduin-cockpit--idle-timer))
-      (kill-buffer buf))))
-
-(ert-deftest maduin-test-cockpit-live-schedule-refresh-buried-noop ()
-  :tags '(maduin)
-  ;; Buried (hidden) cockpit buffer → no timer scheduled.
-  (let ((buf (get-buffer-create "*maduin-cockpit*"))
-        (maduin-cockpit--idle-timer nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) nil)))
-          (maduin-cockpit--schedule-refresh)
-          (should (null maduin-cockpit--idle-timer)))
-      (kill-buffer buf))))
-
-(ert-deftest maduin-test-cockpit-live-schedule-refresh-absent-noop ()
-  :tags '(maduin)
-  ;; No cockpit buffer at all → no timer scheduled, no error.
-  (let ((maduin-cockpit--idle-timer nil))
-    (when (get-buffer "*maduin-cockpit*") (kill-buffer "*maduin-cockpit*"))
-    (maduin-cockpit--schedule-refresh)
-    (should (null maduin-cockpit--idle-timer))))
-
-(ert-deftest maduin-test-cockpit-live-idle-refresh-visible-runs ()
-  :tags '(maduin)
-  ;; The idle-timer callback refreshes when the buffer is visible.
-  (let ((buf (get-buffer-create "*maduin-cockpit*"))
-        (count 0))
-    (unwind-protect
-        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t))
-                  ((symbol-function 'maduin-cockpit-refresh)
-                   (lambda () (setq count (1+ count)))))
-          (with-current-buffer buf (tabulated-list-mode))
-          (maduin-cockpit--idle-refresh)
-          (should (= count 1)))
-      (kill-buffer buf))))
-
-(ert-deftest maduin-test-cockpit-live-idle-refresh-buried-noop ()
-  :tags '(maduin)
-  (let ((buf (get-buffer-create "*maduin-cockpit*"))
-        (count 0))
-    (unwind-protect
-        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) nil))
-                  ((symbol-function 'maduin-cockpit-refresh)
-                   (lambda () (setq count (1+ count)))))
-          (maduin-cockpit--idle-refresh)
-          (should (= count 0)))
-      (kill-buffer buf))))
-
 (ert-deftest maduin-test-cockpit-live-on-complete-runs-hook ()
   :tags '(maduin)
   (let* ((count 0)
+         (maduin-state--data nil)
          (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
-    (setq maduin-cockpit--title-cache (list (cons "t1" "Old Title")))
+    (maduin-cockpit--title-put "t1" "Old Title")
     (maduin-cockpit--on-complete "s-1" 'completed)
     (should (= count 1))
-    ;; Completion must invalidate the task-title cache.
-    (should (null maduin-cockpit--title-cache))))
-
-(ert-deftest maduin-test-cockpit-live-on-window-change-selected ()
-  :tags '(maduin)
-  ;; Cockpit in the selected window → refresh hook runs.
-  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
-         (orig (window-buffer (selected-window)))
-         (count 0)
-         (maduin-cockpit--last-refresh nil)
-         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
-    (unwind-protect
-        (progn
-          (set-window-buffer (selected-window) buf)
-          (maduin-cockpit--on-window-change)
-          (should (= count 1)))
-      (set-window-buffer (selected-window) orig)
-      (kill-buffer buf))))
-
-(ert-deftest maduin-test-cockpit-live-on-window-change-not-selected ()
-  :tags '(maduin)
-  ;; Selected window shows another buffer → no refresh (cheap guard).
-  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
-         (other (get-buffer-create "*maduin-cockpit-live-other*"))
-         (count 0)
-         (maduin-cockpit--last-refresh nil)
-         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
-    (unwind-protect
-        (progn
-          (set-window-buffer (selected-window) other)
-          (maduin-cockpit--on-window-change)
-          (should (= count 0)))
-      (kill-buffer buf)
-      (kill-buffer other))))
+    (should-not (maduin-state-get 'titles))))
 
 (ert-deftest maduin-test-dispatch-spawn-runs-cockpit-refresh-hook ()
   :tags '(maduin)
@@ -1863,144 +1932,6 @@
             (should (maduin-cockpit--inbox-refresh))
             (should called)))
       (kill-buffer buf))))
-
-(ert-deftest maduin-test-cockpit-auto-refresh-inbox-absent-no-error ()
-  :tags '(maduin)
-  ;; Visible cockpit + inbox absent → auto-refresh refreshes cockpit and the
-  ;; inbox refresh is a silent no-op (no error).
-  (let ((buf (get-buffer-create "*maduin-cockpit*"))
-        (count 0))
-    (unwind-protect
-        (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t))
-                  ((symbol-function 'maduin-cockpit-refresh)
-                   (lambda () (setq count (1+ count)))))
-          (with-current-buffer buf (tabulated-list-mode))
-          (maduin-cockpit--auto-refresh)
-          (should (= count 1)))
-      (when maduin-cockpit--timer
-        (cancel-timer maduin-cockpit--timer)
-        (setq maduin-cockpit--timer nil))
-      (kill-buffer buf))))
-
-;;; 8e2. cockpit-throttle (debounced focus refresh)
-
-(ert-deftest maduin-test-cockpit-throttle-predicate ()
-  :tags '(maduin)
-  ;; Never refreshed → not throttled.
-  (let ((maduin-cockpit--last-refresh nil)
-        (maduin-cockpit-refresh-interval 5))
-    (should-not (maduin-cockpit--refresh-throttled-p 1000.0)))
-  ;; Inside the interval → throttled.
-  (let ((maduin-cockpit--last-refresh 996.0)
-        (maduin-cockpit-refresh-interval 5))
-    (should (maduin-cockpit--refresh-throttled-p 1000.0)))
-  ;; At exactly the interval boundary → not throttled.
-  (let ((maduin-cockpit--last-refresh 995.0)
-        (maduin-cockpit-refresh-interval 5))
-    (should-not (maduin-cockpit--refresh-throttled-p 1000.0)))
-  ;; Long after the interval → not throttled.
-  (let ((maduin-cockpit--last-refresh 900.0)
-        (maduin-cockpit-refresh-interval 5))
-    (should-not (maduin-cockpit--refresh-throttled-p 1000.0))))
-
-(ert-deftest maduin-test-cockpit-live-window-change-throttled-fresh ()
-  :tags '(maduin)
-  ;; Cockpit already visible and freshly refreshed (last refresh = now)
-  ;; → on-window-change must NOT run the refresh hook again.
-  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
-         (orig (window-buffer (selected-window)))
-         (count 0)
-         (maduin-cockpit--last-refresh (float-time))
-         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
-    (unwind-protect
-        (progn
-          (set-window-buffer (selected-window) buf)
-          (maduin-cockpit--on-window-change)
-          (should (= count 0)))
-      (set-window-buffer (selected-window) orig)
-      (kill-buffer buf))))
-
-(ert-deftest maduin-test-cockpit-live-window-change-throttled-rapid ()
-  :tags '(maduin)
-  ;; Rapid switches queue at most one refresh within the interval: the
-  ;; first change schedules a refresh, the second (still fresh) is
-  ;; throttled.
-  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
-         (orig (window-buffer (selected-window)))
-         (count 0)
-         (maduin-cockpit--last-refresh nil)
-         (maduin-cockpit-refresh-hook
-          (list (lambda ()
-                  (setq count (1+ count))
-                  ;; Simulate the refresh having run (marks freshness).
-                  (setq maduin-cockpit--last-refresh (float-time))))))
-    (unwind-protect
-        (progn
-          (set-window-buffer (selected-window) buf)
-          (maduin-cockpit--on-window-change)
-          (should (= count 1))
-          ;; Second rapid switch, still inside the interval → throttled.
-          (maduin-cockpit--on-window-change)
-          (should (= count 1)))
-      (set-window-buffer (selected-window) orig)
-      (kill-buffer buf))))
-
-(ert-deftest maduin-test-cockpit-live-window-change-not-throttled-stale ()
-  :tags '(maduin)
-  ;; Last refresh older than the interval → refresh hook runs again.
-  (let* ((buf (get-buffer-create "*maduin-cockpit*"))
-         (orig (window-buffer (selected-window)))
-         (count 0)
-         (maduin-cockpit--last-refresh
-          (- (float-time) maduin-cockpit-refresh-interval 1))
-         (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count))))))
-    (unwind-protect
-        (progn
-          (set-window-buffer (selected-window) buf)
-          (maduin-cockpit--on-window-change)
-          (should (= count 1)))
-      (set-window-buffer (selected-window) orig)
-      (kill-buffer buf))))
-
-(ert-deftest maduin-test-cockpit-refresh-marks-last-refresh ()
-  :tags '(maduin)
-  ;; maduin-cockpit-refresh records float-time as last-refresh (mocked).
-  (let ((buf (get-buffer-create "*maduin-cockpit*"))
-        (maduin-cockpit--last-refresh nil)
-        (maduin-dispatch--active nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'maduin-bd--call)
-                   (lambda (&rest _args) (cons 0 "[{\"title\": \"T\"}]")))
-                  ((symbol-function 'float-time) (lambda () 42.0)))
-          (with-current-buffer buf (tabulated-list-mode))
-          (maduin-cockpit-refresh)
-          (should (= maduin-cockpit--last-refresh 42.0)))
-      (kill-buffer buf))))
-
-(ert-deftest maduin-test-cockpit-auto-refresh-inbox-gated ()
-  :tags '(maduin)
-  ;; The timer path refreshes the embedded inbox only when
-  ;; chaplet-auto-refresh is non-nil (chaplet refreshes the inbox itself
-  ;; on focus, so refreshing it unconditionally double-refreshes).
-  (let ((buf (get-buffer-create "*maduin-cockpit*"))
-        (inbox (get-buffer-create "*chaplet*"))
-        (calls 0))
-    (unwind-protect
-        (progn
-          (with-current-buffer inbox (setq major-mode 'chaplet-list-mode))
-          (with-current-buffer buf (tabulated-list-mode))
-          (cl-letf (((symbol-function 'get-buffer-window) (lambda (_b _f) t))
-                    ((symbol-function 'maduin-cockpit-refresh) (lambda ()))
-                    ((symbol-function 'chaplet-list-refresh)
-                     (lambda () (setq calls (1+ calls)))))
-            (let ((chaplet-auto-refresh nil))
-              (maduin-cockpit--auto-refresh)
-              (should (= calls 0)))
-            (let ((chaplet-auto-refresh t))
-              (maduin-cockpit--auto-refresh)
-              (should (= calls 1)))))
-      (kill-buffer buf)
-      (kill-buffer inbox))))
 
 ;;; 8f. cockpit-evil (evil-aware keybindings + inbox jump)
 
@@ -4249,3 +4180,113 @@
         (should-not (maduin-bd-async-call '("ready") (lambda (&rest _))))
         (should (= (hash-table-count maduin-bd-async--inflight) 0)))
     (maduin-bd-async-cancel-all)))
+
+
+;;; 14. cockpit-render-scheduler
+
+(ert-deftest maduin-test-cockpit-schedule-coalesces-burst ()
+  :tags '(maduin)
+  (let* ((buf (generate-new-buffer " *maduin-cockpit-schedule-burst*"))
+         (maduin-cockpit-buffer-name (buffer-name buf))
+        (clock 0.0) (renders 0) (scheduled nil)
+        (maduin-cockpit--pending-render nil)
+        (maduin-cockpit--last-render nil)
+        (maduin-cockpit--now-fn (lambda () clock)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window)
+                   (lambda (buffer &optional _all) (and (eq buffer buf) (selected-window))))
+                  ((symbol-function 'timerp) (lambda (timer) (eq timer 'render-timer)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (delay _repeat function &rest args)
+                     (push (list delay function args) scheduled) 'render-timer))
+                  ((symbol-function 'maduin-pipeline-status-refresh) (lambda (&optional _callback)))
+                  ((symbol-function 'maduin-cockpit-refresh)
+                   (lambda () (cl-incf renders)
+                     (setq maduin-cockpit--last-render (funcall maduin-cockpit--now-fn)))))
+          (dotimes (_ 50) (maduin-cockpit--schedule-refresh))
+          (should (= renders 0))
+          (should (= (length scheduled) 1))
+          (apply (nth 1 (car scheduled)) (nth 2 (car scheduled)))
+          (dotimes (_ 50) (maduin-cockpit--schedule-refresh))
+          (should (= renders 1))
+          (should (= (length scheduled) 2))
+          (setq clock maduin-cockpit-min-render-interval)
+          (apply (nth 1 (car scheduled)) (nth 2 (car scheduled)))
+          (should (= renders 2)))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest maduin-test-cockpit-schedule-not-starved ()
+  :tags '(maduin)
+  (let* ((buf (generate-new-buffer " *maduin-cockpit-schedule-stream*"))
+         (maduin-cockpit-buffer-name (buffer-name buf))
+        (clock 0.0) (renders 0) (scheduled nil)
+        (maduin-cockpit--pending-render nil)
+        (maduin-cockpit--last-render nil)
+        (maduin-cockpit--now-fn (lambda () clock)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window)
+                   (lambda (buffer &optional _all) (and (eq buffer buf) (selected-window))))
+                  ((symbol-function 'timerp) (lambda (timer) (eq timer 'render-timer)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (delay _repeat function &rest args)
+                     (push (list delay function args) scheduled) 'render-timer))
+                  ((symbol-function 'maduin-pipeline-status-refresh) (lambda (&optional _callback)))
+                  ((symbol-function 'maduin-cockpit-refresh)
+                   (lambda () (cl-incf renders)
+                     (setq maduin-cockpit--last-render (funcall maduin-cockpit--now-fn)))))
+          (maduin-cockpit--schedule-refresh)
+          (apply (nth 1 (car scheduled)) (nth 2 (car scheduled)))
+          (dotimes (interval 3)
+            (setq clock (+ (* interval maduin-cockpit-min-render-interval) 0.01))
+            (dotimes (_ 50) (maduin-cockpit--schedule-refresh))
+            (setq clock (* (1+ interval) maduin-cockpit-min-render-interval))
+            (apply (nth 1 (car scheduled)) (nth 2 (car scheduled))))
+          (should (>= renders 4)))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest maduin-test-cockpit-schedule-hidden-buffer-noop ()
+  :tags '(maduin)
+  (let* ((buf (generate-new-buffer " *maduin-cockpit-schedule-hidden*"))
+         (maduin-cockpit-buffer-name (buffer-name buf))
+        (renders 0) (maduin-cockpit--pending-render nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) (error "unexpected timer")))
+                  ((symbol-function 'maduin-cockpit-refresh) (lambda () (cl-incf renders))))
+          (maduin-cockpit--schedule-refresh)
+          (should (= renders 0))
+          (should-not maduin-cockpit--pending-render))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest maduin-test-cockpit-schedule-timer-cleared-on-kill ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-schedule-kill*"))
+        (cancelled 0) (maduin-cockpit-buffer-name " *maduin-cockpit-schedule-kill*")
+        (maduin-cockpit--timer nil) (maduin-cockpit--pending-render nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window)
+                   (lambda (buffer &optional _all) (and (eq buffer buf) (selected-window))))
+                  ((symbol-function 'timerp) (lambda (timer) (eq timer 'render-timer)))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) 'render-timer))
+                  ((symbol-function 'cancel-timer) (lambda (&rest _) (cl-incf cancelled))))
+          (with-current-buffer buf
+            (add-hook 'kill-buffer-hook #'maduin-cockpit--stop-timer nil t))
+          (maduin-cockpit--schedule-refresh)
+          (kill-buffer buf)
+          (should-not maduin-cockpit--pending-render)
+          (should (= cancelled 1)))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest maduin-test-dispatch-notify-skips-unchanged-status ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--active
+         (list (list :handle "h1" :status 'working :phase nil)))
+        (notifies 0))
+    (cl-letf (((symbol-function 'maduin-dispatch--notify)
+               (lambda (&optional _reason) (cl-incf notifies))))
+      (maduin-dispatch--set-status "h1" 'running)
+      (maduin-dispatch--set-status "h1" 'running)
+      (should (= notifies 1))
+      (maduin-dispatch--on-event "h1" 'tool)
+      (maduin-dispatch--on-event "h1" 'tool)
+      (should (= notifies 2)))))

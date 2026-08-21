@@ -282,10 +282,11 @@ conflicts 3) git add -A 4) git commit. Report blockers instead of guessing."
       (error nil))))
 
 (defun maduin-dispatch--set-status (handle status)
-  "Store STATUS on active entry HANDLE and request a refresh.
+  "Store changed STATUS on active entry HANDLE and request a refresh.
 Return non-nil when HANDLE was active.  Missing entries are a silent no-op."
   (condition-case nil
-      (let ((found nil))
+      (let ((found nil)
+            (changed nil))
         (setq maduin-dispatch--active
               (mapcar
                (lambda (entry)
@@ -293,19 +294,22 @@ Return non-nil when HANDLE was active.  Missing entries are a silent no-op."
                           (equal handle (plist-get entry :handle)))
                      (progn
                        (setq found t)
-                       (plist-put entry :status status))
-                   entry))
+                       (unless (equal status (plist-get entry :status))
+                         (setq changed t)
+                         (plist-put entry :status status))
+                       entry)))
                maduin-dispatch--active))
-        (when found (maduin-dispatch--notify))
+        (when changed (maduin-dispatch--notify))
         found)
     (error nil)))
 
 (defun maduin-dispatch--on-event (sid phase)
-  "Store PHASE on active entry SID and nudge the cockpit.
-The first event changes its status to `running'.  This hook runs from a
-process filter, so malformed or stale events are silent no-ops."
+  "Store changed PHASE on active entry SID and nudge the cockpit.
+This hook runs from a process filter, so it only mutates state and schedules
+work indirectly through `maduin-dispatch--notify'."
   (condition-case nil
       (let ((found nil)
+            (phase-changed nil)
             (status nil))
         (setq maduin-dispatch--active
               (mapcar
@@ -315,11 +319,13 @@ process filter, so malformed or stale events are silent no-ops."
                      (progn
                        (setq found t
                              status (plist-get entry :status))
-                       (setq entry (plist-put entry :phase phase))
+                       (unless (equal phase (plist-get entry :phase))
+                         (setq phase-changed t)
+                         (setq entry (plist-put entry :phase phase)))
                        entry)
                    entry))
                maduin-dispatch--active))
-        (when found
+        (when (and found (or phase-changed (not (eq status 'running))))
           (if (eq status 'running)
               (maduin-dispatch--notify)
             (maduin-dispatch--set-status sid 'running)))

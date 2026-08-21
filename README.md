@@ -52,8 +52,10 @@ inbox in a lower window when chaplet is installed. chaplet is a
 magit-style Emacs interface for the `bd` issue tracker. Use it to
 browse beads, inspect dependency graphs, and approve or reject staged
 work through `transient` menus. Inbox views re-fetch from `bd` on
-focus (see `chaplet-auto-refresh`). Install chaplet from its own
-repository; maduin uses it as an optional dependency.
+focus (see `chaplet-auto-refresh`), and the embedded inbox refreshes on
+explicit `r` (cockpit refresh) or `i` (inbox) commands, never on the
+cockpit timer. Install chaplet from its own repository; maduin uses it
+as an optional dependency.
 
 ## Requirements
 
