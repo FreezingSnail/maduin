@@ -39,6 +39,8 @@ FILES=(
   "maduin-handoff.el"
   "maduin-dispatch.el"
   "maduin-cockpit-face.el"
+  "maduin-cockpit-bar.el"
+  "maduin-cockpit-config.el"
   "maduin-cockpit.el"
   "maduin-designer.el"
   "maduin-concierge.el"

@@ -50,6 +50,9 @@ The buffer holds the subprocess plus buffer-local state:
 Each hook receives two args: (SID STATUS) where STATUS is `completed'
 or `failed'.  Run from the process sentinel once per session.")
 
+(defvar maduin-session-on-event-hook nil
+  "Hooks notified with live autonomous-session events when available.")
+
 ;; Buffer-local state for run-session buffers (set via `setq-local').
 (defvar maduin-session--handle nil
   "Session handle (the value returned by `maduin-session-run').")

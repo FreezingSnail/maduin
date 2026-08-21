@@ -107,8 +107,19 @@ Reuses maduin-designer machinery (Ramuh decomposition session).")
 ;;; Active-session registry (concurrency tracking).
 
 (defvar maduin-dispatch--active nil
-  "List of plists (:handle :seat :role :task) for in-flight sessions.
-ROLE is a symbol: `implementer', `designer' or `repairer'.")
+  "List of plists for in-flight sessions.
+
+Entry shape (additive — older entries missing new keys are tolerated):
+
+  (:handle SID :seat SEAT :role ROLE :task TASK
+   :model MODEL :backend BACKEND :fallback-attempted BOOL
+   :started FLOAT      ; `float-time' at push
+   :status SYMBOL      ; working | running | repairing | failed
+   :phase  STRING|nil) ; last session phase
+
+ROLE is a symbol: `implementer', `designer' or `repairer'.
+A fallback re-spawn creates a NEW entry with a fresh :started (uptime
+measures the current attempt, not the original claim).")
 
 (defvar maduin-dispatch--timer nil
   "Run-loop timer, or nil when dispatchers are inactive.")
@@ -265,6 +276,60 @@ conflicts 3) git add -A 4) git commit. Report blockers instead of guessing."
     ('repairer (maduin-dispatch--repair-plan seat task))
     (_ (maduin-dispatch--implement-plan task))))
 
+;;; Live-state notifications
+
+(defun maduin-dispatch--notify (&optional _reason)
+  "Request a cockpit refresh.  No-op when the cockpit is not loaded."
+  (when (boundp 'maduin-cockpit-refresh-hook)
+    (condition-case nil
+        (run-hook-with-args 'maduin-cockpit-refresh-hook)
+      (error nil))))
+
+(defun maduin-dispatch--set-status (handle status)
+  "Store STATUS on active entry HANDLE and request a refresh.
+Return non-nil when HANDLE was active.  Missing entries are a silent no-op."
+  (condition-case nil
+      (let ((found nil))
+        (setq maduin-dispatch--active
+              (mapcar
+               (lambda (entry)
+                 (if (and (not found)
+                          (equal handle (plist-get entry :handle)))
+                     (progn
+                       (setq found t)
+                       (plist-put entry :status status))
+                   entry))
+               maduin-dispatch--active))
+        (when found (maduin-dispatch--notify))
+        found)
+    (error nil)))
+
+(defun maduin-dispatch--on-event (sid phase)
+  "Store PHASE on active entry SID and nudge the cockpit.
+The first event changes its status to `running'.  This hook runs from a
+process filter, so malformed or stale events are silent no-ops."
+  (condition-case nil
+      (let ((found nil)
+            (status nil))
+        (setq maduin-dispatch--active
+              (mapcar
+               (lambda (entry)
+                 (if (and (not found)
+                          (equal sid (plist-get entry :handle)))
+                     (progn
+                       (setq found t
+                             status (plist-get entry :status))
+                       (setq entry (plist-put entry :phase phase))
+                       entry)
+                   entry))
+               maduin-dispatch--active))
+        (when found
+          (if (eq status 'running)
+              (maduin-dispatch--notify)
+            (maduin-dispatch--set-status sid 'running)))
+        nil)
+    (error nil)))
+
 ;;; Spawn
 
 (defun maduin-dispatch--spawn (task role seat &optional model plan)
@@ -274,8 +339,11 @@ PLAN overrides the role's default plan string (designer owns its prompt)."
   (unless (>= (maduin-dispatch--active-role-count role)
               (maduin-dispatch--role-cap role))
     (let ((seat (or seat (maduin-dispatch--free-seat role))))
-      (when (and seat (funcall maduin-dispatch--claim-fn task))
-        (maduin-dispatch--spawn-session task role seat model plan nil)))))
+      (when seat
+        (if (funcall maduin-dispatch--claim-fn task)
+            (maduin-dispatch--spawn-session task role seat model plan nil)
+          (maduin-dispatch--notify)
+          nil)))))
 
 (defun maduin-dispatch--spawn-session (task role seat model plan fallback-attempted
                                             &optional backend)
@@ -295,18 +363,20 @@ new launch, then retained for fallback and completion lifecycle calls."
               (progn
                 (push (list :handle sid :seat seat :role role :task task
                             :model model :backend backend
-                            :fallback-attempted fallback-attempted)
+                            :fallback-attempted fallback-attempted
+                            :started (float-time) :status 'working :phase nil)
                       maduin-dispatch--active)
-                (when (boundp 'maduin-cockpit-refresh-hook)
-                  (run-hook-with-args 'maduin-cockpit-refresh-hook))
+                (maduin-dispatch--notify)
                 sid)
             (funcall maduin-dispatch--comment-fn
                      task "session failed — task left open")
             (funcall maduin-dispatch--release-fn task)
+            (maduin-dispatch--notify)
             nil))
       (error
        (funcall maduin-dispatch--comment-fn task "session failed — task left open")
        (funcall maduin-dispatch--release-fn task)
+       (maduin-dispatch--notify)
        nil))))
 
 ;;; Completion → land → close
@@ -362,6 +432,7 @@ close: the epic stays open until its children are implemented."
   "Handle failed STATUS for ENTRY, retrying one limited session on fallback.
 The retry uses ENTRY's sticky backend, keeps its existing claim, and is bounded
 by `:fallback-attempted'.  Every other failure releases the claim."
+  (maduin-dispatch--set-status sid 'failed)
   (let* ((role (plist-get entry :role))
          (seat (plist-get entry :seat))
          (task (plist-get entry :task))
@@ -375,9 +446,11 @@ by `:fallback-attempted'.  Every other failure releases the claim."
           (funcall maduin-dispatch--comment-fn
                    task "usage limit — retrying with fallback model")
           (maduin-dispatch--spawn-session
-           task role seat fallback nil t backend))
+           task role seat fallback nil t backend)
+          (maduin-dispatch--notify))
       (funcall maduin-dispatch--comment-fn task "session failed — task left open")
-      (funcall maduin-dispatch--release-fn task))))
+      (funcall maduin-dispatch--release-fn task)
+      (maduin-dispatch--notify))))
 
 (defun maduin-dispatch--on-complete (sid status)
   "Completion hook: route a finished session SID (STATUS `completed'|`failed').
@@ -387,8 +460,11 @@ while work is in flight)."
   (let ((entry (cl-find-if (lambda (e) (string= (plist-get e :handle) sid))
                            maduin-dispatch--active)))
     (when entry
+      (unless (eq status 'completed)
+        (maduin-dispatch--set-status sid 'failed))
       (setq maduin-dispatch--active
             (delq entry maduin-dispatch--active))
+      (maduin-dispatch--notify)
       (unwind-protect
           (if (eq status 'completed)
               (maduin-dispatch--complete entry sid)
@@ -396,14 +472,14 @@ while work is in flight)."
         (funcall maduin-dispatch--session-delete-fn
                  (plist-get entry :backend) sid))
       (maduin-dispatch--maybe-drained)
-      (when (boundp 'maduin-cockpit-refresh-hook)
-        (run-hook-with-args 'maduin-cockpit-refresh-hook)))))
+      (maduin-dispatch--notify))))
 
 (defun maduin-dispatch--maybe-drained ()
   "Signal soft-stop completion when draining and no sessions remain."
   (when (and maduin-dispatch--draining (null maduin-dispatch--active))
     (setq maduin-dispatch--draining nil)
-    (message "maduin stopped (drained)")))
+    (message "maduin stopped (drained)")
+    (maduin-dispatch--notify)))
 
 ;;; Public API
 
@@ -421,7 +497,9 @@ given, overrides the default design plan (the designer owns the prompt)."
 (defun maduin-dispatch-repair (seat task)
   "Dispatch a conflict-repair session (Phoenix) for SEAT on TASK.
 Return a session handle, or nil when a repairer is already active."
-  (maduin-dispatch--spawn task 'repairer seat))
+  (let ((sid (maduin-dispatch--spawn task 'repairer seat)))
+    (when sid (maduin-dispatch--set-status sid 'repairing))
+    sid))
 
 ;;; Recovery — orphaned in_progress tasks
 
@@ -445,6 +523,7 @@ tasks re-dispatched."
     (dolist (task (maduin-dispatch--orphaned-tasks))
       (when (maduin-dispatch-implement task)
         (setq n (1+ n))))
+    (when (> n 0) (maduin-dispatch--notify))
     n))
 
 ;;; Run loop
@@ -482,13 +561,23 @@ concurrency cap is reached.  No-op while draining (soft stop in progress)."
   (unless (memq #'maduin-dispatch--on-complete maduin-session-on-complete-hook)
     (add-hook 'maduin-session-on-complete-hook #'maduin-dispatch--on-complete)))
 
+(defun maduin-dispatch--register-event-hook ()
+  "Register the phase-event hook once when the session substrate provides it."
+  (condition-case nil
+      (when (boundp 'maduin-session-on-event-hook)
+        (unless (memq #'maduin-dispatch--on-event
+                      (symbol-value 'maduin-session-on-event-hook))
+          (add-hook 'maduin-session-on-event-hook #'maduin-dispatch--on-event)))
+    (error nil)))
+
 (defun maduin-dispatch--handoff-live ()
   "Delete all in-flight sessions and clear the registry.
 Tasks are left open; their worktree changes persist for the next run."
   (dolist (entry (copy-sequence maduin-dispatch--active))
     (funcall maduin-dispatch--session-delete-fn
              (plist-get entry :backend) (plist-get entry :handle)))
-  (setq maduin-dispatch--active nil))
+  (setq maduin-dispatch--active nil)
+  (maduin-dispatch--notify))
 
 (defun maduin-dispatch-start ()
   "Activate dispatchers: register the completion hook and start the
@@ -496,6 +585,7 @@ run-loop timer.  Runs one recovery pass immediately so tasks orphaned
 by a prior mid-task quit are re-dispatched without waiting for the
 first timer tick."
   (maduin-dispatch--register-hook)
+  (maduin-dispatch--register-event-hook)
   (when maduin-dispatch--timer
     (cancel-timer maduin-dispatch--timer)
     (setq maduin-dispatch--timer nil))
@@ -503,6 +593,7 @@ first timer tick."
     (setq maduin-dispatch--timer
           (run-at-time interval interval #'maduin-dispatch-run-loop)))
   (maduin-dispatch--recover)
+  (maduin-dispatch--notify)
   t)
 
 (defun maduin-dispatch-stop (&optional hard)
@@ -522,9 +613,11 @@ immediately delete any live sessions (tasks stay open)."
           (message "maduin: draining %d session(s)..."
                    (length maduin-dispatch--active)))
       (setq maduin-dispatch--draining nil)
-      (message "maduin stopped"))))
+      (message "maduin stopped")))
+  (maduin-dispatch--notify))
 
 (maduin-dispatch--register-hook)
+(maduin-dispatch--register-event-hook)
 
 (provide 'maduin-dispatch)
 

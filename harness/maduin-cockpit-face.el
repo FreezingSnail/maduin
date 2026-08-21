@@ -75,6 +75,16 @@
   "Face for fleet-busy pipeline chips."
   :group 'maduin-cockpit)
 
+(defface maduin-cockpit-cue
+  '((t :foreground "#7f849c"))
+  "Face for the cockpit idle-state cue."
+  :group 'maduin-cockpit)
+
+(defface maduin-cockpit-bar
+  '((t :foreground "#5c6370"))
+  "Face for the cockpit mode-line hint bar."
+  :group 'maduin-cockpit)
+
 ;;; Palettes
 
 (defconst maduin-cockpit-face--palette
@@ -89,7 +99,9 @@
      (maduin-cockpit-chip-completed . "#98c379")
      (maduin-cockpit-chip-blocked   . "#e06c75")
      (maduin-cockpit-chip-fleet-free . "#98c379")
-     (maduin-cockpit-chip-fleet-busy . "#c678dd"))
+     (maduin-cockpit-chip-fleet-busy . "#c678dd")
+     (maduin-cockpit-cue             . "#7f849c")
+     (maduin-cockpit-bar             . "#7f849c"))
     (light
      (maduin-cockpit-state-dead     . "#6e7278")
      (maduin-cockpit-state-idle     . "#1f6fb2")
@@ -101,7 +113,9 @@
      (maduin-cockpit-chip-completed . "#1f7a3d")
      (maduin-cockpit-chip-blocked   . "#b3261e")
      (maduin-cockpit-chip-fleet-free . "#1f7a3d")
-     (maduin-cockpit-chip-fleet-busy . "#7b2d8b")))
+     (maduin-cockpit-chip-fleet-busy . "#7b2d8b")
+     (maduin-cockpit-cue             . "#6c7086")
+     (maduin-cockpit-bar . "#6e7278")))
   "Palettes keyed by theme: ((dark (face . color) ...) (light ...)).")
 
 (defconst maduin-cockpit-face--pill-faces

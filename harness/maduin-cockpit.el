@@ -20,6 +20,8 @@
 (require 'maduin-bd-bridge)
 (require 'maduin-dispatch)
 (require 'maduin-cockpit-face)
+(require 'maduin-cockpit-bar)
+(require 'maduin-cockpit-config)
 
 ;; chaplet (optional) — embedded inbox.  Symbols are fboundp-guarded at
 ;; runtime and declared here so this file byte-compiles without chaplet.
@@ -29,6 +31,11 @@
 ;; byte-compiles when evil is not installed (AGENTS.md: use the
 ;; evil-define-key* function, not the macro).
 (declare-function evil-define-key* "evil-core" (state keymap &rest bindings))
+(declare-function maduin-concierge "maduin-concierge" ())
+(declare-function maduin-concierge-dismiss "maduin-concierge" ())
+(declare-function maduin-designer-drop-in "maduin-designer" (&optional seat))
+(declare-function maduin-designer-pending-tasks "maduin-designer" ())
+(declare-function maduin-terminal--buffer-name "maduin-terminal" (role seat))
 
 (defvar maduin-cockpit-buffer-name "*maduin-cockpit*"
   "Name of the cockpit dashboard buffer.")
@@ -71,13 +78,18 @@ and chaplet's own focus hook.")
   '(("r"   . maduin-cockpit-refresh)
     ("q"   . quit-window)
     ("i"   . maduin-cockpit-inbox)
-    ("b"   . maduin-cockpit--toggle-backend))
+    ("b"   . maduin-cockpit--toggle-backend)
+    ("c"   . maduin-cockpit-config)
+    ("a"   . maduin-concierge)
+    ("A"   . maduin-concierge-dismiss)
+    ("n"   . maduin-designer-drop-in)
+    ("p"   . maduin-designer-pending-tasks))
   "Cockpit keybindings as ((KEY . DEF) ...), KEY a `kbd' string.
 Single source of truth; mirrored into evil normal/motion states when
 evil is available.")
 
 (defconst maduin-cockpit--evil-suppress-keys
-  '("v" "V" "C-v" "c" "C" "d" "D" "s" "S" "x" "X" "R" "p" "P")
+  '("v" "V" "C-v" "C" "d" "D" "s" "S" "x" "X" "R")
   "Single-char motions suppressed in evil states only.
 In the read-only cockpit these would leak into visual/change state;
 they are bound to nil in evil normal/motion states while the plain map
@@ -153,7 +165,9 @@ Tolerates either an object or an array shape in the JSON output."
   "Return STATUS as a pill string with a face text property.
 Known STATUS symbols carry their `maduin-cockpit-state-face'; unknown or
 nil statuses render as plain text (\"dead\" when nil)."
-  (let* ((face (maduin-cockpit-state-face status))
+  (let* ((face (if (eq status 'discussing)
+                   'maduin-cockpit-state-running
+                 (maduin-cockpit-state-face status)))
          (text (cond ((null status) "dead")
                      ((stringp status) status)
                      (t (symbol-name status)))))
@@ -165,6 +179,16 @@ nil statuses render as plain text (\"dead\" when nil)."
   "Return configured role symbol for SEAT, or nil when SEAT is unknown."
   (let ((role (cdr (assoc seat (maduin-cockpit--seats)))))
     (and role (intern role))))
+
+(defun maduin-cockpit--concierge-live-p (seat)
+  "Return non-nil when concierge SEAT has a live terminal buffer.
+Missing terminal support or malformed seat state never interrupts a
+cockpit refresh."
+  (condition-case nil
+      (and (fboundp 'maduin-terminal--buffer-name)
+           (buffer-live-p
+            (get-buffer (maduin-terminal--buffer-name 'concierge seat))))
+    (error nil)))
 
 (defun maduin-cockpit--seat-status (seat)
   "Return rich plist for SEAT:
@@ -178,7 +202,11 @@ sessions expose it.  Never signals."
          (role (maduin-cockpit--seat-role seat)))
     (list :seat seat
           :role (and entry (plist-get entry :role))
-          :status (and entry (or (plist-get entry :status) 'working))
+          :status (if entry
+                      (or (plist-get entry :status) 'working)
+                    (and (eq role 'concierge)
+                         (maduin-cockpit--concierge-live-p seat)
+                         'discussing))
           :task-id (and entry (plist-get entry :task))
           :task-title (maduin-cockpit--task-title
                        (and entry (plist-get entry :task)))
@@ -208,7 +236,10 @@ sessions expose it.  Never signals."
            for st = (maduin-cockpit--seat-status seat)
            collect (list seat
                          (vector seat
-                                 (or (plist-get st :role) role)
+                                 (let ((display-role (or (plist-get st :role) role)))
+                                   (if (symbolp display-role)
+                                       (symbol-name display-role)
+                                     display-role))
                                  (maduin-cockpit--status-pill
                                   (plist-get st :status))
                                  (maduin-cockpit--task-string st)
@@ -255,6 +286,28 @@ Each chip carries its `maduin-cockpit-chip-face' text property."
          (if face (propertize chip 'face face) chip)))
      specs " ")))
 
+(defun maduin-cockpit--idle-p ()
+  "Return non-nil when no dispatch work or queued pipeline work exists."
+  (condition-case nil
+      (and (null maduin-dispatch--active)
+           (equal (plist-get (maduin-pipeline-status) :queued) 0))
+    (error nil)))
+
+(defun maduin-cockpit--cue ()
+  "Return the propertized empty-cockpit cue."
+  (propertize "no work in flight · [a] summon concierge · [c] config"
+              'face 'maduin-cockpit-cue))
+
+(defun maduin-cockpit--render-footer ()
+  "Render all content after the seat table without disturbing row ids."
+  (condition-case nil
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert (maduin-cockpit--pipeline-summary))
+        (when (maduin-cockpit--idle-p)
+          (insert "\n" (maduin-cockpit--cue))))
+    (error nil)))
+
 ;;;###autoload
 (defun maduin-cockpit-show ()
   "Create (or switch to) the cockpit dashboard buffer, and embed the
@@ -266,6 +319,7 @@ Return the cockpit buffer."
     (tabulated-list-mode)
     (use-local-map maduin-cockpit-map)
     (maduin-cockpit--evil-setup)
+    (maduin-cockpit-bar-install)
     (with-current-buffer buf
       (add-hook 'kill-buffer-hook #'maduin-cockpit--stop-timer nil t))
     (maduin-cockpit--register-live-updates)
@@ -293,9 +347,7 @@ focus-driven path can throttle rapid window switches."
                 '("Activity" 12 t)))
   (setq tabulated-list-entries (maduin-cockpit--rows))
   (tabulated-list-print t)
-  (goto-char (point-max))
-  (let ((inhibit-read-only t))
-    (insert (maduin-cockpit--pipeline-summary)))
+  (maduin-cockpit--render-footer)
   (goto-char (point-min)))
 
 (defun maduin-cockpit--start-timer ()

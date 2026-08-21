@@ -221,6 +221,60 @@
     (should-error (maduin-config-seat-model 'implementer "ifrit" 'kiro)
                   :type 'user-error)))
 
+(ert-deftest maduin-test-config-option-schema-coverage ()
+  :tags '(maduin)
+  (dolist (section maduin-config)
+    (dolist (cell (cdr section))
+      (unless (eq (car cell) 'seats)
+        (should (maduin-config--option-spec (car section) (car cell)))))))
+
+(ert-deftest maduin-test-config-option-get ()
+  :tags '(maduin)
+  (should (= (maduin-config-option 'fleet 'poll-interval) 30)))
+
+(ert-deftest maduin-test-config-option-options ()
+  :tags '(maduin)
+  (let ((options (maduin-config-options)))
+    (should (= (length options) (length maduin-config--option-schema)))
+    (should (equal (cl-subseq (car options) 0 12)
+                   '(:section harness :key name :label "harness name"
+                     :type string :choices nil :value "maduin")))))
+
+(ert-deftest maduin-test-config-option-set ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (should (= (maduin-config-set-option 'fleet 'poll-interval 45) 45))
+    (should (= (maduin-config-option 'fleet 'poll-interval) 45))))
+
+(ert-deftest maduin-test-config-option-rejects-invalid-type ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (should-error (maduin-config-set-option 'fleet 'poll-interval "45")
+                  :type 'user-error)
+    (should (= (maduin-config-option 'fleet 'poll-interval) 30))))
+
+(ert-deftest maduin-test-config-option-rejects-unknown-key ()
+  :tags '(maduin)
+  (should-error (maduin-config-set-option 'fleet 'nope 1) :type 'user-error))
+
+(ert-deftest maduin-test-config-option-rejects-invalid-choice ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (should-error (maduin-config-set-option 'concierge 'backend 'bogus)
+                  :type 'user-error)
+    (should (eq (maduin-config-set-option 'concierge 'backend 'kiro) 'kiro))
+    (should (eq (maduin-config-option 'concierge 'backend) 'kiro))))
+
+(ert-deftest maduin-test-config-option-adds-missing-key ()
+  :tags '(maduin)
+  (let ((maduin-config '((fleet . ((agent . "worker"))))))
+    (should (= (maduin-config-set-option 'fleet 'poll-interval 45) 45))
+    (should (= (maduin-config-option 'fleet 'poll-interval) 45))))
+
+(ert-deftest maduin-test-config-option-save-rejected ()
+  :tags '(maduin)
+  (should-error (maduin-config-save) :type 'user-error))
+
 ;;; 3. bd-bridge
 
 (ert-deftest maduin-test-bd-json-data-array ()
@@ -742,6 +796,106 @@
       (cancel-timer maduin-cockpit--timer)
       (setq maduin-cockpit--timer nil))))
 
+;;; 8a. cockpit-concierge-entry
+
+(ert-deftest maduin-test-cockpit-concierge-bindings ()
+  :tags '(maduin)
+  (dolist (binding '(("a" . maduin-concierge)
+                     ("A" . maduin-concierge-dismiss)
+                     ("n" . maduin-designer-drop-in)
+                     ("p" . maduin-designer-pending-tasks)))
+    (should (eq (lookup-key maduin-cockpit-map (kbd (car binding)))
+                (cdr binding))))
+  (should-not (member "a" maduin-cockpit--evil-suppress-keys))
+  (should-not (member "A" maduin-cockpit--evil-suppress-keys))
+  (should-not (member "n" maduin-cockpit--evil-suppress-keys))
+  (should-not (member "p" maduin-cockpit--evil-suppress-keys))
+  (let ((recorded nil))
+    (cl-letf (((symbol-function 'featurep) (lambda (f &optional _s) (eq f 'evil)))
+              ((symbol-function 'fboundp) (lambda (f) (eq f 'evil-define-key*)))
+              ((symbol-function 'evil-define-key*)
+               (lambda (state _map key def) (push (list state key def) recorded))))
+      (maduin-cockpit--evil-setup))
+    (dolist (binding '(("a" . maduin-concierge)
+                       ("A" . maduin-concierge-dismiss)
+                       ("n" . maduin-designer-drop-in)
+                       ("p" . maduin-designer-pending-tasks)))
+      (dolist (state '(normal motion))
+        (should (member (list state (kbd (car binding)) (cdr binding)) recorded))))))
+
+(ert-deftest maduin-test-cockpit-concierge-hint-labels ()
+  :tags '(maduin)
+  (dolist (expectation '((maduin-concierge . "concierge")
+                         (maduin-concierge-dismiss . "dismiss")
+                         (maduin-designer-drop-in . "design drop-in")
+                         (maduin-designer-pending-tasks . "pending")))
+    (should (equal (alist-get (car expectation) maduin-cockpit-bar--labels)
+                   (cdr expectation)))))
+
+(ert-deftest maduin-test-cockpit-empty-state-cue-and-row-id ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-empty*"))
+        (maduin-dispatch--active nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-cockpit--seats)
+                   (lambda () '(("alexander" . "concierge"))))
+                  ((symbol-function 'maduin-pipeline-status)
+                   (lambda () '(:queued 0 :active 0 :completed 0 :blocked 0
+                                :fleet-free 0 :fleet-busy 0))))
+          (with-current-buffer buf
+            (tabulated-list-mode)
+            (maduin-cockpit-refresh)
+            (maduin-cockpit-refresh)
+            (should (= (how-many "no work in flight" (point-min) (point-max)) 1))
+            (goto-char (point-min))
+            (should (search-forward "alexander" nil t))
+            (goto-char (match-beginning 0))
+            (should (equal (tabulated-list-get-id) "alexander"))))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-empty-state-absent-while-active ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-active*"))
+        (maduin-dispatch--active
+         (list (list :seat "alexander" :role 'concierge :status 'working))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-cockpit--seats)
+                   (lambda () '(("alexander" . "concierge"))))
+                  ((symbol-function 'maduin-pipeline-status)
+                   (lambda () '(:queued 0 :active 1 :completed 0 :blocked 0
+                                :fleet-free 0 :fleet-busy 0))))
+          (with-current-buffer buf
+            (tabulated-list-mode)
+            (maduin-cockpit-refresh)
+            (should-not (string-match-p "no work in flight" (buffer-string)))))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-concierge-liveness-rendering ()
+  :tags '(maduin)
+  (let* ((seat "alexander")
+         (name (maduin-terminal--buffer-name 'concierge seat))
+         (terminal (generate-new-buffer name))
+         (maduin-dispatch--active nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'maduin-cockpit--seats)
+                   (lambda () (list (cons seat "concierge")))))
+          (let* ((row (car (maduin-cockpit--rows)))
+                 (status (aref (cadr row) 2)))
+            (should (equal status "discussing"))
+            (should (eq (get-text-property 0 'face status)
+                        'maduin-cockpit-state-running)))
+          (kill-buffer terminal)
+          (should (equal (aref (cadr (car (maduin-cockpit--rows))) 2) "dead")))
+      (when (buffer-live-p terminal) (kill-buffer terminal)))))
+
+(ert-deftest maduin-test-cockpit-empty-state-cue-face ()
+  :tags '(maduin)
+  (should (facep 'maduin-cockpit-cue))
+  (dolist (palette '(dark light))
+    (should (assq 'maduin-cockpit-cue
+                  (cdr (assq palette maduin-cockpit-face--palette)))))
+  (should-not (memq 'maduin-cockpit-cue maduin-cockpit-face--pill-faces)))
+
 ;;; 8b. cockpit-face
 
 (ert-deftest maduin-test-cockpit-face-state-face-known ()
@@ -1048,7 +1202,7 @@
 
 (ert-deftest maduin-test-dispatch-on-complete-runs-cockpit-refresh-hook ()
   :tags '(maduin)
-  ;; Removal path nudge: completion fires the guarded refresh hook.
+  ;; Removal and routed-completion transitions each nudge the cockpit.
   (let* ((dir (maduin-test--temp-dir))
          (count 0)
          (maduin-cockpit-refresh-hook (list (lambda () (setq count (1+ count)))))
@@ -1061,10 +1215,86 @@
     (unwind-protect
         (progn
           (maduin-dispatch--on-complete "s-1" 'completed)
-          (should (= count 1))
+          (should (= count 2))
           (should-not maduin-dispatch--active))
       (delete-directory dir t))))
 
+
+;;; 8d. dispatch-live-state
+
+(ert-deftest maduin-test-dispatch-live-spawn-entry-state ()
+  :tags '(maduin)
+  (let* ((dir (maduin-test--temp-dir))
+         (count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (cl-incf count))))
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--session-run-fn (lambda (_w _m _a _p _b) "live-1"))
+         (maduin-dispatch--claim-fn (lambda (_task) t))
+         (maduin-dispatch--show-fn (lambda (_task) (list :title "T" :desc "D")))
+         (maduin-dispatch--workdir-fn (lambda (_seat) dir)))
+    (unwind-protect
+        (let ((entry (progn
+                       (should (equal (maduin-dispatch-implement "t-live") "live-1"))
+                       (car maduin-dispatch--active))))
+          (should (floatp (plist-get entry :started)))
+          (should (eq (plist-get entry :status) 'working))
+          (should (= count 1)))
+      (delete-directory dir t))))
+
+(ert-deftest maduin-test-dispatch-live-event-updates-phase-and-status ()
+  :tags '(maduin)
+  (let* ((count 0)
+         (maduin-cockpit-refresh-hook (list (lambda () (cl-incf count))))
+         (maduin-dispatch--active
+          (list (list :handle "live-1" :seat "ifrit" :role 'implementer
+                      :task "t-live" :status 'working))))
+    (should-not (maduin-dispatch--on-event "live-1" "thinking"))
+    (let ((entry (car maduin-dispatch--active)))
+      (should (equal (plist-get entry :phase) "thinking"))
+      (should (eq (plist-get entry :status) 'running)))
+    (should (= count 1))
+    (maduin-dispatch--on-event "live-1" "tool")
+    (should (equal (plist-get (car maduin-dispatch--active) :phase) "tool"))
+    (should (= count 2))))
+
+(ert-deftest maduin-test-dispatch-live-notify-unbound-noop ()
+  :tags '(maduin)
+  (let ((was-bound (boundp 'maduin-cockpit-refresh-hook))
+        (saved (and (boundp 'maduin-cockpit-refresh-hook)
+                    (symbol-value 'maduin-cockpit-refresh-hook))))
+    (unwind-protect
+        (progn
+          (makunbound 'maduin-cockpit-refresh-hook)
+          (should-not (maduin-dispatch--notify)))
+      (when was-bound
+        (set 'maduin-cockpit-refresh-hook saved)))))
+
+(ert-deftest maduin-test-dispatch-live-event-hook-registers-once ()
+  :tags '(maduin)
+  (let ((was-bound (boundp 'maduin-session-on-event-hook))
+        (saved (and (boundp 'maduin-session-on-event-hook)
+                    (symbol-value 'maduin-session-on-event-hook))))
+    (unwind-protect
+        (progn
+          (funcall #'set 'maduin-session-on-event-hook nil)
+          (maduin-dispatch--register-event-hook)
+          (maduin-dispatch--register-event-hook)
+          (should (memq #'maduin-dispatch--on-event
+                        (symbol-value 'maduin-session-on-event-hook)))
+          (should (= (cl-count #'maduin-dispatch--on-event
+                               (symbol-value 'maduin-session-on-event-hook))
+                     1)))
+      (if was-bound
+          (funcall #'set 'maduin-session-on-event-hook saved)
+        (makunbound 'maduin-session-on-event-hook)))))
+
+(ert-deftest maduin-test-dispatch-live-old-entries-keep-concurrency-accounting ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--active
+         (list (list :handle "old-1" :seat "ifrit" :role 'implementer :task "t1")
+               (list :handle "old-2" :seat "shiva" :role 'implementer :task "t2"))))
+    (should (= (maduin-dispatch--active-role-count 'implementer) 2))
+    (should (equal (maduin-dispatch--free-seat 'implementer) "titan"))))
 ;;; 8e. cockpit-inbox (embedded chaplet inbox)
 
 (ert-deftest maduin-test-cockpit-show-inbox-absent-still-renders ()
@@ -3218,3 +3448,116 @@
 (provide 'maduin-test)
 
 ;;; maduin-test.el ends here
+
+
+;;; 8h. cockpit-config
+
+(defun maduin-test--cockpit-config-row (section key)
+  "Return config panel row for SECTION and KEY."
+  (cl-find-if (lambda (row)
+                (and (eq (plist-get row :section) section)
+                     (eq (plist-get row :key) key)))
+              (apply #'append (mapcar #'cdr (maduin-cockpit-config--rows)))))
+
+(ert-deftest maduin-test-cockpit-config-rows-group-every-schema-option ()
+  :tags '(maduin)
+  (let* ((groups (maduin-cockpit-config--rows))
+         (rows (apply #'append (mapcar #'cdr groups))))
+    (should (equal (mapcar #'car groups)
+                   '(harness concierge designer fleet reviewer repairer welfare workspaces)))
+    (should (= (length rows) (length (maduin-config-options))))
+    (should (equal (mapcar (lambda (row) (plist-get row :key))
+                           (cdr (assq 'harness groups)))
+                   '(name version)))))
+
+(ert-deftest maduin-test-cockpit-config-read-dispatches-by-type ()
+  :tags '(maduin)
+  (let ((integer (maduin-test--cockpit-config-row 'fleet 'poll-interval))
+        (boolean (maduin-test--cockpit-config-row 'reviewer 'enabled))
+        (symbol (maduin-test--cockpit-config-row 'fleet 'backend))
+        (string (maduin-test--cockpit-config-row 'fleet 'agent)))
+    (cl-letf (((symbol-function 'read-number) (lambda (&rest _args) 41))
+              ((symbol-function 'y-or-n-p) (lambda (&rest _args) t))
+              ((symbol-function 'completing-read) (lambda (&rest _args) "kiro"))
+              ((symbol-function 'read-string) (lambda (&rest _args) "worker-next")))
+      (should (= (maduin-cockpit-config--read integer) 41))
+      (should (eq (maduin-cockpit-config--read boolean) t))
+      (should (eq (maduin-cockpit-config--read symbol) 'kiro))
+      (should (equal (maduin-cockpit-config--read string) "worker-next")))))
+
+(ert-deftest maduin-test-cockpit-config-apply-refreshes-runtime-only ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config))
+        (row (maduin-test--cockpit-config-row 'fleet 'poll-interval))
+        (refreshes 0)
+        (message-text nil))
+    (cl-letf (((symbol-function 'maduin-cockpit-refresh)
+               (lambda () (cl-incf refreshes)))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq message-text (apply #'format format-string args)))))
+      (should (= (maduin-cockpit-config--apply row 41) 41))
+      (should (= (maduin-config-option 'fleet 'poll-interval) 41))
+      (should (= refreshes 1))
+      (should (string-match-p "runtime only" message-text))
+      (should (string-match-p "harness/config.el" message-text)))))
+
+(ert-deftest maduin-test-cockpit-config-apply-rejects-invalid-without-mutation ()
+  :tags '(maduin)
+  (let* ((maduin-config (copy-tree maduin-config))
+         (before (copy-tree maduin-config))
+         (row (maduin-test--cockpit-config-row 'fleet 'poll-interval))
+         (refreshes 0))
+    (cl-letf (((symbol-function 'maduin-cockpit-refresh)
+               (lambda () (cl-incf refreshes))))
+      (should-error (maduin-cockpit-config--apply row "41") :type 'user-error)
+      (should (equal maduin-config before))
+      (should (= refreshes 0)))))
+
+(ert-deftest maduin-test-cockpit-config-harness-identity-is-read-only ()
+  :tags '(maduin)
+  (dolist (key '(name version))
+    (let ((row (maduin-test--cockpit-config-row 'harness key)))
+      (should-error (maduin-cockpit-config--apply row "changed")
+                    :type 'user-error))))
+
+(ert-deftest maduin-test-cockpit-config-fallback-without-transient ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config))
+        (refreshes 0)
+        (real-fboundp (symbol-function 'fboundp)))
+    (cl-letf (((symbol-function 'fboundp)
+               (lambda (symbol)
+                 (if (memq symbol '(transient-setup transient-define-prefix))
+                     nil
+                   (funcall real-fboundp symbol))))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _args)
+                 (maduin-cockpit-config--display
+                  (maduin-test--cockpit-config-row 'fleet 'poll-interval))))
+              ((symbol-function 'read-number) (lambda (&rest _args) 47))
+              ((symbol-function 'maduin-cockpit-refresh)
+               (lambda () (cl-incf refreshes))))
+      (should (= (maduin-cockpit-config) 47))
+      (should (= (maduin-config-option 'fleet 'poll-interval) 47))
+      (should (= refreshes 1)))))
+
+(ert-deftest maduin-test-cockpit-config-binding-hint-and-evil-mirror ()
+  :tags '(maduin)
+  (should (eq (lookup-key maduin-cockpit-map (kbd "c"))
+              'maduin-cockpit-config))
+  (should-not (member "c" maduin-cockpit--evil-suppress-keys))
+  (should (equal (cdr (assq 'maduin-cockpit-config maduin-cockpit-bar--labels))
+                 "config"))
+  (should (memq 'maduin-cockpit-config maduin--feature-list))
+  (let ((recorded nil))
+    (cl-letf (((symbol-function 'featurep)
+               (lambda (feature &optional _subfeature) (eq feature 'evil)))
+              ((symbol-function 'fboundp)
+               (lambda (function) (eq function 'evil-define-key*)))
+              ((symbol-function 'evil-define-key*)
+               (lambda (state _map key definition)
+                 (push (list state key definition) recorded))))
+      (maduin-cockpit--evil-setup)
+      (should (member (list 'normal (kbd "c") 'maduin-cockpit-config) recorded))
+      (should (member (list 'motion (kbd "c") 'maduin-cockpit-config) recorded)))))
