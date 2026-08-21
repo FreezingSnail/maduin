@@ -45,6 +45,14 @@
   "Return non-nil when BACKEND is a supported backend symbol."
   (memq backend maduin-config--supported-backends))
 
+(defun maduin-config-crew-backend ()
+  "Return the explicit crew-wide backend override, or nil when unset.
+Malformed values act as unset so a hand-edited config retains the existing
+per-seat, per-role, and OpenCode-default resolution semantics."
+  (let* ((crew (cdr (assq 'crew maduin-config)))
+         (backend (and (listp crew) (cdr (assq 'backend crew)))))
+    (and (maduin-config--valid-backend-p backend) backend)))
+
 (defun maduin-config-role-backend (role)
   "Return ROLE's valid backend, defaulting to `opencode'.
 ROLE maps through `maduin-config--role-sections'.  Missing or malformed
@@ -63,15 +71,16 @@ backend values deliberately inherit the stable `opencode' default."
 
 (defun maduin-config-seat-backend (role seat)
   "Return effective backend for ROLE and SEAT.
-A valid `(backend . SYMBOL)' on the named seat wins; otherwise return
-ROLE's backend, which itself defaults to `opencode'."
+An explicit crew override wins; otherwise a valid named-seat backend wins,
+then ROLE's backend, which itself defaults to `opencode'."
   (unless (stringp seat)
     (user-error "Maduin seat name must be a string: %S" seat))
-  (let* ((entry (maduin-config--seat role seat))
-         (backend (and entry (cdr (assq 'backend entry)))))
-    (if (maduin-config--valid-backend-p backend)
-        backend
-      (maduin-config-role-backend role))))
+  (or (maduin-config-crew-backend)
+      (let* ((entry (maduin-config--seat role seat))
+             (backend (and entry (cdr (assq 'backend entry)))))
+        (if (maduin-config--valid-backend-p backend)
+            backend
+          (maduin-config-role-backend role)))))
 
 (defun maduin-config--model-key (backend)
   "Return BACKEND's configured model key, or signal `user-error'."
@@ -134,6 +143,7 @@ call `maduin-config-save' explicitly to request persistence."
 (defconst maduin-config--option-schema
   '((harness name "harness name" string nil)
     (harness version "harness version" string nil)
+    (crew backend "crew-wide backend provider override" backend (opencode kiro))
     (concierge agent "concierge agent" string nil)
     (concierge backend "concierge backend" symbol (opencode kiro))
     (concierge model "concierge model" string nil)
@@ -208,6 +218,8 @@ Signal `user-error' without mutation when the option or VALUE is invalid."
                    ('string (stringp value))
                    ('symbol (and (symbolp value)
                                  (memq value (nth 4 spec))))
+                   ('backend (or (null value)
+                                 (maduin-config--valid-backend-p value)))
                    ('boolean (memq value '(t nil))))))
       (unless valid
         (user-error "Invalid value for %S/%S: %S" section key value)))
@@ -220,6 +232,10 @@ Signal `user-error' without mutation when the option or VALUE is invalid."
           (setcdr section-cell
                   (nconc (cdr section-cell) (list (cons key value)))))))
     value))
+
+(defun maduin-config-set-crew-backend (backend)
+  "Set crew-wide BACKEND override, or nil to unset it, and return BACKEND."
+  (maduin-config-set-option 'crew 'backend backend))
 
 (defun maduin-config-save ()
   "Refuse to rewrite executable `config.el'.

@@ -6,6 +6,9 @@
 
 (defvar maduin-config
   '((harness . ((name . "maduin") (version . "0.3.0")))
+    ;; Set `backend' to opencode or kiro to override every crew seat.
+    ;; Nil preserves each seat's and role's configured backend.
+    (crew . ((backend . nil)))
     (concierge . ((agent . "slugineer-planner-concierge")
                   (backend . opencode)
                   (model . "opencode-go/deepseek-v4-pro")

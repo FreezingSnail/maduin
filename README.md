@@ -112,7 +112,12 @@ Keybindings (global, via `maduin-mode`):
 
 Configuration lives in `harness/config.el` as native elisp sexps. There
 is no YAML and no parser dependency. The schema (v0.3) defines agent
-model + seat mappings:
+model + seat mappings. The `crew` section has a runtime-editable `backend`
+override: set it to `opencode` or `kiro` to use that provider for every
+configured seat, or leave it `nil` (`unset` in the cockpit panel) to preserve
+normal per-seat behavior. Effective backend precedence is: explicit crew
+override > per-seat override > role backend > `opencode` default. The model
+continues to come from the selected effective backend's model mapping.
 
 - **concierge** — `slugineer-planner-concierge`
 - **designer** — `slugineer-planner-designer`

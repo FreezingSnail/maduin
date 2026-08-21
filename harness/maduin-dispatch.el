@@ -163,15 +163,11 @@ The run-loop picks up no new work while draining.")
     (or (and entry (alist-get 'model entry)) "default")))
 
 (defun maduin-dispatch--seat-model-for (role seat &optional backend)
-  "Return configured model for ROLE seat SEAT and optional BACKEND.
-Without BACKEND retain the historical OpenCode lookup for compatibility."
-  (if backend
-      (maduin-config-seat-model role seat backend)
-    (pcase role
-      ('implementer (maduin-dispatch--seat-model 'fleet seat))
-      ('designer (maduin-dispatch--seat-model 'designer seat))
-      ('repairer (or (maduin-dispatch--config-get 'repairer 'model) "default"))
-      (_ "default"))))
+  "Return ROLE/SEAT's model for BACKEND or its current effective backend.
+An explicit BACKEND keeps retry entries sticky; ordinary launches resolve
+through `maduin-config-seat-backend', including the crew-wide override."
+  (maduin-config-seat-model
+   role seat (or backend (maduin-config-seat-backend role seat))))
 
 (defun maduin-dispatch--seat-agent-for (role)
   "Return agent string for ROLE, or nil."

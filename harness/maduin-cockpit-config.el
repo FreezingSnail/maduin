@@ -51,6 +51,14 @@ Each result has the shape (SECTION . ROWS), where ROWS are the plists from
                 (format "%s: " label)
                 (mapcar #'symbol-name (plist-get row :choices))
                 nil t nil nil (and value (symbol-name value)))))
+      ('backend
+       (let ((choice (completing-read
+                      (format "%s: " label)
+                      (cons "unset" (mapcar #'symbol-name
+                                              (plist-get row :choices)))
+                      nil t nil nil
+                      (if value (symbol-name value) "unset"))))
+         (unless (equal choice "unset") (intern choice))))
       ('string (read-string (format "%s: " label) value))
       (_ (user-error "maduin: unsupported config type for %s" label)))))
 
