@@ -138,6 +138,8 @@ call `maduin-config-save' explicitly to request persistence."
       (if cell
           (setcdr cell backend)
         (nconc entry (list (cons 'backend backend))))))
+  (when (fboundp 'maduin-pipeline-config-bump)
+    (maduin-pipeline-config-bump))
   backend)
 
 (defconst maduin-config--option-schema

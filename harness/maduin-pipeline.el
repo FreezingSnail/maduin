@@ -16,53 +16,91 @@
 (add-to-list 'load-path maduin-pipeline--dir)
 
 (require 'cl-lib)
+(require 'maduin-bd-async)
 (require 'maduin-bd-bridge)
 (require 'maduin-config)
+(require 'maduin-state)
 (require 'maduin-workspace)
 
 ;;; Config access
 
+(defvar maduin-pipeline--config-generation 0
+  "Generation of memoized pipeline configuration and seat lists.")
+
+(defvar maduin-pipeline--config-cache nil
+  "Cached `(GENERATION . CONFIG)' pair, or nil before the first read.")
+
+(defvar maduin-pipeline--seats-cache nil
+  "Cached `(GENERATION . RESULT-PLIST)' pair for seat names.")
+
+(defun maduin-pipeline-config-bump ()
+  "Invalidate memoized pipeline configuration after a config mutation."
+  (setq maduin-pipeline--config-generation
+        (1+ maduin-pipeline--config-generation)
+        maduin-pipeline--config-cache nil
+        maduin-pipeline--seats-cache nil))
+
 (defun maduin-pipeline--config ()
-  "Return the maduin config alist.
-Load harness/config.el explicitly because maduin-config.el
-is a stub and the real values live there."
-  (or (bound-and-true-p maduin-config)
-      (condition-case nil
-          (progn
-            (load-file (expand-file-name "config.el" maduin-pipeline--dir))
-            (bound-and-true-p maduin-config))
-        (error nil))))
+  "Return the memoized maduin config alist.
+Load harness/config.el once only when `maduin-config' is not already bound."
+  (let ((cached maduin-pipeline--config-cache))
+    (if (and (consp cached)
+             (= (car cached) maduin-pipeline--config-generation))
+        (cdr cached)
+      (let ((loaded nil)
+            (config (bound-and-true-p maduin-config)))
+        (unless config
+          (setq loaded t
+                config
+                (condition-case nil
+                    (progn
+                      (load-file (expand-file-name "config.el" maduin-pipeline--dir))
+                      (bound-and-true-p maduin-config))
+                  (error nil))))
+        (when loaded
+          (maduin-pipeline-config-bump))
+        (setq maduin-pipeline--config-cache
+              (cons maduin-pipeline--config-generation config))
+        config))))
 
 (defun maduin-pipeline--config-section (section)
-  "Return alist for SECTION of maduin config, or nil."
+  "Return alist for SECTION of memoized maduin config, or nil."
   (cdr (assq section (maduin-pipeline--config))))
 
 (defun maduin-pipeline--config-get (section key)
-  "Return value of KEY in SECTION of maduin config, or nil."
+  "Return value of KEY in SECTION of memoized maduin config, or nil."
   (cdr (assq key (maduin-pipeline--config-section section))))
 
 ;;; Seats
 
+(defun maduin-pipeline--seats (section)
+  "Return memoized seat names configured in SECTION."
+  (let* ((cached maduin-pipeline--seats-cache)
+         (result (if (and (consp cached)
+                          (= (car cached) maduin-pipeline--config-generation))
+                     (cdr cached)
+                   nil)))
+    (unless (and result (plist-member result section))
+      (let ((seats (delq nil
+                          (mapcar (lambda (seat)
+                                    (when (listp seat) (alist-get 'name seat)))
+                                  (maduin-pipeline--config-get section 'seats)))))
+        (setq result (plist-put result section seats)
+              maduin-pipeline--seats-cache
+              (cons maduin-pipeline--config-generation result))))
+    (plist-get result section)))
+
 (defun maduin-pipeline-fleet-seats ()
-  "Return list of fleet seat names from config."
-  (delq nil
-        (mapcar (lambda (s)
-                  (when (listp s) (alist-get 'name s)))
-                (maduin-pipeline--config-get 'fleet 'seats))))
+  "Return memoized list of fleet seat names from config."
+  (maduin-pipeline--seats 'fleet))
 
 (defun maduin-pipeline--concierge-seats ()
-  "Return list of concierge seat names from config."
-  (delq nil
-        (mapcar (lambda (s)
-                  (when (listp s) (alist-get 'name s)))
-                (maduin-pipeline--config-get 'concierge 'seats))))
+  "Return memoized list of concierge seat names from config."
+  (maduin-pipeline--seats 'concierge))
 
 (defun maduin-pipeline--designer-seats ()
-  "Return list of designer seat names from config."
-  (delq nil
-        (mapcar (lambda (s)
-                  (when (listp s) (alist-get 'name s)))
-                (maduin-pipeline--config-get 'designer 'seats))))
+  "Return memoized list of designer seat names from config."
+  (maduin-pipeline--seats 'designer))
 
 ;;; Branch landing
 
@@ -210,20 +248,94 @@ not loaded (pipeline may load standalone)."
                    maduin-dispatch--active)
     0))
 
-(defun maduin-pipeline-status ()
-  "Return plist (:queued :active :completed :blocked :fleet-free :fleet-busy).
-Issues at most two bd subprocesses per refresh: one `bd ready' for the
-queued count and one `bd list --json --all' whose status field feeds
-the active/completed/blocked counts client-side."
+(defvar maduin-pipeline--status-refreshing nil
+  "Non-nil while one pipeline status refresh awaits its async results.")
+
+(defun maduin-pipeline--status-plist (queued data)
+  "Build a pipeline status plist from QUEUED ready tasks and issue DATA."
   (let* ((fleet (maduin-pipeline-fleet-seats))
-         (busy (maduin-pipeline--fleet-busy-count))
-         (data (maduin-bd-list-all)))
-    (list :queued (length (or (maduin-bd-ready-tasks) nil))
+         (busy (maduin-pipeline--fleet-busy-count)))
+    (list :queued (length (or queued nil))
           :active (maduin-pipeline--count data "in_progress")
           :completed (maduin-pipeline--count data "closed")
           :blocked (maduin-pipeline--count data "blocked")
           :fleet-free (- (length fleet) busy)
           :fleet-busy busy)))
+
+(defun maduin-pipeline--empty-status ()
+  "Return the safe initial pipeline status before the first fetch."
+  (maduin-pipeline--status-plist nil nil))
+
+(defun maduin-pipeline-status ()
+  "Return the current pipeline snapshot without performing bd I/O."
+  (or (maduin-state-get 'pipeline)
+      (maduin-pipeline--empty-status)))
+
+(defun maduin-pipeline-status-sync ()
+  "Return a fresh pipeline status using the legacy blocking bd calls.
+This compatibility entry point is intended for batch callers and first-paint
+priming; interactive rendering should use `maduin-pipeline-status'."
+  (maduin-pipeline--status-plist (maduin-bd-ready-tasks)
+                                 (maduin-bd-list-all)))
+
+(defun maduin-pipeline--status-callback (callback changed)
+  "Run CALLBACK when CHANGED, containing errors from callback bodies."
+  (when (and changed callback)
+    (condition-case err
+        (funcall callback)
+      (error
+       (maduin-bd--log-error
+        (format "pipeline status callback failed: %s"
+                (error-message-string err)))))))
+
+(defun maduin-pipeline-status-refresh (&optional callback)
+  "Asynchronously refresh the pipeline snapshot and then call CALLBACK.
+A fresh snapshot, or an already-running refresh, starts no processes.  Both
+bd results must succeed before a single merged snapshot is stored."
+  (when (and (not maduin-pipeline--status-refreshing)
+             (maduin-state-stale-p 'pipeline))
+    (let ((pending 2)
+          (failed nil)
+          ready-data
+          list-data)
+      (setq maduin-pipeline--status-refreshing t)
+      (cl-labels
+          ((finish
+            (kind data exit-code)
+            (unless (and (= exit-code 0) data)
+              (setq failed t)
+              (maduin-bd--log-error
+               (format "pipeline status %s fetch failed%s"
+                       kind
+                       (if (= exit-code 0) " (invalid JSON)"
+                         (format " (exit %d)" exit-code)))))
+            (when (and (= exit-code 0) data)
+              (if (eq kind 'ready)
+                  (setq ready-data data)
+                (setq list-data data)))
+            (setq pending (1- pending))
+            (when (zerop pending)
+              (setq maduin-pipeline--status-refreshing nil)
+              (unless failed
+                (let* ((previous (maduin-state-get 'pipeline))
+                       (snapshot (maduin-pipeline--status-plist ready-data list-data))
+                       (changed (not (equal previous snapshot))))
+                  (maduin-state-put 'pipeline snapshot)
+                  (maduin-pipeline--status-callback callback changed)))))
+           (start
+            (kind args)
+            (let ((called nil))
+              (let ((key (maduin-bd-async-json
+                          args
+                          (lambda (data exit-code)
+                            (setq called t)
+                            (finish kind data exit-code)))))
+                ;; Spawn failures do not call their callback.  Count them as
+                ;; failed immediately so the next stale tick retries.
+                (unless (or key called)
+                  (finish kind nil 1))))))
+        (start 'ready '("ready" "--exclude-type" "epic" "--json"))
+        (start 'list '("list" "--json" "--all"))))))
 
 (provide 'maduin-pipeline)
 
