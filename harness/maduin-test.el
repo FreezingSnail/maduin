@@ -61,6 +61,116 @@
                    data)))
     (error nil)))
 
+(defmacro maduin-test--no-io (&rest body)
+  "Run BODY with every synchronous subprocess entry point stubbed to signal.
+`cl-letf' restores every original definition even when BODY signals."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'call-process)
+              (lambda (&rest _args) (error "maduin test: synchronous I/O forbidden")))
+             ((symbol-function 'call-process-shell-command)
+              (lambda (&rest _args) (error "maduin test: synchronous I/O forbidden")))
+             ((symbol-function 'call-process-region)
+              (lambda (&rest _args) (error "maduin test: synchronous I/O forbidden")))
+             ((symbol-function 'make-process)
+              (lambda (&rest _args) (error "maduin test: synchronous I/O forbidden")))
+             ((symbol-function 'start-process)
+              (lambda (&rest _args) (error "maduin test: synchronous I/O forbidden")))
+             ((symbol-function 'shell-command-to-string)
+              (lambda (&rest _args) (error "maduin test: synchronous I/O forbidden"))))
+     ,@body))
+
+(ert-deftest maduin-test-cockpit-render-path-io-free ()
+  :tags '(maduin)
+  (let ((buf (generate-new-buffer " *maduin-cockpit-io-free*"))
+        (maduin-state--data nil)
+        (maduin-dispatch--active
+         (list (list :handle "perf-session" :seat "ifrit" :role 'implementer
+                     :task "maduin-perf" :model "flash" :backend 'opencode
+                     :started 0.0 :status 'working :phase "coding"))))
+    (unwind-protect
+        (let ((titles (make-hash-table :test #'equal)))
+          (puthash "maduin-perf" (cons "Cached render title" 0.0) titles)
+          (maduin-state-put 'titles titles)
+          (maduin-state-put 'pipeline
+                             '(:queued 2 :active 1 :completed 3 :blocked 1
+                               :fleet-free 2 :fleet-busy 1))
+          (with-current-buffer buf
+            (tabulated-list-mode)
+            (maduin-test--no-io
+              (maduin-cockpit-refresh)
+              (maduin-cockpit-refresh)
+              (should (= (length (maduin-cockpit--rows)) 5)))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest maduin-test-dispatch-tick-io-free ()
+  :tags '(maduin)
+  (let ((maduin-dispatch--active nil)
+        (maduin-dispatch--draining nil)
+        (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--tick-notify-pending nil)
+        (maduin-dispatch--in-progress-async-fn
+         (lambda (callback) (funcall callback nil t) 'in-progress))
+        (maduin-dispatch--ready-async-fn
+         (lambda (callback) (funcall callback nil t) 'ready))
+        (maduin-dispatch--open-epics-async-fn
+         (lambda (callback) (funcall callback nil t) 'open-epics)))
+    (maduin-test--no-io
+      (maduin-dispatch-run-loop)
+      (should-not maduin-dispatch--tick-in-flight))))
+
+(ert-deftest maduin-test-cockpit-refresh-budget ()
+  :tags '(maduin)
+  ;; Coarse local-CI guard: snapshot-only rendering must stay comfortably fast.
+  (let ((buf (generate-new-buffer " *maduin-cockpit-refresh-budget*"))
+        (maduin-state--data nil)
+        (maduin-dispatch--active nil)
+        (iterations 20))
+    (unwind-protect
+        (progn
+          (maduin-state-put 'pipeline
+                             '(:queued 3 :active 1 :completed 8 :blocked 2
+                               :fleet-free 2 :fleet-busy 1))
+          (with-current-buffer buf
+            (tabulated-list-mode)
+            (let ((started (float-time)))
+              (dotimes (_ iterations) (maduin-cockpit-refresh))
+              (should (< (/ (- (float-time) started) iterations) 0.008)))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest maduin-test-cockpit-notify-storm-budget ()
+  :tags '(maduin)
+  (let* ((buf (generate-new-buffer " *maduin-cockpit-notify-storm*"))
+         (maduin-cockpit-buffer-name (buffer-name buf))
+         (clock 0.0)
+         (started clock)
+         (renders 0)
+         (scheduled nil)
+         (maduin-cockpit--pending-render nil)
+         (maduin-cockpit--last-render nil)
+         (maduin-cockpit--now-fn (lambda () clock)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window)
+                   (lambda (buffer &optional _all)
+                     (and (eq buffer buf) (selected-window))))
+                  ((symbol-function 'timerp) (lambda (timer) (eq timer 'render-timer)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat function &rest args)
+                     (setq scheduled (list function args)) 'render-timer))
+                  ((symbol-function 'maduin-pipeline-status-refresh) #'ignore)
+                  ((symbol-function 'maduin-cockpit-refresh)
+                   (lambda ()
+                     (cl-incf renders)
+                     (setq maduin-cockpit--last-render
+                           (funcall maduin-cockpit--now-fn)))))
+          (dotimes (interval 4)
+            (setq clock (* interval maduin-cockpit-min-render-interval))
+            (dotimes (_ 50) (maduin-cockpit--schedule-refresh))
+            (apply (car scheduled) (cadr scheduled)))
+          (let ((elapsed (- clock started)))
+            (should (<= renders
+                        (+ 1.0 (/ elapsed maduin-cockpit-min-render-interval))))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
 ;;; 1. config
 
 (ert-deftest maduin-test-config-loads ()

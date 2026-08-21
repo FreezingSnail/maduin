@@ -140,6 +140,7 @@ harness/check.sh                     # clean + byte-compile + ERT (173 tests)
 harness/check.sh -c                  # compile only
 harness/check.sh -k                  # skip clean
 harness/check.sh probe probes/<f>.el # + exploratory probe test
+harness/check.sh probe probes/probe-cockpit-perf.el # cockpit refresh timing (50 seats)
 ```
 
 Exit codes: `0` green · `1` compile error · `2` test fail · `3` probe fail ·
