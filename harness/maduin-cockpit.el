@@ -167,9 +167,7 @@ Tolerates either an object or an array shape in the JSON output."
                                ;; bd show may emit a bare object; the
                                ;; bridge drops non-array shapes, so parse
                                ;; the raw output here.
-                               (let ((obj (condition-case nil
-                                              (json-read-from-string (cdr res))
-                                            (error nil))))
+                               (let ((obj (maduin-bd--json-decode (cdr res))))
                                  (and (listp obj)
                                       (alist-get 'title obj)))))))
           (when title

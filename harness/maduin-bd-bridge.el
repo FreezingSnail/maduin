@@ -44,6 +44,16 @@ so task-ids and queries need no quoting and cannot be shell-injected."
                        args)))
       (cons code (buffer-string)))))
 
+(defun maduin-bd--json-decode (s)
+  "Decode JSON string S to alists and vectors, or nil on error.
+Uses Emacs's native JSON parser when available and json.el otherwise."
+  (condition-case nil
+      (if (fboundp 'json-parse-string)
+          (json-parse-string s :object-type 'alist :array-type 'array
+                             :null-object nil :false-object nil)
+        (json-read-from-string s))
+    (error nil)))
+
 (defun maduin-bd--json-data (output)
   "Parse OUTPUT as a JSON array; return list of alists, or nil.
 Returns nil silently when OUTPUT is empty or not JSON (first
@@ -51,11 +61,9 @@ non-whitespace character is not `[' or `{')."
   (let ((s (string-trim (or output ""))))
     (when (and (not (string-empty-p s))
                (or (string-prefix-p "[" s) (string-prefix-p "{" s)))
-      (condition-case nil
-          (let ((data (json-read-from-string s)))
-            (when (vectorp data)
-              (append data nil)))
-        (error nil)))))
+      (let ((data (maduin-bd--json-decode s)))
+        (when (vectorp data)
+          (append data nil))))))
 
 (defun maduin-bd--json-ids (output)
   "Extract `id' fields from JSON array OUTPUT. Return list of strings."
