@@ -205,6 +205,18 @@ cockpit refresh."
             (get-buffer (maduin-terminal--buffer-name 'concierge seat))))
     (error nil)))
 
+(defun maduin-cockpit--idle-config (role seat)
+  "Return idle ROLE and SEAT's effective backend and model plist, or nil.
+Configuration is hand-editable, so malformed or missing values must not
+interrupt cockpit rendering.  Resolution deliberately uses the central
+configuration APIs, preserving crew-wide backend overrides."
+  (condition-case nil
+      (when role
+        (let ((backend (maduin-config-seat-backend role seat)))
+          (list :backend backend
+                :model (maduin-config-seat-model role seat backend))))
+    (error nil)))
+
 (defun maduin-cockpit--uptime (entry)
   "Return elapsed seconds since ENTRY's :started timestamp, or nil."
   (let ((started (plist-get entry :started)))
@@ -218,7 +230,8 @@ no entry → idle row.  Active backends are launch-time values; idle
 backends reflect current runtime configuration.  Never signals."
   (let* ((entry (cl-find-if (lambda (e) (equal (plist-get e :seat) seat))
                             maduin-dispatch--active))
-         (role (maduin-cockpit--seat-role seat)))
+         (role (maduin-cockpit--seat-role seat))
+         (idle-config (and (null entry) (maduin-cockpit--idle-config role seat))))
     (list :seat seat
           :role (and entry (plist-get entry :role))
           :status (if entry
@@ -229,10 +242,12 @@ backends reflect current runtime configuration.  Never signals."
           :task-id (and entry (plist-get entry :task))
           :task-title (maduin-cockpit--task-title
                        (and entry (plist-get entry :task)))
-          :model (and entry (plist-get entry :model))
+          :model (if entry
+                     (plist-get entry :model)
+                   (plist-get idle-config :model))
           :backend (if entry
                        (plist-get entry :backend)
-                     (and role (maduin-config-seat-backend role seat)))
+                     (plist-get idle-config :backend))
           :uptime (and entry
                        (or (maduin-cockpit--uptime entry)
                            (plist-get entry :uptime)))
