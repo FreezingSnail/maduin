@@ -19,6 +19,7 @@
 (add-to-list 'load-path maduin--dir)
 
 (require 'maduin-config)
+(require 'maduin-bd-async)
 (require 'maduin-session)
 (require 'maduin-kiro)
 (require 'maduin-state)
@@ -172,7 +173,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
     maduin-cockpit-config maduin-cockpit-face maduin-cockpit-bar
     maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline
     maduin-state maduin-session maduin-kiro
-    maduin-bd-bridge maduin-config)
+    maduin-bd-async maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")
 
 ;;;###autoload
@@ -184,6 +185,7 @@ Gracefully stops agents first, preserving handoff caches."
   (when (or (not (called-interactively-p 'interactive))
             (y-or-n-p "Stop running agents and reload maduin? "))
     (maduin-stop t)
+    (maduin-bd-async-cancel-all)
     (maduin-state-invalidate)
     (dolist (feat maduin--feature-list)
       (unload-feature feat 'force))

@@ -3904,3 +3904,125 @@
              (lambda (_seat) '(:status idle))))
     (should (equal (mapcar #'car (maduin-cockpit--rows))
                    '("alexander" "ramuh" "ifrit" "shiva")))))
+
+
+;;; bd async substrate
+
+(require 'maduin-bd-async)
+
+(defun maduin-test--bd-async-wait ()
+  "Wait for all async bd calls to complete, failing after two seconds."
+  (let ((deadline (+ (float-time) 2.0)))
+    (while (and (> (hash-table-count maduin-bd-async--inflight) 0)
+                (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (should (= (hash-table-count maduin-bd-async--inflight) 0))))
+
+(ert-deftest maduin-test-bd-async-callback-fires ()
+  :tags '(maduin)
+  (let ((echo (executable-find "echo"))
+        (seen nil))
+    (skip-unless echo)
+    (unwind-protect
+        (let ((maduin-bd-async--program echo))
+          (should (fboundp 'maduin-bd-async-json))
+          (should (stringp
+                   (maduin-bd-async-call
+                    '("payload")
+                    (lambda (exit-code stdout)
+                      (setq seen (list exit-code stdout))))))
+          (maduin-test--bd-async-wait)
+          (should (equal seen '(0 "payload\n"))))
+      (maduin-bd-async-cancel-all))))
+
+(ert-deftest maduin-test-bd-async-single-flight ()
+  :tags '(maduin)
+  (let ((sh (executable-find "sh"))
+        (spawned 0)
+        (callbacks 0))
+    (skip-unless sh)
+    (unwind-protect
+        (let ((maduin-bd-async--program sh)
+              (original-make-process (symbol-function 'make-process)))
+          (cl-letf (((symbol-function 'make-process)
+                     (lambda (&rest process-args)
+                       (setq spawned (1+ spawned))
+                       (apply original-make-process process-args))))
+            (let ((args '("-c" "sleep 0.1; printf shared")))
+              (maduin-bd-async-call args
+                                    (lambda (exit-code stdout)
+                                      (should (= exit-code 0))
+                                      (should (string= stdout "shared"))
+                                      (setq callbacks (1+ callbacks))))
+              (maduin-bd-async-call args
+                                    (lambda (exit-code stdout)
+                                      (should (= exit-code 0))
+                                      (should (string= stdout "shared"))
+                                      (setq callbacks (1+ callbacks))))))
+          (maduin-test--bd-async-wait)
+          (should (= spawned 1))
+          (should (= callbacks 2)))
+      (maduin-bd-async-cancel-all))))
+
+(ert-deftest maduin-test-bd-async-distinct-keys ()
+  :tags '(maduin)
+  (let ((echo (executable-find "echo"))
+        (spawned 0)
+        (seen nil))
+    (skip-unless echo)
+    (unwind-protect
+        (let ((maduin-bd-async--program echo)
+              (original-make-process (symbol-function 'make-process)))
+          (cl-letf (((symbol-function 'make-process)
+                     (lambda (&rest process-args)
+                       (setq spawned (1+ spawned))
+                       (apply original-make-process process-args))))
+            (maduin-bd-async-call '("one")
+                                  (lambda (_exit-code stdout) (push stdout seen)))
+            (maduin-bd-async-call '("two")
+                                  (lambda (_exit-code stdout) (push stdout seen))))
+          (maduin-test--bd-async-wait)
+          (should (= spawned 2))
+          (should (equal (sort seen #'string<) '("one\n" "two\n"))))
+      (maduin-bd-async-cancel-all))))
+
+(ert-deftest maduin-test-bd-async-nonzero-exit ()
+  :tags '(maduin)
+  (let ((sh (executable-find "sh"))
+        (seen nil))
+    (skip-unless sh)
+    (unwind-protect
+        (let ((maduin-bd-async--program sh))
+          (maduin-bd-async-call
+           '("-c" "exit 3")
+           (lambda (exit-code stdout) (setq seen (list exit-code stdout))))
+          (maduin-test--bd-async-wait)
+          (should (= (car seen) 3))
+          (should (string= (cadr seen) "")))
+      (maduin-bd-async-cancel-all))))
+
+(ert-deftest maduin-test-bd-async-callback-error-isolated ()
+  :tags '(maduin)
+  (let ((sh (executable-find "sh"))
+        (second-ran nil))
+    (skip-unless sh)
+    (unwind-protect
+        (let ((maduin-bd-async--program sh)
+              (args '("-c" "sleep 0.1; printf done")))
+          (maduin-bd-async-call args
+                                (lambda (&rest _) (error "expected test callback error")))
+          (maduin-bd-async-call args
+                                (lambda (exit-code stdout)
+                                  (setq second-ran (and (= exit-code 0)
+                                                        (string= stdout "done")))))
+          (maduin-test--bd-async-wait)
+          (should second-ran))
+      (maduin-bd-async-cancel-all))))
+
+(ert-deftest maduin-test-bd-async-missing-program ()
+  :tags '(maduin)
+  (unwind-protect
+      (let ((maduin-bd-async--program "maduin-no-such-bd-program-xyz"))
+        (should-not (maduin-bd-async-call '("ready") (lambda (&rest _))))
+        (should (= (hash-table-count maduin-bd-async--inflight) 0)))
+    (maduin-bd-async-cancel-all)))
