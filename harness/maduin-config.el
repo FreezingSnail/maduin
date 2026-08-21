@@ -73,6 +73,45 @@ ROLE's backend, which itself defaults to `opencode'."
         backend
       (maduin-config-role-backend role))))
 
+(defun maduin-config--model-key (backend)
+  "Return BACKEND's configured model key, or signal `user-error'."
+  (pcase backend
+    ('opencode 'model)
+    ('kiro 'kiro-model)
+    (_ (user-error "Unsupported maduin backend: %S" backend))))
+
+(defun maduin-config--model (config backend)
+  "Return CONFIG's literal model for BACKEND, or nil.
+Kiro models must be explicit bare IDs: OpenCode namespace prefixes are
+rejected rather than transformed."
+  (let ((model (cdr (assq (maduin-config--model-key backend) config))))
+    (when (and (eq backend 'kiro)
+               (stringp model)
+               (or (string-prefix-p "opencode/" model)
+                   (string-prefix-p "opencode-go/" model)))
+      (user-error "Kiro model must be a bare ID, not %S" model))
+    (and (stringp model) model)))
+
+(defun maduin-config-role-model (role backend)
+  "Return ROLE's literal model configured for BACKEND, or nil.
+OpenCode model strings are returned unchanged.  Kiro model IDs come only
+from the explicit `kiro-model' key; no OpenCode name is transformed."
+  (maduin-config--model (maduin-config--section role) backend))
+
+(defun maduin-config-seat-model (role seat backend)
+  "Return effective model for ROLE, SEAT, and BACKEND.
+The named seat's backend-specific model wins over ROLE's model.  A Kiro
+seat without an explicit Kiro model signals `user-error' rather than
+falling back to an OpenCode model or Kiro's implicit default."
+  (unless (stringp seat)
+    (user-error "Maduin seat name must be a string: %S" seat))
+  (let ((model (or (maduin-config--model (maduin-config--seat role seat) backend)
+                   (maduin-config-role-model role backend))))
+    (when (and (eq backend 'kiro)
+               (or (null model) (string-empty-p model)))
+      (user-error "Missing Kiro model for role %S seat %S" role seat))
+    model))
+
 (defun maduin-config-set-seat-backend (role seat backend)
   "Set existing ROLE/SEAT's runtime BACKEND and return BACKEND.
 ROLE, SEAT, and BACKEND are fully validated before mutation.  BACKEND

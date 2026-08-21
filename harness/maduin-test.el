@@ -34,6 +34,7 @@
 (require 'maduin-dispatch)
 (require 'maduin-designer)
 (require 'maduin-concierge)
+(require 'maduin-backend)
 
 ;;; Helpers
 
@@ -168,6 +169,57 @@
                      (insert-file-contents maduin-config--file)
                      (buffer-string))
                    before-file))))
+
+(ert-deftest maduin-test-config-role-models-are-backend-specific ()
+  :tags '(maduin)
+  (dolist (expectation
+           '((concierge "opencode-go/deepseek-v4-pro" "gpt-5.6-terra")
+             (designer "opencode-go/deepseek-v4-pro" "gpt-5.6-terra")
+             (implementer "opencode/deepseek-v4-flash-free" "qwen3-coder-next")
+             (reviewer "opencode-go/deepseek-v4-pro" "gpt-5.6-terra")
+             (repairer "opencode-go/deepseek-v4-pro" "deepseek-3.2")))
+    (pcase-let ((`(,role ,opencode-model ,kiro-model) expectation))
+      (should (equal (maduin-config-role-model role 'opencode) opencode-model))
+      (should (equal (maduin-config-role-model role 'kiro) kiro-model)))))
+
+(ert-deftest maduin-test-config-seat-models-preserve-opencode-models ()
+  :tags '(maduin)
+  (dolist (expectation
+           '((concierge "alexander" "opencode-go/deepseek-v4-pro")
+             (designer "ramuh" "opencode-go/deepseek-v4-pro")
+             (implementer "ifrit" "opencode/deepseek-v4-flash-free")
+             (reviewer "odin" "opencode-go/deepseek-v4-pro")
+             (repairer "phoenix" "opencode-go/deepseek-v4-pro")))
+    (pcase-let ((`(,role ,seat ,model) expectation))
+      (should (equal (maduin-config-seat-model role seat 'opencode) model)))))
+
+(ert-deftest maduin-test-config-seat-models-resolve-kiro-per-role ()
+  :tags '(maduin)
+  (dolist (expectation
+           '((concierge "alexander" "gpt-5.6-terra")
+             (designer "ramuh" "gpt-5.6-terra")
+             (implementer "ifrit" "qwen3-coder-next")
+             (reviewer "odin" "gpt-5.6-terra")
+             (repairer "phoenix" "deepseek-3.2")))
+    (pcase-let ((`(,role ,seat ,model) expectation))
+      (should (equal (maduin-config-seat-model role seat 'kiro) model)))))
+
+(ert-deftest maduin-test-config-seat-kiro-model-overrides-role ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (nconc (maduin-config--seat 'implementer "ifrit")
+           (list (cons 'kiro-model "deepseek-3.2")))
+    (should (equal (maduin-config-seat-model 'implementer "ifrit" 'kiro)
+                   "deepseek-3.2"))
+    (should (equal (maduin-config-seat-model 'implementer "shiva" 'kiro)
+                   "qwen3-coder-next"))))
+
+(ert-deftest maduin-test-config-seat-kiro-model-requires-explicit-mapping ()
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'kiro-model (cdr (assq 'fleet maduin-config))) nil)
+    (should-error (maduin-config-seat-model 'implementer "ifrit" 'kiro)
+                  :type 'user-error)))
 
 ;;; 3. bd-bridge
 
@@ -2589,6 +2641,94 @@
         (should (string-match-p "\\.kiro/agents" contents))
         (should (string-match-p "ln -sf" contents))
         (should (string-match-p "remove_agent_link" contents))))))
+
+;;; 22. backend registry
+
+(defun maduin-test--backend-adapter (&optional record-fn)
+  "Return a valid test adapter, optionally sending calls to RECORD-FN."
+  (list :executable "maduin-test-backend"
+        :run-fn (lambda (workdir model agent plan)
+                  (when record-fn
+                    (funcall record-fn (list :run workdir model agent plan)))
+                  'run-result)
+        :tui-fn (lambda (root model agent prompt)
+                  (when record-fn
+                    (funcall record-fn (list :tui root model agent prompt)))
+                  'tui-result)
+        :complete-p-fn (lambda (sid)
+                         (when record-fn (funcall record-fn (list :complete sid)))
+                         'complete-result)
+        :diff-fn (lambda (sid)
+                   (when record-fn (funcall record-fn (list :diff sid)))
+                   'diff-result)
+        :delete-fn (lambda (sid)
+                     (when record-fn (funcall record-fn (list :delete sid)))
+                     'delete-result)))
+
+(ert-deftest maduin-test-backend-register-get-and-reject-malformed ()
+  :tags '(maduin)
+  (let ((maduin-backend-registry (make-hash-table :test #'eq))
+        (adapter (maduin-test--backend-adapter)))
+    (should (eq (maduin-backend-register 'test adapter) adapter))
+    (should (eq (maduin-backend-get 'test) adapter))
+    (should-not (maduin-backend-register 'broken '(:executable "broken")))
+    (should-not (maduin-backend-get 'broken))
+    (should-not (maduin-backend-get 'missing))))
+
+(ert-deftest maduin-test-backend-resolve-priority-and-unknown-selection ()
+  :tags '(maduin)
+  (let ((maduin-backend-registry (make-hash-table :test #'eq)))
+    (maduin-backend-register 'opencode (maduin-test--backend-adapter))
+    (maduin-backend-register 'kiro (maduin-test--backend-adapter))
+    (cl-letf (((symbol-function 'maduin-config-seat-backend)
+               (lambda (_role seat)
+                 (pcase seat
+                   ("override" 'kiro)
+                   ("role-default" 'opencode)
+                   ("fallback" nil)
+                   ("unknown" 'missing)))))
+      (should (eq (maduin-backend-resolve 'implementer "override") 'kiro))
+      (should (eq (maduin-backend-resolve 'implementer "role-default") 'opencode))
+      (should (eq (maduin-backend-resolve 'implementer "fallback") 'opencode))
+      (should-not (maduin-backend-resolve 'implementer "unknown")))))
+
+(ert-deftest maduin-test-backend-missing-executable-does-not-dispatch ()
+  :tags '(maduin)
+  (let ((maduin-backend-registry (make-hash-table :test #'eq))
+        (called nil))
+    (maduin-backend-register
+     'missing
+     (list :executable "not-on-path"
+           :run-fn (lambda (&rest _args) (setq called t))
+           :tui-fn (lambda (&rest _args) (setq called t))
+           :complete-p-fn (lambda (&rest _args) (setq called t))
+           :diff-fn (lambda (&rest _args) (setq called t))
+           :delete-fn (lambda (&rest _args) (setq called t))))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_exe) nil)))
+      (should-not (maduin-backend-run 'missing "/work" "model" "agent" "plan")))
+    (should-not called)))
+
+(ert-deftest maduin-test-backend-wrappers-forward-exact-arities ()
+  :tags '(maduin)
+  (let ((maduin-backend-registry (make-hash-table :test #'eq))
+        (calls nil))
+    (maduin-backend-register
+     'test
+     (maduin-test--backend-adapter (lambda (call) (push call calls))))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_exe) "/bin/true")))
+      (should (eq (maduin-backend-run 'test "/work" "model" "agent" "plan")
+                  'run-result))
+      (should (eq (maduin-backend-tui 'test "/root" "model" "prompt" "agent")
+                  'tui-result))
+      (should (eq (maduin-backend-complete-p 'test "sid") 'complete-result))
+      (should (eq (maduin-backend-diff 'test "sid") 'diff-result))
+      (should (eq (maduin-backend-delete 'test "sid") 'delete-result)))
+    (should (equal (nreverse calls)
+                   '((:run "/work" "model" "agent" "plan")
+                     (:tui "/root" "model" "agent" "prompt")
+                     (:complete "sid")
+                     (:diff "sid")
+                     (:delete "sid"))))))
 
 (provide 'maduin-test)
 
