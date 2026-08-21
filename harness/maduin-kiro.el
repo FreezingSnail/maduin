@@ -42,6 +42,25 @@
        (not (string-empty-p model))
        (not (string-match-p "/" model))))
 
+(defun maduin-kiro--effort-valid-p (effort)
+  "Return non-nil when EFFORT is an allowed Kiro reasoning level."
+  (and (stringp effort)
+       (not (string-empty-p effort))
+       (not (string-match-p "[/[:space:]]" effort))
+       (member (downcase effort) '("low" "medium" "high" "xhigh" "max"))))
+
+(defun maduin-kiro--run-command (command workdir model agent effort plan)
+  "Build Kiro COMMAND argv for WORKDIR, MODEL, AGENT, EFFORT, and PLAN.
+Invalid EFFORT omits its optional flag without preventing the launch."
+  (ignore workdir)
+  (append (list command "chat" "--no-interactive")
+          (unless (or (null agent) (string-empty-p agent))
+            (list "--agent" agent))
+          (list "--model" model)
+          (when (maduin-kiro--effort-valid-p effort)
+            (list "--effort" effort))
+          (list "--trust-all-tools" plan)))
+
 (defun maduin-kiro--strip-ansi (text)
   "Return TEXT with terminal escape sequences removed."
   (ansi-color-filter-apply (or text "")))
@@ -101,20 +120,20 @@
           (maduin-kiro--put-entry handle entry)
           (run-hook-with-args 'maduin-session-on-complete-hook handle status))))))
 
-(defun maduin-kiro-run (workdir model agent plan)
-  "Run PLAN through Kiro in WORKDIR with MODEL and optional AGENT.
+(defun maduin-kiro-run (workdir model agent plan &optional effort)
+  "Run PLAN through Kiro in WORKDIR with MODEL, optional AGENT, and EFFORT.
 Return an opaque handle, or nil without spawning when the agent or model is
 invalid, the executable is absent, or process creation fails."
   (when (and (maduin-kiro--agent-valid-p agent)
              (maduin-kiro--model-valid-p model)
              (stringp plan)
              (executable-find maduin-kiro-command))
+    (when (and effort (not (maduin-kiro--effort-valid-p effort)))
+      (message "maduin-kiro: ignoring invalid effort %S" effort))
     (let* ((handle (format "maduin-kiro-%d" (cl-incf maduin-kiro--seq)))
            (buffer (generate-new-buffer (format " *%s*" handle)))
-           (command (append (list maduin-kiro-command "chat" "--no-interactive")
-                            (unless (or (null agent) (string-empty-p agent))
-                              (list "--agent" agent))
-                            (list "--model" model "--trust-all-tools" plan)))
+           (command (maduin-kiro--run-command
+                     maduin-kiro-command workdir model agent effort plan))
            (default-directory (file-name-as-directory (expand-file-name workdir)))
            (process (condition-case nil
                         (make-process :name handle
@@ -133,10 +152,10 @@ invalid, the executable is absent, or process creation fails."
                       :status 'running :done nil))
         handle))))
 
-(defun maduin-kiro-tui (root model agent prompt)
-  "Start Kiro's non-interactive chat command at ROOT for PROMPT.
+(defun maduin-kiro-tui (root model agent prompt &optional effort)
+  "Start Kiro's non-interactive chat command at ROOT for PROMPT and EFFORT.
 Kiro exposes no separate TUI process contract, so this shares `maduin-kiro-run'."
-  (maduin-kiro-run root model agent prompt))
+  (maduin-kiro-run root model agent prompt effort))
 
 (defun maduin-kiro-complete-p (handle)
   "Return `running', `completed', `limited', or `failed' for HANDLE.

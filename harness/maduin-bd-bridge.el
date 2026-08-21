@@ -217,6 +217,60 @@ DIR is the seat worktree (or any per-task directory); it defaults to
                 :deps (maduin-bd--deps task-id)
                 :parent (alist-get 'parent (car data))))))))
 
+(defun maduin-bd-labels (id)
+  "Return non-empty label strings for bead ID, or nil.
+Runs `bd label list ID --json' directly so ID remains one argv element.
+The CLI has emitted both arrays of strings and arrays of objects whose
+label is held in `label' or `name'.  Failures and malformed JSON degrade
+to nil so callers retain their role defaults."
+  (condition-case err
+      (let ((res (maduin-bd--call "bd" "label" "list" id "--json")))
+        (if (/= 0 (car res))
+            (progn
+              (maduin-bd--log-error
+               (format "bd label list %s failed (exit %d): %s"
+                       id (car res) (cdr res)))
+              nil)
+          (let ((data (maduin-bd--json-data (cdr res))))
+            (when data
+              (delq nil
+                    (mapcar
+                     (lambda (entry)
+                       (let ((label
+                              (cond
+                               ((stringp entry) entry)
+                               ((listp entry)
+                                (let ((value (alist-get 'label entry)))
+                                  (if (and (stringp value)
+                                           (not (string-empty-p value)))
+                                      value
+                                    (alist-get 'name entry)))))))
+                         (when (and (stringp label)
+                                    (not (string-empty-p label)))
+                           label)))
+                     data))))))
+    (error
+     (maduin-bd--log-error
+      (format "bd label list %s failed: %s" id (error-message-string err)))
+     nil)))
+
+(defun maduin-bd-difficulty (id)
+  "Return difficulty symbol low, high, or nil for bead ID.
+Difficulty labels compare case-insensitively.  When conflicting labels
+are present, high wins conservatively; unknown tiers remain ignored."
+  (condition-case err
+      (let (low high)
+        (dolist (label (maduin-bd-labels id))
+          (when (stringp label)
+            (pcase (downcase label)
+              ("difficulty:low" (setq low t))
+              ("difficulty:high" (setq high t)))))
+        (cond (high 'high) (low 'low)))
+    (error
+     (maduin-bd--log-error
+      (format "bd difficulty %s failed: %s" id (error-message-string err)))
+     nil)))
+
 (defun maduin-bd-remember (fact)
   "Store FACT as persistent memory via `bd remember'. Return t on success."
   (let ((res (maduin-bd--run

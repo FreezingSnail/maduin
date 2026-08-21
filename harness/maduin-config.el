@@ -160,6 +160,12 @@ call `maduin-config-save' explicitly to request persistence."
     (fleet backend "fleet backend" symbol (opencode kiro))
     (fleet model "fleet model" string nil)
     (fleet kiro-model "fleet Kiro model" string nil)
+    (fleet kiro-model-low "fleet Kiro model (low difficulty)" string nil)
+    (fleet kiro-model-high "fleet Kiro model (high difficulty)" string nil)
+    (fleet kiro-effort-low "fleet Kiro effort (low difficulty)" string nil)
+    (fleet kiro-effort-high "fleet Kiro effort (high difficulty)" string nil)
+    (fleet effort-low "fleet OpenCode variant (low difficulty)" string nil)
+    (fleet effort-high "fleet OpenCode variant (high difficulty)" string nil)
     (fleet kiro-fallback "fleet Kiro fallback" string nil)
     (fleet fallback "fleet fallback" string nil)
     (fleet poll-interval "fleet poll interval (s)" integer nil)
@@ -211,7 +217,9 @@ call `maduin-config-save' explicitly to request persistence."
 
 (defun maduin-config-set-option (section key value)
   "Set schema option SECTION and KEY to VALUE, returning VALUE.
-Signal `user-error' without mutation when the option or VALUE is invalid."
+Signal `user-error' without mutation when the option or VALUE is invalid.
+String options accept only strings, so the cockpit cannot clear an effort
+option back to nil; unset effort values by editing config.el."
   (let ((spec (maduin-config--option-spec section key)))
     (unless spec
       (user-error "Unknown maduin config option: %S/%S" section key))

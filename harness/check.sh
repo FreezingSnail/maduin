@@ -34,6 +34,7 @@ FILES=(
   "maduin-kiro.el"
   "maduin-workspace.el"
   "maduin-terminal.el"
+  "maduin-stamp.el"
   "maduin-pipeline.el"
   "maduin-review.el"
   "maduin-handoff.el"

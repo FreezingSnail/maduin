@@ -34,10 +34,16 @@ staged, decomposable design. The worker (slugineer-worker) and reviewer
    disposable tests.
 4. **Fill `--acceptance`** with concrete, checkable criteria (a worker or
    reviewer can verify against it).
-5. **Decompose with deps**: one concern per subtask, explicit dependencies
-   (`bd dep add`), each subtask ≤ ~150 lines of context. Expose interfaces
-   per subtask so dependents know the contract.
-6. **Stage**: mark subtasks deferred and label them `staged`. `--defer`
+5. **Decompose with deps**: smallest independently implementable unit: one
+   module concern, one seam, one contract per ticket. Split when work exceeds
+   low-tier budget and halves have a stateable interface. Test children depend
+   on every impl child whose behavior they assert. Never assign one module's
+   API to another ticket. Add explicit dependencies (`bd dep add`).
+6. **Tier**: every child carries exactly one `difficulty:low` or
+   `difficulty:high`, at create time (`--labels staged,difficulty:low`) or via
+   `bd label add <id> difficulty:low`. Name tier only—never model or effort;
+   harness maps tier → model + thinking budget.
+7. **Stage**: mark subtasks deferred and label them `staged`. `--defer`
    requires a DATE; use project gate convention, never assume it is a
    boolean flag.
 
@@ -59,6 +65,13 @@ substitute. Write for a worker that reads only this child.
 - **Dependencies**: add every direct prerequisite. A test ticket depends on
   every ticket whose behavior it asserts. Verify no cycles and that stated
   dependencies equal recorded `bd dep` edges.
+- **Difficulty**: `difficulty:low` only when ALL: single module/file; no new
+  cross-module interface; contract fully specified in ticket; ≲100 changed
+  lines; no async/process lifecycle ownership; no external-format parsing; no
+  data migration; no performance constraint. `difficulty:high` when ANY:
+  multi-file coordination; new public interface consumed elsewhere; async or
+  process lifecycle ownership; external protocol/format parsing; perf-sensitive
+  work; residual specification ambiguity requiring judgment.
 - **Shell safety**: never put metavariables such as `<agent>` in unquoted shell
   arguments; use quoted body/design files or stdin. Re-read created tickets to
   catch interpolation loss.
@@ -66,10 +79,12 @@ substitute. Write for a worker that reads only this child.
 ### Required Final Audit
 
 Before success output, run `bd show` for every child and inspect: deferred,
-`staged` label, DESCRIPTION, DESIGN, ACCEPTANCE, parent, direct dependencies.
-Then inspect graph (`bd dep tree <parent>` or equivalent). Fix omissions,
-wrong module ownership, missing edges, malformed commands, parent-design
-contradictions, and test-order gaps. Do not emit `designed:` until audit passes.
+`staged` label, exactly one difficulty label, DESCRIPTION, DESIGN, ACCEPTANCE,
+parent, direct dependencies. Every high-rated child justifies rating against
+rubric in DESIGN or is split. Then inspect graph (`bd dep tree <parent>` or
+equivalent). Fix omissions, wrong module ownership, missing edges, malformed
+commands, parent-design contradictions, and test-order gaps. Do not emit
+`designed:` until audit passes.
 
 ## Boundaries
 
@@ -88,6 +103,7 @@ designed: <task-id>
 subtasks: <sub-id-1>, <sub-id-2>, ...
 deps: <sub-id-b> → <sub-id-a>
 staged: <sub-id-1>, <sub-id-2>, ...
+difficulty: low=<N> high=<M>
 ```
 
 ## Safety

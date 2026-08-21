@@ -186,17 +186,27 @@ Return nil when no live session matches."
     (when buf
       (buffer-local-value 'maduin-session--session-id buf))))
 
-(defun maduin-session--opencode-run-command (executable workdir model agent handle plan)
+(defun maduin-session--opencode-effort-valid-p (effort)
+  "Return non-nil when EFFORT is a safe OpenCode variant argument."
+  (and (stringp effort)
+       (not (string-empty-p effort))
+       (not (string-match-p "[[:space:]/]" effort))))
+
+(defun maduin-session--opencode-run-command (executable workdir model agent handle plan
+                                                         &optional effort)
   "Build autonomous opencode argv for WORKDIR, MODEL, AGENT, HANDLE and PLAN.
-EXECUTABLE is the resolved opencode program.  Omit `--agent' for an empty
-AGENT, preserving the established autonomous command line."
+EXECUTABLE is the resolved opencode program.  Omit `--variant' for unusable
+EFFORT and `--agent' for an empty AGENT, preserving the established autonomous
+command line."
   (append (list executable "run" "--dir" workdir "-m" model)
+          (when (maduin-session--opencode-effort-valid-p effort)
+            (list "--variant" effort))
           (when (and agent (not (string-empty-p agent)))
             (list "--agent" agent))
           (list "--format" "json" "--auto" "--title" handle plan)))
 
-(defun maduin-session--opencode-run (workdir model agent plan)
-  "Run the autonomous opencode adapter in WORKDIR with MODEL, AGENT and PLAN."
+(defun maduin-session--opencode-run (workdir model agent plan &optional effort)
+  "Run autonomous OpenCode in WORKDIR with MODEL, AGENT, PLAN and EFFORT."
   (cl-block nil
     (let ((exe (executable-find maduin-opencode-command)))
       (unless exe
@@ -209,7 +219,7 @@ AGENT, preserving the established autonomous command line."
                         :name (format "maduin-run-%d" maduin-session--seq)
                         :buffer buf
                         :command (maduin-session--opencode-run-command
-                                  exe workdir model agent handle plan)
+                                  exe workdir model agent handle plan effort)
                         :filter #'maduin-session--run-filter
                         :sentinel #'maduin-session--run-sentinel
                         :noquery t)
@@ -228,11 +238,11 @@ AGENT, preserving the established autonomous command line."
         (puthash handle buf maduin-session--registry)
         handle))))
 
-(defun maduin-session-run (workdir model agent plan)
-  "Run one autonomous task in WORKDIR with MODEL, AGENT and PLAN.
+(defun maduin-session-run (workdir model agent plan &optional effort)
+  "Run one autonomous task in WORKDIR with MODEL, AGENT, PLAN and EFFORT.
 Compatibility façade for the opencode adapter.  Return its opaque session
 handle, or nil when opencode is unavailable or cannot be spawned."
-  (maduin-session--opencode-run workdir model agent plan))
+  (maduin-session--opencode-run workdir model agent plan effort))
 
 (defun maduin-session-complete-p (sid)
   "Return completion status of autonomous session SID.
@@ -320,16 +330,18 @@ when the opencode session was deleted, nil otherwise."
             (and res (= 0 (car res))))
         nil))))
 
-(defun maduin-session--opencode-tui (root model _agent prompt)
-  "Return the established OpenCode TUI command for ROOT, MODEL, and PROMPT.
+(defun maduin-session--opencode-tui (root model _agent prompt &optional effort)
+  "Return OpenCode TUI command for ROOT, MODEL, PROMPT and optional EFFORT.
 AGENT is deliberately ignored: OpenCode's historical interactive command
-never included it, and preserving that command is part of this adapter's
-compatibility contract."
+never included it.  Unusable EFFORT is omitted like the autonomous adapter."
   (mapconcat #'identity
-             (list (or (bound-and-true-p maduin-opencode-command) "opencode")
-                   (shell-quote-argument root)
-                   "-m" (shell-quote-argument model)
-                   "--prompt" (shell-quote-argument prompt))
+             (append
+              (list (or (bound-and-true-p maduin-opencode-command) "opencode")
+                    (shell-quote-argument root)
+                    "-m" (shell-quote-argument model))
+              (when (maduin-session--opencode-effort-valid-p effort)
+                (list "--variant" (shell-quote-argument effort)))
+              (list "--prompt" (shell-quote-argument prompt)))
              " "))
 
 (maduin-backend-register

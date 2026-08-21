@@ -6,8 +6,29 @@ Description:
 {desc}
 
 Research unknowns (spike if needed — never guess). Produce detailed design:
-update the task's --design and --acceptance fields. Decompose into sub-tasks
-with deps if warranted. Every sub-task MUST be RICH: a detailed description
+update the task's --design and --acceptance fields. Decompose into the smallest
+independently implementable units: one module concern, one seam, one contract
+per sub-task. Split when a sub-task exceeds the low-tier budget and its halves
+have a stateable interface. Every sub-task MUST be RICH: a detailed description
 with concrete implementation instructions (files, interfaces, approach),
-plus --design/--acceptance/deps per sub-task. Every deferred sub-task MUST
-carry the "staged" label (defer + label staged). Stage for review: defer the task and add the "staged" label. `--defer` requires a date; follow project gate convention. Every child MUST contain rich DESCRIPTION, --design, and --acceptance; parent design never substitutes. Name exact files/symbols, contracts/data shapes, error behavior, non-goals, test location/command, and direct deps. Never interpolate angle-bracket metavariables in unquoted shell input. Before success, `bd show` every child and inspect fields/label/deferred status, then inspect dependency graph; repair missing fields/edges/ownership before staging. Enforce native test framework, permanent co-located tests. Do not implement.
+plus --design/--acceptance/deps per sub-task.
+
+Every created child carries exactly one difficulty label: create it with
+`bd create ... --labels staged,difficulty:low` (or `difficulty:high`; use
+`bd label add` only to achieve the same exactly-one result). Tier only: never
+a model name or effort level. Low means a single module/file, no new
+cross-module interface, fully specified contract, ≲100 changed lines, no
+async/process lifecycle, external-format parsing, data migration, or
+performance constraint. High means any low condition is violated or residual
+ambiguity needs judgment. Every deferred sub-task MUST carry the "staged"
+label (defer + label staged). When staging this task itself, state its tier
+and give it exactly one `difficulty:low` or `difficulty:high` label. Stage for
+review: defer the task and add the "staged" label. `--defer` requires a date;
+follow project gate convention. Every child MUST contain rich DESCRIPTION,
+--design, and --acceptance; parent design never substitutes. Name exact
+files/symbols, contracts/data shapes, error behavior, non-goals, test
+location/command, and direct deps. Never interpolate angle-bracket
+metavariables in unquoted shell input. Before success, `bd show` every child
+and inspect fields/label/deferred status, then inspect dependency graph; repair
+missing fields/edges/ownership before staging. Enforce native test framework,
+permanent co-located tests. Do not implement.

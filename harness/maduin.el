@@ -23,6 +23,7 @@
 (require 'maduin-session)
 (require 'maduin-kiro)
 (require 'maduin-state)
+(require 'maduin-stamp)
 (require 'maduin-pipeline)
 (require 'maduin-workspace)
 (require 'maduin-terminal)
@@ -172,7 +173,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
   '(maduin-designer maduin-dispatch
     maduin-cockpit-config maduin-cockpit-face maduin-cockpit-bar
     maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline
-    maduin-state maduin-session maduin-kiro
+    maduin-stamp maduin-state maduin-session maduin-kiro
     maduin-bd-async maduin-bd-bridge maduin-config)
   "Features to unload/reload in dependency order (leaf-first).")
 
