@@ -30,6 +30,7 @@
 (add-to-list 'load-path maduin-dispatch--dir)
 
 (require 'maduin-config)
+(require 'maduin-logging)
 (require 'maduin-session)
 (require 'maduin-backend)
 (require 'maduin-bd-bridge)
@@ -437,6 +438,8 @@ left ready for another seat; every other outcome proceeds."
                     (error nil))))
       (if (eq result 'conflict)
           (progn
+            (maduin-log-event 'warn "seat-refused" :seat seat :task task
+                              :reason "unlanded work conflicts with main")
             (funcall maduin-dispatch--comment-fn
                      task
                      (format "seat %s holds unlanded work conflicting with main — not dispatched"
@@ -493,14 +496,24 @@ at spawn; retries pass the stored tier and effort explicitly."
                             :effort effort :fallback-attempted fallback-attempted
                             :started (float-time) :status 'working :phase nil)
                       maduin-dispatch--active)
+                (maduin-log-event 'info "pickup"
+                                  :task task :role role :seat seat
+                                  :backend backend :model model
+                                  :difficulty difficulty :effort effort
+                                  :retry (and fallback-attempted "fallback")
+                                  :handle sid)
                 (maduin-dispatch--notify)
                 sid)
+            (maduin-log-event 'warn "spawn-failed"
+                              :task task :role role :seat seat
+                              :backend backend :model model)
             (funcall maduin-dispatch--comment-fn
                      task "session failed — task left open")
             (maduin-dispatch--release-claim role task)
             (maduin-dispatch--notify)
             nil))
       (error
+       (maduin-log-event 'error "spawn-error" :task task :role role :seat seat)
        (funcall maduin-dispatch--comment-fn task "session failed — task left open")
        (maduin-dispatch--release-claim role task)
        (maduin-dispatch--notify)
@@ -595,6 +608,8 @@ sessions land nothing — they emit the gate's verdict."
                    (error nil))))
       (cond
        ((eq land t)
+        (maduin-log-event 'info "land" :task task :seat seat :role role
+                          :result "landed")
         (unless (eq role 'designer)
           (if (funcall maduin-dispatch--landed-fn seat)
               (progn
@@ -604,17 +619,27 @@ sessions land nothing — they emit the gate's verdict."
                                  (unless (string-suffix-p "\n" output) "\n")
                                  "provenance: "
                                  (maduin-stamp-format (maduin-stamp-trailers stamp))))
+                (maduin-log-event 'info "close" :task task :seat seat
+                                  :model (plist-get stamp :model)
+                                  :difficulty (plist-get stamp :difficulty)
+                                  :effort (plist-get stamp :effort))
                 ;; The wave is only reviewable once the closing task is
                 ;; recorded closed in bd, so the gate runs after close.
                 (maduin-dispatch--maybe-review task))
+            (maduin-log-event 'warn "land" :task task :seat seat
+                              :result "not-in-main")
             (funcall maduin-dispatch--comment-fn task
                      "land reported success but branch not in main — left open")
             (funcall maduin-dispatch--release-fn task))))
        ((eq land 'conflict)
+        (maduin-log-event 'warn "land" :task task :seat seat :role role
+                          :result "conflict")
         (funcall maduin-dispatch--comment-fn task "merge conflict — repairer dispatched")
         (unless (eq role 'repairer)
           (maduin-dispatch-repair seat task)))
        (t
+        (maduin-log-event 'error "land" :task task :seat seat :role role
+                          :result "failed")
         (funcall maduin-dispatch--comment-fn task "land failed — task left open")
         ;; Release the claim so the task returns to open (bd ready) instead of
         ;; staying in_progress forever.
@@ -635,6 +660,8 @@ by `:fallback-attempted'.  Every other failure releases the claim."
                            (maduin-session-usage-limited-p sid)))))
     (if (and (not (plist-get entry :fallback-attempted)) limited fallback)
         (progn
+          (maduin-log-event 'warn "usage-limit" :task task :role role :seat seat
+                            :backend backend :fallback fallback)
           (funcall maduin-dispatch--comment-fn
                    task "usage limit — retrying with fallback model")
           (let ((retry (maduin-dispatch--spawn-session
@@ -662,6 +689,13 @@ while work is in flight)."
   (let ((entry (cl-find-if (lambda (e) (equal (plist-get e :handle) sid))
                            maduin-dispatch--active)))
     (when entry
+      (maduin-log-event (if (eq status 'completed) 'info 'warn) "finish"
+                        :task (plist-get entry :task)
+                        :role (plist-get entry :role)
+                        :seat (plist-get entry :seat)
+                        :status status
+                        :backend (plist-get entry :backend)
+                        :handle sid)
       (unless (eq status 'completed)
         (maduin-dispatch--set-status sid 'failed))
       (setq maduin-dispatch--active
@@ -717,7 +751,13 @@ session runs, `maduin-review-hold-p' holds the fleet."
            (sid (and plan
                      (maduin-dispatch--spawn-session
                       epic 'reviewer seat nil plan nil))))
-      (when sid (maduin-review-note-session sid epic))
+      (if sid
+          (progn
+            (maduin-review-note-session sid epic)
+            (maduin-log-event 'info "review-gate" :epic epic :seat seat
+                              :handle sid :hold "fleet"))
+        (maduin-log-event 'warn "review-gate" :epic epic :seat seat
+                          :result (if plan "spawn-failed" "no-plan")))
       sid)))
 
 ;;; Recovery — orphaned in_progress tasks
@@ -774,6 +814,8 @@ rework may resume."
       (when (and (not (member task active))
                  (or (null only) (member task only))
                  (maduin-dispatch-implement task))
+        (maduin-log-event 'warn "recover" :task task
+                          :reason "orphaned in_progress")
         (setq n (1+ n))))
     n))
 
@@ -785,9 +827,21 @@ ordinary ticket is picked up, so the fleet finishes the rework the
 reviewer asked for before consuming new work."
   (let ((rework (cl-remove-if-not (lambda (task) (member task drift-fix)) tasks))
         (ordinary (cl-remove-if (lambda (task) (member task drift-fix)) tasks)))
+    (maduin-log-event 'debug "tick"
+                      :ready (length tasks)
+                      :rework (length rework)
+                      :held (and (maduin-review-hold-with-p drift-fix)
+                                 (length ordinary))
+                      :sessions (length maduin-dispatch--active))
     (dolist (task rework)
       (maduin-dispatch-implement task))
-    (unless (maduin-review-hold-with-p drift-fix)
+    (if (maduin-review-hold-with-p drift-fix)
+        (when ordinary
+          (maduin-log-event 'info "fleet-hold"
+                            :reason (if (maduin-review-in-flight-p)
+                                        "review in flight"
+                                      "drift-fix open")
+                            :held (length ordinary)))
       (dolist (task ordinary)
         (maduin-dispatch-implement task)))))
 
@@ -977,7 +1031,9 @@ first timer tick."
     (setq maduin-dispatch--timer nil))
   (let ((interval (or (maduin-dispatch--config-get 'fleet 'poll-interval) 30)))
     (setq maduin-dispatch--timer
-          (run-at-time interval interval #'maduin-dispatch-run-loop)))
+          (run-at-time interval interval #'maduin-dispatch-run-loop))
+    (maduin-log-event 'info "start" :poll-interval interval
+                      :fleet (maduin-dispatch--role-cap 'implementer)))
   (maduin-dispatch-run-loop)
   (maduin-dispatch--notify)
   t)
@@ -1004,6 +1060,9 @@ immediately delete any live sessions (tasks stay open)."
                    (length maduin-dispatch--active)))
       (setq maduin-dispatch--draining nil)
       (message "maduin stopped")))
+  (maduin-log-event 'info "stop"
+                    :mode (if hard "hard" "drain")
+                    :sessions (length maduin-dispatch--active))
   (maduin-dispatch--notify))
 
 (maduin-dispatch--register-hook)

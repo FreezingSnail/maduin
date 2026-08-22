@@ -19,6 +19,7 @@
 (add-to-list 'load-path maduin--dir)
 
 (require 'maduin-config)
+(require 'maduin-logging)
 (require 'maduin-bd-async)
 (require 'maduin-session)
 (require 'maduin-kiro)
@@ -42,6 +43,7 @@
     (define-key map (kbd "C-c s d") #'maduin-concierge-dismiss)
     (define-key map (kbd "C-c s n") #'maduin-designer-drop-in)
     (define-key map (kbd "C-c s p") #'maduin-designer-pending-tasks)
+    (define-key map (kbd "C-c s l") #'maduin-log-show)
     map)
   "Keymap for `maduin-mode'.")
 
@@ -174,7 +176,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
     maduin-cockpit-config maduin-cockpit-face maduin-cockpit-bar
     maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline
     maduin-stamp maduin-state maduin-session maduin-kiro
-    maduin-bd-async maduin-bd-bridge maduin-config)
+    maduin-bd-async maduin-bd-bridge maduin-config maduin-logging)
   "Features to unload/reload in dependency order (leaf-first).")
 
 ;;;###autoload

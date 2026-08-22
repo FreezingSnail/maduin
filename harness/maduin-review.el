@@ -44,6 +44,7 @@
 (add-to-list 'load-path maduin-review--dir)
 
 (require 'maduin-config)
+(require 'maduin-logging)
 (require 'maduin-bd-bridge)
 
 ;; Optional substrate deps: guarded so this file byte-compiles and loads
@@ -64,7 +65,7 @@ keep the original start so the epic diff spans its full change set.")
 
 (defun maduin-review--log (fmt &rest args)
   "Log a review-gate message."
-  (message "[maduin-review] %s" (apply #'format fmt args)))
+  (maduin-log 'warn "review: %s" (apply #'format fmt args)))
 
 ;;; Git plumbing
 
@@ -410,6 +411,8 @@ dropped from the in-flight set, so a hold can never outlive its review."
 Return the epic id, or nil when SID was not tracked."
   (let ((epic (maduin-review--drop-session sid)))
     (when epic
+      (maduin-log-event 'warn "review-abort" :epic epic :handle sid
+                        :reason reason)
       (funcall maduin-review--comment-fn
                epic (format "review gate: %s" reason))
       epic)))
@@ -457,6 +460,8 @@ Return `approved' (epic closed, goal met), `drift' (drift-fix task +
 comments, epic stays open) or `error' (comment; never silent-fail)."
   (pcase verdict
     ('approved
+     (maduin-log-event 'info "review-verdict" :epic epic-id :verdict "approved"
+                       :attempt (maduin-review--attempt-count epic-id))
      (maduin-review--close-epic epic-id)
      (maduin-review--drop-epic-start epic-id)
      (setq maduin-review--attempts
@@ -467,6 +472,9 @@ comments, epic stays open) or `error' (comment; never silent-fail)."
      'approved)
     (`(drift . ,feedback)
      (let ((task (maduin-review--create-drift-fix feedback epic-id)))
+       (maduin-log-event 'warn "review-verdict" :epic epic-id :verdict "drift"
+                         :attempt (maduin-review--attempt-count epic-id)
+                         :drift-fix task :feedback feedback)
        (when task
          (funcall maduin-review--comment-fn
                   task (format "drift detected by review gate: %s" feedback)))
@@ -474,6 +482,8 @@ comments, epic stays open) or `error' (comment; never silent-fail)."
                 epic-id (format "drift detected by review gate: %s" feedback))
        'drift))
     (_
+     (maduin-log-event 'error "review-verdict" :epic epic-id
+                       :verdict "no marker")
      (funcall maduin-review--comment-fn
               epic-id "review gate: no verdict marker in reviewer output (error)")
      'error)))

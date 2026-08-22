@@ -105,6 +105,7 @@ Restart Emacs, or run `M-x maduin-reload`.
 | `M-x maduin-concierge-dismiss` | Dismiss the concierge seat |
 | `M-x maduin-designer-drop-in` | Start a designer drop-in session |
 | `M-x maduin-designer-pending-tasks` | Show pending design tasks |
+| `M-x maduin-log-show` | Open the runtime log buffer |
 | `M-x maduin-reload` | Unload/reload all modules (edit-then-reload dev loop) |
 
 Keybindings (global, via `maduin-mode`):
@@ -114,6 +115,34 @@ Keybindings (global, via `maduin-mode`):
 | `C-c s s` | status (open/refresh cockpit) |
 | `C-c s c` / `C-c s d` | concierge / dismiss |
 | `C-c s n` / `C-c s p` | designer drop-in / pending tasks |
+| `C-c s l` | log buffer |
+
+## The log
+
+`*maduin-log*` is an append-only record of what the harness is doing.
+Open it with `M-x maduin-log-show`, `C-c s l`, or `L` in the cockpit.
+Structured lines stay greppable:
+
+```
+10:38:36 info  start poll-interval=30 fleet=3
+10:38:36 info  pickup task=maduin-42 role=implementer seat=shiva backend=kiro model=gpt-5.6-terra difficulty=high effort=high retry=- handle=maduin-kiro-1
+10:38:36 info  finish task=maduin-42 role=implementer seat=shiva status=completed
+10:38:36 warn  land task=maduin-42 seat=shiva result=conflict
+10:38:36 info  review-gate epic=maduin-7 seat=odin hold=fleet
+10:38:36 warn  review-verdict epic=maduin-7 verdict=drift drift-fix=maduin-51 feedback=acceptance 3 unmet
+```
+
+Recorded events: `start`/`stop`, `pickup`, `seat-refused`, `spawn-failed`,
+`usage-limit`, `finish`, `land`, `close`, `recover`, `fleet-hold`,
+`review-gate`, `review-verdict`, `review-abort`, plus every module warning
+and error that used to go only to the echo area. `tick` lines (per-poll
+ready/rework/held counts) appear at `debug`.
+
+In the log buffer: `q` quit, `c` clear, `l` set level, `G` resume tailing.
+`maduin-log-level` (default `info`) sets the threshold,
+`maduin-log-echo-level` (default `error`) what also reaches the echo area,
+and `maduin-log-max-lines` (default 5000) the retained history. Logging
+never signals — a bad log line cannot abort a land, close, or verdict.
 
 ## Configuration
 
@@ -178,7 +207,7 @@ tool.
 Single entry point:
 
 ```bash
-harness/check.sh                     # clean + byte-compile + ERT (389 tests)
+harness/check.sh                     # clean + byte-compile + ERT (400 tests)
 harness/check.sh -c                  # compile only
 harness/check.sh -k                  # skip clean
 harness/check.sh probe probes/<f>.el # + exploratory probe test

@@ -33,12 +33,22 @@ Stderr is discarded so human error text never contaminates stdout."
   "Run PROGRAM directly with ARGS (no shell). Return (exit-code . stdout-string).
 Stderr is discarded so human error text never contaminates stdout.
 Args travel as a Lisp list — never interpolated into a shell string —
-so task-ids and queries need no quoting and cannot be shell-injected."
-  (with-temp-buffer
-    (let ((code (apply #'call-process program nil
-                       (list (current-buffer) nil) nil
-                       args)))
-      (cons code (buffer-string)))))
+so task-ids and queries need no quoting and cannot be shell-injected.
+
+A non-string element (a missing id) would reach `call-process' as the
+opaque \"apply: Wrong type argument: stringp, nil\"; it is logged and
+reported as a failed call instead, so a run-loop tick degrades rather
+than aborting."
+  (if (not (and (stringp program) (cl-every #'stringp args)))
+      (progn
+        (maduin-bd--log-error
+         (format "bd call with missing argument: %S %S" program args))
+        (cons 1 ""))
+    (with-temp-buffer
+      (let ((code (apply #'call-process program nil
+                         (list (current-buffer) nil) nil
+                         args)))
+        (cons code (buffer-string))))))
 
 (defun maduin-bd--json-decode (s)
   "Decode JSON string S to alists and vectors, or nil on error.

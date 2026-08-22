@@ -32,6 +32,7 @@
     (maduin-cockpit-inbox . "inbox")
     (maduin-cockpit--toggle-backend . "backend")
     (maduin-cockpit-config . "config")
+    (maduin-log-show . "log")
     (maduin-concierge . "concierge")
     (maduin-concierge-dismiss . "dismiss")
     (maduin-designer-drop-in . "design drop-in")

@@ -6065,3 +6065,126 @@ accumulate in the dynamically bound `calls' list."
     (should (string-match-p "git rebase main" plan))
     (should (string-match-p "rebase --continue" plan))
     (should-not (string-match-p "git merge main" plan))))
+
+;;; Logging
+
+(defmacro maduin-test--with-log (&rest body)
+  "Run BODY with a fresh log buffer, info level, and no echoing."
+  `(let ((maduin-log-level 'info)
+         (maduin-log-echo-level nil)
+         (maduin-log-max-lines 5000))
+     (when (get-buffer maduin-log-buffer-name)
+       (kill-buffer maduin-log-buffer-name))
+     (unwind-protect (progn ,@body)
+       (when (get-buffer maduin-log-buffer-name)
+         (kill-buffer maduin-log-buffer-name)))))
+
+(defun maduin-test--log-text ()
+  "Return the log buffer's contents without text properties."
+  (with-current-buffer (get-buffer maduin-log-buffer-name)
+    (substring-no-properties (buffer-string))))
+
+(ert-deftest maduin-test-log-appends-lines ()
+  :tags '(maduin)
+  (maduin-test--with-log
+   (should (maduin-log 'info "hello %s" "world"))
+   (should (maduin-log 'error "boom"))
+   (let ((text (maduin-test--log-text)))
+     (should (string-match-p "info  hello world" text))
+     (should (string-match-p "error boom" text))
+     ;; Append-only: the first line stays above the second.
+     (should (< (string-match "hello world" text)
+                (string-match "boom" text))))))
+
+(ert-deftest maduin-test-log-respects-level ()
+  :tags '(maduin)
+  (maduin-test--with-log
+   (should-not (maduin-log 'debug "invisible"))
+   (should (maduin-log 'warn "visible"))
+   (let ((text (maduin-test--log-text)))
+     (should-not (string-match-p "invisible" text))
+     (should (string-match-p "visible" text)))))
+
+(ert-deftest maduin-test-log-format-string-without-args-is-verbatim ()
+  :tags '(maduin)
+  ;; Callers (`maduin-bd--log-error') pass pre-built text that may contain %.
+  (maduin-test--with-log
+   (maduin-log 'error "bd close failed: 100% wrong")
+   (should (string-match-p "100% wrong" (maduin-test--log-text)))))
+
+(ert-deftest maduin-test-log-never-signals ()
+  :tags '(maduin)
+  (maduin-test--with-log
+   ;; Malformed level, nil text, and a format/argument mismatch all record
+   ;; something instead of aborting the caller (a sentinel or timer).
+   (should (maduin-log nil nil))
+   (should (maduin-log 'info "%d" "not-a-number"))))
+
+(ert-deftest maduin-test-log-trims-to-max-lines ()
+  :tags '(maduin)
+  (maduin-test--with-log
+   (let ((maduin-log-max-lines 3))
+     (dotimes (i 10) (maduin-log 'info "line-%d" i))
+     (with-current-buffer (get-buffer maduin-log-buffer-name)
+       (should (<= (count-lines (point-min) (point-max)) 3)))
+     (let ((text (maduin-test--log-text)))
+       (should-not (string-match-p "line-0 " text))
+       (should (string-match-p "line-9" text))))))
+
+(ert-deftest maduin-test-log-event-string ()
+  :tags '(maduin)
+  (should (equal (maduin-log-event-string
+                  "land" '(:task "m-1" :seat "shiva" :result "conflict"))
+                 "land task=m-1 seat=shiva result=conflict"))
+  ;; A nil field renders as a placeholder rather than disappearing.
+  (should (equal (maduin-log-event-string "pickup" '(:task "m-2" :effort nil))
+                 "pickup task=m-2 effort=-")))
+
+(ert-deftest maduin-test-log-level-threshold ()
+  :tags '(maduin)
+  (should (maduin-log-enabled-p 'error 'warn))
+  (should (maduin-log-enabled-p 'warn 'warn))
+  (should-not (maduin-log-enabled-p 'info 'warn))
+  ;; An unknown level records instead of vanishing.
+  (should (maduin-log-enabled-p 'shouting 'info)))
+
+(ert-deftest maduin-test-log-mode-bindings-are-evil-aware ()
+  :tags '(maduin)
+  ;; AGENTS.md: buffer-local bindings go through one evil-aware helper.
+  (dolist (binding maduin-log--bindings)
+    (should (eq (lookup-key maduin-log-mode-map (kbd (car binding)))
+                (cdr binding)))))
+
+(ert-deftest maduin-test-dispatch-logs-pickup-and-finish ()
+  :tags '(maduin)
+  (maduin-test--with-log
+   (let* ((maduin-dispatch--active nil)
+          (maduin-dispatch--workdir-fn (lambda (_seat) "/work"))
+          (maduin-dispatch--claim-fn (lambda (_task) t))
+          (maduin-dispatch--comment-fn (lambda (&rest _) t))
+          (maduin-dispatch--session-delete-fn (lambda (&rest _) t))
+          (maduin-dispatch--release-fn (lambda (_task) t))
+          (maduin-dispatch--session-run-fn (lambda (&rest _args) "sess-1")))
+     (cl-letf (((symbol-function 'maduin-dispatch--notify) #'ignore))
+       (should (equal (maduin-dispatch-implement "m-42") "sess-1"))
+       (maduin-dispatch--on-complete "sess-1" 'failed))
+     (let ((text (maduin-test--log-text)))
+       (should (string-match-p "pickup task=m-42" text))
+       (should (string-match-p "finish task=m-42 role=implementer" text))
+       (should (string-match-p "status=failed" text))))))
+
+(ert-deftest maduin-test-bd-call-rejects-missing-argument ()
+  :tags '(maduin)
+  ;; `(apply #'call-process ... nil)' surfaces as the opaque
+  ;; "apply: Wrong type argument: stringp, nil"; degrade to a failed call.
+  (maduin-test--with-log
+   (let ((res (maduin-bd--call "bd" "show" nil "--json")))
+     (should (consp res))
+     (should (/= 0 (car res)))
+     (should (equal (cdr res) ""))
+     (should (string-match-p "missing argument" (maduin-test--log-text))))))
+
+(ert-deftest maduin-test-bd-show-with-nil-id-returns-nil ()
+  :tags '(maduin)
+  (maduin-test--with-log
+   (should-not (maduin-bd-show nil))))
