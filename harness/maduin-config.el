@@ -321,6 +321,8 @@ option back to nil; unset effort values by editing config.el."
             (setcdr key-cell value)
           (setcdr section-cell
                   (nconc (cdr section-cell) (list (cons key value)))))))
+    (when (fboundp 'maduin-pipeline-config-bump)
+      (maduin-pipeline-config-bump))
     value))
 
 (defun maduin-config-set-crew-backend (backend)

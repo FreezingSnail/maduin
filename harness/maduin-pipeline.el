@@ -311,15 +311,15 @@ bd results must succeed before a single merged snapshot is stored."
       (setq maduin-pipeline--status-refreshing t)
       (cl-labels
           ((finish
-            (kind data exit-code)
-            (unless (and (= exit-code 0) data)
+            (kind data exit-code valid)
+            (unless (and (= exit-code 0) valid)
               (setq failed t)
               (maduin-bd--log-error
                (format "pipeline status %s fetch failed%s"
                        kind
                        (if (= exit-code 0) " (invalid JSON)"
                          (format " (exit %d)" exit-code)))))
-            (when (and (= exit-code 0) data)
+            (when (and (= exit-code 0) valid)
               (if (eq kind 'ready)
                   (setq ready-data data)
                 (setq list-data data)))
@@ -335,15 +335,15 @@ bd results must succeed before a single merged snapshot is stored."
            (start
             (kind args)
             (let ((called nil))
-              (let ((key (maduin-bd-async-json
+              (let ((key (maduin-bd-async-json-valid
                           args
-                          (lambda (data exit-code)
+                          (lambda (data exit-code valid)
                             (setq called t)
-                            (finish kind data exit-code)))))
+                            (finish kind data exit-code valid)))))
                 ;; Spawn failures do not call their callback.  Count them as
                 ;; failed immediately so the next stale tick retries.
                 (unless (or key called)
-                  (finish kind nil 1))))))
+                  (finish kind nil 1 nil))))))
         (start 'ready '("ready" "--exclude-type" "epic" "--json"))
         (start 'list '("list" "--json" "--all"))))))
 

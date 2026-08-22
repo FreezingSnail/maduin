@@ -119,6 +119,18 @@ JSON array.  Return the in-flight key, or nil on unavailable/spawn failure."
    (lambda (exit-code stdout)
      (funcall callback (maduin-bd--json-data stdout) exit-code))))
 
+(defun maduin-bd-async-json-valid (args callback)
+  "Run bd ARGS and call CALLBACK with DATA, EXIT-CODE, and JSON validity.
+DATA is a list of decoded entries; a valid empty array is nil with VALID true.
+This preserves the existing two-argument `maduin-bd-async-json' API while
+allowing status consumers to distinguish `[]' from malformed output."
+  (maduin-bd-async-call
+   args
+   (lambda (exit-code stdout)
+     (let ((array (maduin-bd--json-array stdout)))
+       (funcall callback (and array (append array nil)) exit-code
+                (vectorp array))))))
+
 (defun maduin-bd-async-cancel-all ()
   "Delete every live async bd process and clear the in-flight registry."
   (let (processes)

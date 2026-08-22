@@ -1,29 +1,14 @@
 #!/usr/bin/env bash
-# check.sh — single entry point: byte-compile + ERT + optional probe.
-#
-# Usage:
-#   ./check.sh                     # clean + compile + tests
-#   ./check.sh -c                  # compile only
-#   ./check.sh -k                  # skip clean (keep .elc)
-#   ./check.sh probe probes/foo.el # + probe file (exploratory ERT tests)
-#
-# Exit codes:
-#   0  green
-#   1  byte-compile error (fail-fast; tests skipped)
-#   2  test failure
-#   3  probe failure
-#   5  byte-compile warnings present (STRICT=1; reported AFTER tests)
-#
-# Config: PKG, TEST, FILES (dependency order, deps first).
+# check.sh — compile + ERT; successful subprocess logs remain quiet.
+# Usage: ./check.sh [-c|-k|probe probes/foo.el]
+# Exit: 0 green, 1 compile error, 2 test fail, 3 probe fail, 5 warnings.
 
 set -uo pipefail
 
 EMACS="${EMACS:-emacs}"
-PKG="maduin"                    # base package name (no .el)
-TEST="${PKG}-test"              # test library stem
-STRICT="${STRICT:-1}"           # 1 = warnings raise exit 5 after tests
-
-# Compile order = dependency order. Deps first. Keep in sync with requires.
+PKG="maduin"
+TEST="${PKG}-test"
+STRICT="${STRICT:-1}"
 FILES=(
   "config.el"
   "maduin-logging.el"
@@ -49,11 +34,10 @@ FILES=(
   "maduin-test.el"
 )
 
-cd "$(dirname "${BASH_SOURCE[0]}")"   # operate from script dir (tests use relative paths)
-
+cd "$(dirname "${BASH_SOURCE[0]}")"
 warned=0
 
-clean()   { rm -f ./*.elc; }
+clean() { rm -f ./*.elc; }
 
 compile() {
   echo "=== COMPILE ==="
@@ -61,14 +45,11 @@ compile() {
   FILES_JOINED="$(IFS=:; printf '%s' "${FILES[*]}")"
   out="$(FILES_JOINED="$FILES_JOINED" "$EMACS" -Q --batch -L . --eval '
     (let ((files (split-string (or (getenv "FILES_JOINED") "") ":")))
-      ;; Pre-load sibling sources (dep order) so cross-file functions/vars
-      ;; resolve at compile time — avoids false "not known to be defined".
       (dolist (f files)
         (unless (string-suffix-p "-test.el" f)
           (condition-case e
               (load (file-name-sans-extension f) nil t)
             (error (message "LOAD SKIP %s: %s" f (error-message-string e))))))
-      ;; Compile each file. Hard error → kill-emacs 1 (fail fast).
       (dolist (f files)
         (condition-case e
             (byte-compile-file f)
@@ -76,27 +57,51 @@ compile() {
                  (kill-emacs 1))))
       (kill-emacs 0))' 2>&1)"
   rc=$?
-  printf '%s\n' "$out"
-  [ "$rc" -ne 0 ] && exit 1              # compile error: stop, skip tests
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out"
+    exit 1
+  fi
   if printf '%s' "$out" | grep -q "Warning"; then
-    warned=1                             # warnings: record, continue to tests
+    warned=1
+    printf '%s\n' "$out"
     echo "=== COMPILE WARNINGS PRESENT (STRICT=1) ==="
+  else
+    echo "COMPILE PASS"
   fi
 }
 
+run-ert() {
+  local label="$1" selector="$2" out rc
+  echo "=== $label ==="
+  out="$(SEL1="$selector" "$EMACS" -Q --batch -L . -l "$TEST" --eval '
+    (ert-run-tests-batch-and-exit (getenv "SEL1"))' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out"
+    echo "$label FAILED"
+    return 1
+  fi
+  echo "$label PASS"
+}
+
 tests() {
-  echo "=== TESTS ==="
-  SEL1="$PKG-test-" "$EMACS" -Q --batch -L . -l "$TEST" --eval '
-    (ert-run-tests-batch-and-exit (getenv "SEL1"))' \
-    || { echo "TESTS FAILED"; exit 2; }
+  run-ert "TESTS" "$PKG-test-" || exit 2
 }
 
 probe() {
-  local p="$1"; shift
+  local p="$1"
+  local out rc
   echo "=== PROBE: $p ==="
-  SEL1="$PKG-test-" SEL2="probe-" "$EMACS" -Q --batch -L . -l "$TEST" -l "$p" --eval '
-    (ert-run-tests-batch-and-exit (concat (getenv "SEL1") "\\|" (getenv "SEL2")))' \
-    || { echo "PROBE FAILED"; exit 3; }
+  out="$(SEL1="$PKG-test-" SEL2="probe-" "$EMACS" -Q --batch -L . -l "$TEST" -l "$p" --eval '
+    (ert-run-tests-batch-and-exit
+     (concat (getenv "SEL1") "\\|" (getenv "SEL2")))' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out"
+    echo "PROBE FAILED"
+    exit 3
+  fi
+  echo "PROBE PASS"
 }
 
 finish() {
@@ -104,12 +109,11 @@ finish() {
     echo "EXIT 5: byte-compile warnings (STRICT=1)"
     exit 5
   fi
-  exit 0
 }
 
 case "${1:-}" in
-  -c)      compile; finish ;;
-  -k)      compile; tests; finish ;;
-  probe)   clean; compile; tests; probe "$2"; finish ;;
-  *)       clean; compile; tests; finish ;;
+  -c) compile; finish ;;
+  -k) compile; tests; finish ;;
+  probe) clean; compile; tests; probe "$2"; finish ;;
+  *) clean; compile; tests; finish ;;
 esac

@@ -59,7 +59,12 @@ Each result has the shape (SECTION . ROWS), where ROWS are the plists from
                       nil t nil nil
                       (if value (symbol-name value) "unset"))))
          (unless (equal choice "unset") (intern choice))))
-      ('string (read-string (format "%s: " label) value))
+      ('string
+       (if (memq key '(kiro-model kiro-model-low kiro-model-high kiro-fallback))
+           (completing-read
+            (format "%s: " label)
+            '("gpt-5.6-luna" "gpt-5.6-terra") nil t nil nil value)
+         (read-string (format "%s: " label) value)))
       (_ (user-error "maduin: unsupported config type for %s" label)))))
 
 (defun maduin-cockpit-config--read-only-p (row)
@@ -76,7 +81,12 @@ like successful edits."
     (when (maduin-cockpit-config--read-only-p row)
       (user-error "maduin: harness/%s is read-only" key))
     (maduin-config-set-option section key value)
-    (maduin-cockpit-refresh)
+    (let ((cockpit (get-buffer maduin-cockpit-buffer-name)))
+      (if (buffer-live-p cockpit)
+          (with-current-buffer cockpit
+            (setq-local maduin-cockpit--render-signature nil)
+            (maduin-cockpit-refresh))
+        (maduin-cockpit-refresh)))
     (message "maduin: %s/%s = %s (runtime only — edit harness/config.el to persist)"
              section key (maduin-cockpit-config--value-string value))
     value))
@@ -107,7 +117,7 @@ like successful edits."
 
 (defun maduin-cockpit-config--ensure-transient-prefix ()
   "Define the data-driven transient prefix after transient becomes available."
-  (unless (fboundp 'maduin-cockpit-config--transient-prefix)
+  (progn
     (let ((index 0)
           groups)
       (dolist (group (maduin-cockpit-config--rows))

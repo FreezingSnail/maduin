@@ -54,16 +54,23 @@ Uses Emacs's native JSON parser when available and json.el otherwise."
         (json-read-from-string s))
     (error nil)))
 
+(defun maduin-bd--json-array (output)
+  "Parse OUTPUT as a JSON array vector, or nil when malformed or non-array."
+  (let ((s (string-trim (or output ""))))
+    (when (and (not (string-empty-p s)) (string-prefix-p "[" s))
+      (let ((data (maduin-bd--json-decode s)))
+        (and (vectorp data) data)))))
+
+(defun maduin-bd--json-array-p (output)
+  "Return non-nil when OUTPUT is a valid JSON array, including `[]'."
+  (vectorp (maduin-bd--json-array output)))
+
 (defun maduin-bd--json-data (output)
   "Parse OUTPUT as a JSON array; return list of alists, or nil.
-Returns nil silently when OUTPUT is empty or not JSON (first
-non-whitespace character is not `[' or `{')."
-  (let ((s (string-trim (or output ""))))
-    (when (and (not (string-empty-p s))
-               (or (string-prefix-p "[" s) (string-prefix-p "{" s)))
-      (let ((data (maduin-bd--json-decode s)))
-        (when (vectorp data)
-          (append data nil))))))
+An empty valid array and malformed output both normalize to nil; callers that
+need that distinction use `maduin-bd--json-array-p'."
+  (let ((data (maduin-bd--json-array output)))
+    (and data (append data nil))))
 
 (defun maduin-bd--json-ids (output)
   "Extract `id' fields from JSON array OUTPUT. Return list of strings."
