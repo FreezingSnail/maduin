@@ -21,7 +21,7 @@ maduin manages its own development. It dogfoods itself.
 ```
 concierge  →  intake & prioritize work
 designer   →  design, decompose into bd tasks (dependencies tracked)
-fleet      →  poll ready tasks → claim → implement → write output.md into seat worktree → close
+fleet      →  poll ready tasks → claim → implement → commit (message = record) → close
 reviewer   →  batched drift-review gate (approve/reject)
 repairer   →  drift-fix on rejected review output
 ```
@@ -146,7 +146,7 @@ continues to come from the selected effective backend's model mapping.
 - **repairer** — `slugineer-repairer` (`max-retries`, `esper`)
 
 Other sections: `welfare` (handoff timeout, blamelessness),
-`workspaces` (path, `land-on-stop`), `harness` (name, version).
+`workspaces` (path), `harness` (name, version).
 
 ### Difficulty tiers and provenance
 
@@ -173,7 +173,7 @@ tool.
 Single entry point:
 
 ```bash
-harness/check.sh                     # clean + byte-compile + ERT (354 tests)
+harness/check.sh                     # clean + byte-compile + ERT (378 tests)
 harness/check.sh -c                  # compile only
 harness/check.sh -k                  # skip clean
 harness/check.sh probe probes/<f>.el # + exploratory probe test
@@ -219,8 +219,19 @@ harness/
   `*maduin/{role}-{seat}*`.
 - **Shared state only via bd + brain.** Per-seat workspaces are
   isolated. Nothing else touches another seat's tree.
-- **Close writes to the seat worktree.** Task summaries (`output.md`)
-  land in the task's own worktree, never the main repo root.
+- **The commit message is the record.** Workers describe what they did
+  in the commit body; close writes that summary into bd as the close
+  reason. No report files are produced in any worktree.
+- **Seats sync before they work.** Dispatch brings a seat's branch to
+  current `main` before claiming: a fully landed branch is reset to
+  `main`, unlanded commits are rebased onto it. Uncommitted changes are
+  left alone. A seat whose unlanded work conflicts with `main` is
+  refused and the task stays ready for another seat, so divergence is
+  found before a session burns on a stale tree.
+- **Resolution is rebase-only.** Land fast-forwards `main`; a diverged
+  fast-forward (a concurrent land) is re-rebased and retried. Real
+  conflicts go to the repairer, which rebases too — merging `main` into
+  a seat branch would be replayed away by land.
 - **Startup recovery.** The harness detects tasks left `in_progress`
   by a crashed or quit session on start. It re-dispatches them, so
   `bd ready` re-surfaces orphaned work.

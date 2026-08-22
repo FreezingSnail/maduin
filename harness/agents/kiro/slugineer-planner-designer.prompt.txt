@@ -26,7 +26,7 @@ staged, decomposable design. The worker (slugineer-worker) and reviewer
 
 1. **Take** a high-level task (`bd show <id>`).
 2. **Research (spike)** if unknowns exist — read existing code, interfaces,
-   `output.md` of completed deps. Lightweight. Cite sources inline.
+   commit messages (`git log`) of completed deps. Lightweight. Cite sources inline.
 3. **Fill `--design`** with: goal, approach, components & interfaces, data
    shapes, error handling, testing strategy. Tests MUST be permanent files
    alongside source (same dir or adjacent `tests/`), using the target

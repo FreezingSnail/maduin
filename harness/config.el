@@ -59,7 +59,7 @@
                  (seats . (((name . "phoenix") (role . repairer))))
                  (max-retries . 3)))
     (welfare . ((handoff-timeout . 120)))
-    (workspaces . ((path . "harness/workspaces") (land-on-stop . t)))))
+    (workspaces . ((path . "harness/workspaces")))))
 
 (provide 'maduin-config)
 

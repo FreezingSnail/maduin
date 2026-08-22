@@ -103,6 +103,14 @@ Load harness/config.el once only when `maduin-config' is not already bound."
   "Return memoized list of designer seat names from config."
   (maduin-pipeline--seats 'designer))
 
+(defun maduin-pipeline--reviewer-seats ()
+  "Return memoized list of reviewer (esper) seat names from config."
+  (maduin-pipeline--seats 'reviewer))
+
+(defun maduin-pipeline--repairer-seats ()
+  "Return memoized list of repairer (esper) seat names from config."
+  (maduin-pipeline--seats 'repairer))
+
 ;;; Branch landing
 
 (defun maduin-pipeline--git (dir &rest args)
@@ -177,6 +185,47 @@ update a branch registered to the seat worktree.  Git rejects that topology."
                branch (car res) (cdr res)))
       nil))))
 
+(defun maduin-pipeline--ff-only (main branch)
+  "Fast-forward MAIN's checkout to BRANCH; return (STATUS . OUTPUT)."
+  (funcall maduin-pipeline--git-output-fn main "merge" "--ff-only" branch))
+
+(defun maduin-pipeline--diverged-p (output)
+  "Return non-nil when ff-only OUTPUT reports a diverged (non-ff) main.
+A concurrent seat landing between our rebase and our fast-forward moves main
+forward, so the fast-forward is refused even though nothing conflicts."
+  (let ((text (downcase (or output ""))))
+    (or (string-match-p "not possible to fast-forward" text)
+        (string-match-p "diverging branches" text))))
+
+(defun maduin-pipeline--land-rebased (wt branch main exec-command)
+  "Fast-forward MAIN to already-rebased BRANCH in WT; return t, `conflict', nil.
+On a diverged main (another seat landed first) rebase BRANCH once more onto
+the new main and retry the fast-forward.  Re-running the stamped rebase is
+safe: the trailer amend uses `trailer.ifexists=replaceIfDifferent'."
+  (let ((ff (maduin-pipeline--ff-only main branch)))
+    (cond
+     ((= 0 (car ff)) t)
+     ((maduin-pipeline--diverged-p (cdr ff))
+      (let ((again (maduin-pipeline--rebase-branch wt branch exec-command)))
+        (when (eq again 'retry)
+          (setq again (maduin-pipeline--rebase-branch wt branch)))
+        (cond
+         ((eq again t)
+          (let ((retry (maduin-pipeline--ff-only main branch)))
+            (if (= 0 (car retry))
+                t
+              (maduin-workspace--log-warning
+               (format "land-branch: merge --ff-only %s failed after re-rebase (exit %d): %s"
+                       branch (car retry) (cdr retry)))
+              nil)))
+         ((eq again 'conflict) 'conflict)
+         (t nil))))
+     (t
+      (maduin-workspace--log-warning
+       (format "land-branch: merge --ff-only %s failed (exit %d): %s"
+               branch (car ff) (cdr ff)))
+      nil))))
+
 (defun maduin-pipeline-land-branch (seat-name &optional stamp)
   "Commit SEAT-NAME worktree changes, rebase its branch onto main, then land it.
 STAMP is a provenance plist consumed by `maduin-stamp-trailers'.  A nil or
@@ -218,14 +267,7 @@ failure aborts and retries once unstamped; conflicts return `conflict'."
                   (setq rebase (maduin-pipeline--rebase-branch wt branch)))
                 (cond
                  ((eq rebase t)
-                  (let ((ff (funcall maduin-pipeline--git-output-fn
-                                     main "merge" "--ff-only" branch)))
-                    (if (= 0 (car ff))
-                        t
-                      (maduin-workspace--log-warning
-                       (format "land-branch: merge --ff-only %s failed (exit %d): %s"
-                               branch (car ff) (cdr ff)))
-                      nil)))
+                  (maduin-pipeline--land-rebased wt branch main exec-command))
                  ((eq rebase 'conflict) 'conflict)
                  (t nil))))))))))
 (defun maduin-pipeline-landed-p (seat-name)

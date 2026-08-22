@@ -118,6 +118,78 @@ worktree.  Return nil if creation fails."
         nil))
      (t (maduin-workspace--create seat-name target)))))
 
+(defun maduin-workspace--dirty-p (worktree)
+  "Return non-nil when WORKTREE has uncommitted changes.
+A git failure reads as dirty: refusing to touch an unreadable tree is the
+safe answer, since the alternative discards work."
+  (let ((res (funcall maduin-workspace--git-output-fn
+                      worktree "status" "--porcelain")))
+    (or (/= 0 (car res))
+        (not (string-empty-p (string-trim (or (cdr res) "")))))))
+
+(defun maduin-workspace--ancestor-p (main ancestor descendant)
+  "Return non-nil when ANCESTOR is an ancestor of DESCENDANT, asked from MAIN."
+  (= 0 (funcall maduin-workspace--git-fn
+                main "merge-base" "--is-ancestor" ancestor descendant)))
+
+(defun maduin-workspace-sync (seat-name)
+  "Bring SEAT-NAME's branch in line with main before new work is dispatched.
+
+Seat worktrees are otherwise only reconciled with main at land time, which
+means a seat implements against whatever main looked like when its branch was
+last touched and only discovers the divergence once the work already exists.
+Syncing first moves that discovery before the session is spawned.
+
+Return:
+  `synced'   → the branch now contains main (already current, reset, or rebased)
+  `dirty'    → uncommitted changes; the tree is left untouched
+  `conflict' → unlanded commits conflict with main; the rebase was aborted
+  nil        → no worktree, or git failed
+
+A branch already fully landed is reset to main; a branch holding unlanded
+commits is rebased so that work survives.  Never signals."
+  (condition-case err
+      (let* ((wt (maduin-workspace-path seat-name))
+             (branch (maduin-workspace-branch seat-name))
+             (main (funcall maduin-workspace--main-root-fn)))
+        (cond
+         ((not (file-directory-p wt)) nil)
+         ;; Branch already contains main → nothing to do.
+         ((maduin-workspace--ancestor-p main "main" branch) 'synced)
+         ((maduin-workspace--dirty-p wt)
+          (maduin-workspace--log-warning
+           (format "sync seat %s: uncommitted changes; left on a stale base"
+                   seat-name))
+          'dirty)
+         ;; Nothing unlanded → discard the stale baseline outright.
+         ((maduin-workspace--ancestor-p main branch "main")
+          (if (= 0 (funcall maduin-workspace--git-fn wt "reset" "--hard" "main"))
+              'synced
+            (maduin-workspace--log-warning
+             (format "sync seat %s: reset --hard main failed" seat-name))
+            nil))
+         (t
+          (let ((res (funcall maduin-workspace--git-output-fn
+                              wt "rebase" "main" branch)))
+            (cond
+             ((= 0 (car res)) 'synced)
+             ((string-match-p "conflict" (downcase (or (cdr res) "")))
+              (funcall maduin-workspace--git-fn wt "rebase" "--abort")
+              (maduin-workspace--log-warning
+               (format "sync seat %s: unlanded work on %s conflicts with main"
+                       seat-name branch))
+              'conflict)
+             (t
+              (funcall maduin-workspace--git-fn wt "rebase" "--abort")
+              (maduin-workspace--log-warning
+               (format "sync seat %s: rebase onto main failed (exit %d): %s"
+                       seat-name (car res) (cdr res)))
+              nil))))))
+    (error
+     (maduin-workspace--log-warning
+      (format "sync seat %s: unexpected error: %s" seat-name err))
+     nil)))
+
 (defun maduin-workspace-cleanup (seat-name)
   "Remove SEAT-NAME worktree and branch; idempotent, never throws.
 Return t on success or when there is nothing to clean (worktree dir

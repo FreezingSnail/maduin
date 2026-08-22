@@ -70,8 +70,8 @@ Mocks must accept the optional provenance STAMP argument.")
 of main.")
 
 (defvar maduin-dispatch--close-fn #'maduin-bd-close
-  "Function `(task output &optional dir)' → boolean.
-DIR is the seat worktree the close output should land in.")
+  "Function `(task output)' → boolean.
+OUTPUT becomes the bd close reason; no file is written into any worktree.")
 
 (defvar maduin-dispatch--claim-fn #'maduin-bd-claim
   "Function `(task)' → boolean.")
@@ -93,6 +93,10 @@ DIR is the seat worktree the close output should land in.")
 
 (defvar maduin-dispatch--workdir-fn #'maduin-dispatch--ensure-workdir
   "Function `(seat)' → worktree directory string.")
+
+(defvar maduin-dispatch--sync-fn #'maduin-workspace-sync
+  "Function `(seat)' → `synced', `dirty', `conflict', or nil.
+Run before a seat is claimed so work starts from the current main.")
 
 (defvar maduin-dispatch--open-epics-fn #'maduin-bd-open-epics
   "Function `()' → list of open epic id strings | nil.")
@@ -271,8 +275,9 @@ Free = a configured seat with no active session of ROLE occupying it."
   (let ((spec (maduin-dispatch--spec task)))
     (format
      "Implement bd task %s.\n\nTitle: %s\n\nDescription:\n%s\n\n\
-Write output.md describing what you changed. Commit your work to this \
-branch when done. If blocked, explain why — do not invent work."
+Commit your work to this branch when done, and describe what you changed \
+in the commit message body: that message is the record of the task. Write \
+no summary or report files. If blocked, explain why — do not invent work."
      task
      (or (plist-get spec :title) "?")
      (or (plist-get spec :desc) "?"))))
@@ -291,9 +296,13 @@ the task. If blocked, explain why — do not invent work."
 (defun maduin-dispatch--repair-plan (seat task)
   "Build conflict-repair plan string for SEAT on TASK."
   (format
-   "You are the merge-conflict repairer for seat %s (task %s). A land \
-into main failed with conflicts. Task: 1) git merge main 2) resolve ALL \
-conflicts 3) git add -A 4) git commit. Report blockers instead of guessing."
+   "You are the merge-conflict repairer for seat %s (task %s). A land into \
+main failed with conflicts. Land reconciles by rebasing, so resolve the same \
+way: 1) git rebase main 2) resolve ALL conflicts 3) git add -A 4) git rebase \
+--continue, repeating 2-4 until the rebase finishes. Do not merge main into \
+this branch: land would replay these commits and re-raise the conflict. \
+Describe the resolution in the commit message. Report blockers instead of \
+guessing."
    seat task))
 
 (defun maduin-dispatch--plan-for (role task seat)
@@ -324,6 +333,9 @@ Return non-nil when HANDLE was active.  Missing entries are a silent no-op."
         (setq maduin-dispatch--active
               (mapcar
                (lambda (entry)
+                 ;; Every non-matching entry must be returned unchanged: a
+                 ;; missing else branch here silently replaced other seats'
+                 ;; entries with nil, breaking completion and drain.
                  (if (and (not found)
                           (equal handle (plist-get entry :handle)))
                      (progn
@@ -331,7 +343,8 @@ Return non-nil when HANDLE was active.  Missing entries are a silent no-op."
                        (unless (equal status (plist-get entry :status))
                          (setq changed t)
                          (plist-put entry :status status))
-                       entry)))
+                       entry)
+                   entry))
                maduin-dispatch--active))
         (when changed (maduin-dispatch--notify))
         found)
@@ -368,14 +381,40 @@ work indirectly through `maduin-dispatch--notify'."
 
 ;;; Spawn
 
+(defun maduin-dispatch--seat-ready-p (role seat task)
+  "Return non-nil when SEAT's worktree is fit to receive TASK for ROLE.
+
+Ensures the worktree exists, then syncs its branch to main so the session
+starts from the current baseline instead of whatever main looked like when the
+seat last ran.  A repairer is deliberately exempt: it is dispatched *because*
+its seat diverges, and syncing would discard the work it must resolve.
+
+A seat whose unlanded work conflicts with main is refused (nil) and TASK is
+left ready for another seat; every other outcome proceeds."
+  (funcall maduin-dispatch--workdir-fn seat)
+  (if (eq role 'repairer)
+      t
+    (let ((result (condition-case nil
+                      (funcall maduin-dispatch--sync-fn seat)
+                    (error nil))))
+      (if (eq result 'conflict)
+          (progn
+            (funcall maduin-dispatch--comment-fn
+                     task
+                     (format "seat %s holds unlanded work conflicting with main — not dispatched"
+                             seat))
+            nil)
+        t))))
+
 (defun maduin-dispatch--spawn (task role seat &optional model plan)
   "Claim TASK and spawn one ROLE session at SEAT.  Return handle or nil.
-No-op (nil) when ROLE is at its concurrency cap or no SEAT is free.
+No-op (nil) when ROLE is at its concurrency cap, no SEAT is free, or SEAT
+cannot be synced to main.
 PLAN overrides the role's default plan string (designer owns its prompt)."
   (unless (>= (maduin-dispatch--active-role-count role)
               (maduin-dispatch--role-cap role))
     (let ((seat (or seat (maduin-dispatch--free-seat role))))
-      (when seat
+      (when (and seat (maduin-dispatch--seat-ready-p role seat task))
         (if (funcall maduin-dispatch--claim-fn task)
             (maduin-dispatch--spawn-session task role seat model plan nil)
           (maduin-dispatch--notify)
@@ -500,8 +539,7 @@ close: the epic stays open until its children are implemented."
                      (concat output
                              (unless (string-suffix-p "\n" output) "\n")
                              "provenance: "
-                             (maduin-stamp-format (maduin-stamp-trailers stamp)))
-                     (funcall maduin-dispatch--workdir-fn seat))
+                             (maduin-stamp-format (maduin-stamp-trailers stamp))))
           (funcall maduin-dispatch--comment-fn task
                    "land reported success but branch not in main — left open")
           (funcall maduin-dispatch--release-fn task))))
@@ -545,7 +583,7 @@ by `:fallback-attempted'.  Every other failure releases the claim."
 Only acts on sessions this dispatcher spawned; foreign sessions are
 ignored.  Always deletes the session (ephemeral — sessions live only
 while work is in flight)."
-  (let ((entry (cl-find-if (lambda (e) (string= (plist-get e :handle) sid))
+  (let ((entry (cl-find-if (lambda (e) (equal (plist-get e :handle) sid))
                            maduin-dispatch--active)))
     (when entry
       (unless (eq status 'completed)

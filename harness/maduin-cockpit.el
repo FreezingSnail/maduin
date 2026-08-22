@@ -105,7 +105,7 @@ evil is available.")
   "Pipeline chip glyphs as (KEY UNICODE ASCII).")
 
 (defconst maduin-cockpit--role-order
-  '("concierge" "designer" "implementer")
+  '("concierge" "designer" "implementer" "reviewer" "repairer")
   "Stable default role grouping order for cockpit rows.")
 
 (defconst maduin-cockpit--evil-suppress-keys
@@ -139,15 +139,36 @@ read-only leak motions in those states only.  No-op when evil is absent."
 (dolist (binding maduin-cockpit--bindings)
   (maduin-cockpit--bind (car binding) (cdr binding)))
 
+(defconst maduin-cockpit--esper-roles '(reviewer repairer)
+  "Roles whose sessions carry another seat's name in dispatch entries.
+An esper (Odin, Phoenix) is dispatched onto the tree of the seat it
+serves, so its cockpit row is matched by role, not by seat name.")
+
+(defun maduin-cockpit--section-enabled-p (section)
+  "Return non-nil unless SECTION is explicitly disabled in config.
+Sections without an `enabled' key (concierge, designer, fleet) count as
+enabled."
+  (let ((entry (assq 'enabled (cdr (assq section maduin-config)))))
+    (or (null entry) (and (cdr entry) t))))
+
 (defun maduin-cockpit--seats ()
-  "Return alist ((SEAT-NAME . ROLE) ...) from config seats."
+  "Return alist ((SEAT-NAME . ROLE) ...) from config seats.
+Covers every crew section — concierge, designer, fleet, and the
+reviewer/repairer espers — so a configured seat is never invisible.
+Disabled sections contribute no rows."
   (append
    (mapcar (lambda (s) (cons s "concierge"))
            (maduin-pipeline--concierge-seats))
    (mapcar (lambda (s) (cons s "designer"))
            (maduin-pipeline--designer-seats))
    (mapcar (lambda (s) (cons s "implementer"))
-           (maduin-pipeline-fleet-seats))))
+           (maduin-pipeline-fleet-seats))
+   (when (maduin-cockpit--section-enabled-p 'reviewer)
+     (mapcar (lambda (s) (cons s "reviewer"))
+             (maduin-pipeline--reviewer-seats)))
+   (when (maduin-cockpit--section-enabled-p 'repairer)
+     (mapcar (lambda (s) (cons s "repairer"))
+             (maduin-pipeline--repairer-seats)))))
 
 (defvar maduin-cockpit-title-negative-ttl 60.0
   "Seconds a failed task-title lookup remains cached before one retry.")
@@ -293,17 +314,28 @@ configuration APIs, preserving crew-wide backend overrides."
   (let ((started (plist-get entry :started)))
     (and started (- (float-time) started))))
 
+(defun maduin-cockpit--seat-entry (seat role)
+  "Return SEAT's dispatch entry, or nil.
+Seats are matched by name.  Esper seats (ROLE in
+`maduin-cockpit--esper-roles') are matched by role instead: a reviewer or
+repairer session is dispatched onto the served seat's tree, so its entry
+carries that seat's name, never the esper's."
+  (or (cl-find-if (lambda (e) (equal (plist-get e :seat) seat))
+                  maduin-dispatch--active)
+      (and (memq role maduin-cockpit--esper-roles)
+           (cl-find-if (lambda (e) (eq (plist-get e :role) role))
+                       maduin-dispatch--active))))
+
 (defun maduin-cockpit--seat-status (seat)
   "Return rich plist for SEAT:
 \(:seat :role :status :task-id :task-title :model :backend :uptime :phase).
 Fields come solely from the dispatch entry (`maduin-dispatch--active');
 no entry → idle row.  Active backends are launch-time values; idle
 backends reflect current runtime configuration.  Never signals."
-  (let* ((entry (cl-find-if (lambda (e) (equal (plist-get e :seat) seat))
-                            maduin-dispatch--active))
+  (let* ((role (maduin-cockpit--seat-role seat))
+         (entry (maduin-cockpit--seat-entry seat role))
          (task-id (and entry (plist-get entry :task)))
          (task-title (maduin-cockpit--title task-id))
-         (role (maduin-cockpit--seat-role seat))
          (idle-config (and (null entry) (maduin-cockpit--idle-config role seat))))
     (when (and task-id (null task-title))
       (maduin-cockpit--title-request task-id))
@@ -514,7 +546,10 @@ Return the cockpit buffer."
   (interactive)
   (let ((buf (get-buffer-create maduin-cockpit-buffer-name)))
     (switch-to-buffer buf)
-    (tabulated-list-mode)
+    ;; Re-entering an existing cockpit must not reset its mode: that would
+    ;; discard the sort column and every buffer-local render cache.
+    (unless (derived-mode-p 'tabulated-list-mode)
+      (tabulated-list-mode))
     (use-local-map maduin-cockpit-map)
     (maduin-cockpit--evil-setup)
     (maduin-cockpit-bar-install)
@@ -532,24 +567,33 @@ Return the cockpit buffer."
   "Render the current cockpit snapshot without synchronous pipeline I/O.
 Rows and footer are rebuilt only when their rows-plus-status signature
 changes.  Every actual render records its time for the shared scheduler.
-When REFRESH-INBOX is non-nil, also refresh the embedded chaplet inbox."
+When REFRESH-INBOX is non-nil, also refresh the embedded chaplet inbox.
+Rendering is confined to `tabulated-list-mode' buffers: `tabulated-list-print'
+erases its buffer, so a stray call from an ordinary buffer must not touch it."
   (interactive (list t))
   (setq maduin-cockpit--last-render (funcall maduin-cockpit--now-fn))
-  (let* ((window (get-buffer-window (current-buffer) 'visible))
-         (window-start (and (window-live-p window) (window-start window)))
-         (status (maduin-pipeline-status))
-         (rows (maduin-cockpit--rows))
-         (signature (sxhash-equal (list rows status))))
-    (maduin-cockpit--ensure-format)
-    (unless (equal signature maduin-cockpit--render-signature)
-      (maduin-cockpit--print-rows rows)
-      (maduin-cockpit--render-footer status)
-      (setq-local maduin-cockpit--render-signature signature))
-    (maduin-cockpit--render-header status)
-    (when (and window-start (window-live-p window))
-      (set-window-start window window-start t))
-    (when refresh-inbox
-      (maduin-cockpit--inbox-refresh))))
+  (unless (derived-mode-p 'tabulated-list-mode)
+    (let ((cockpit (get-buffer maduin-cockpit-buffer-name)))
+      (when (and (buffer-live-p cockpit)
+                 (not (eq cockpit (current-buffer))))
+        (with-current-buffer cockpit
+          (maduin-cockpit-refresh refresh-inbox)))))
+  (when (derived-mode-p 'tabulated-list-mode)
+    (let* ((window (get-buffer-window (current-buffer) 'visible))
+           (window-start (and (window-live-p window) (window-start window)))
+           (status (maduin-pipeline-status))
+           (rows (maduin-cockpit--rows))
+           (signature (sxhash-equal (list rows status))))
+      (maduin-cockpit--ensure-format)
+      (unless (equal signature maduin-cockpit--render-signature)
+        (maduin-cockpit--print-rows rows)
+        (maduin-cockpit--render-footer status)
+        (setq-local maduin-cockpit--render-signature signature))
+      (maduin-cockpit--render-header status)
+      (when (and window-start (window-live-p window))
+        (set-window-start window window-start t))
+      (when refresh-inbox
+        (maduin-cockpit--inbox-refresh)))))
 
 (defun maduin-cockpit--start-timer ()
   "Ensure the cockpit auto-refresh timer is running."
@@ -594,17 +638,21 @@ Reuses chaplet's single list buffer (`chaplet-list--buffer-name').")
 Return the inbox window, or nil when chaplet is unavailable or the split
 fails.  The cockpit buffer stays in the selected (main) window; the inbox
 buffer lands in the new lower window, so killing the cockpit leaves the
-inbox usable."
+inbox usable.  An existing inbox window is reused: repeated
+`maduin-cockpit-show' calls must not stack one split per invocation."
   (if (not (and (require 'chaplet nil t)
                 (fboundp 'chaplet-list-set-view)))
       (progn
         (message "maduin-cockpit: chaplet not installed; inbox omitted")
         nil)
     (condition-case nil
-        (let ((win (split-window-below)))
-          (with-selected-window win
-            (chaplet-list-set-view 'inbox))
-          win)
+        (let ((existing (get-buffer-window maduin-cockpit--inbox-buffer-name)))
+          (if (window-live-p existing)
+              existing
+            (let ((win (split-window-below)))
+              (with-selected-window win
+                (chaplet-list-set-view 'inbox))
+              win)))
       (error nil))))
 
 (defun maduin-cockpit--inbox-refresh ()
@@ -704,13 +752,17 @@ Added to `maduin-session-on-complete-hook' (SID STATUS are ignored)."
     (error nil)))
 
 (defun maduin-cockpit--on-window-change (&optional _frame)
-  "Request a scheduled refresh when the cockpit becomes selected.
-The shared scheduler handles every throttle and coalescing decision."
+  "Restart the refresh timer and request a render when the cockpit is visible.
+`maduin-cockpit--auto-refresh' cancels its own timer once the cockpit is
+hidden, so re-displaying the buffer through any route (not just
+`maduin-cockpit-show') must arm it again or derived fields such as uptime
+freeze at their last painted value.  The shared scheduler handles every
+throttle and coalescing decision."
   (condition-case nil
-      (when (and (get-buffer maduin-cockpit-buffer-name)
-                 (eq (window-buffer (selected-window))
-                     (get-buffer maduin-cockpit-buffer-name)))
-        (maduin-cockpit--schedule-refresh))
+      (let ((buf (get-buffer maduin-cockpit-buffer-name)))
+        (when (and buf (get-buffer-window buf 'visible))
+          (maduin-cockpit--start-timer)
+          (maduin-cockpit--schedule-refresh)))
     (error nil)))
 
 (defun maduin-cockpit--register-live-updates ()

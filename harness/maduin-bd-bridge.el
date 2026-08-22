@@ -10,13 +10,9 @@
 (require 'maduin-logging nil t)
 
 ;;;###autoload
-(defcustom maduin-bd-close-file "output.md"
-  "File name written by `maduin-bd-close' before closing the task.
-The file is resolved under the close directory (a seat worktree) —
-never the main repo root — so the root substrate-spike doc is not
-clobbered."
-  :type 'string
-  :group 'maduin)
+(defgroup maduin nil
+  "Emacs-native agent orchestrator."
+  :group 'tools)
 
 (defun maduin-bd--log-error (msg)
   "Log MSG as error via maduin-log if available, else `message'."
@@ -144,28 +140,29 @@ in_progress forever.  Return t on success."
                task-id (car res) (cdr res)))
       nil)))
 
-(defun maduin-bd-close-path (&optional dir)
-  "Return absolute path of `maduin-bd-close-file' under DIR.
-DIR defaults to `default-directory'."
-  (expand-file-name maduin-bd-close-file (or dir default-directory)))
+(defun maduin-bd-close (task-id output &optional _dir)
+  "Close TASK-ID with OUTPUT as its bd close reason.  Return t on success.
 
-(defun maduin-bd-close (task-id output &optional dir)
-  "Write OUTPUT to `maduin-bd-close-file' inside DIR, then close TASK-ID.
-DIR is the seat worktree (or any per-task directory); it defaults to
-`default-directory'.  Return t on success."
-  (let ((file (maduin-bd-close-path dir)))
-    ;; Always write the file (empty when OUTPUT is nil) so the close's
-    ;; `--reason-file' always exists — even in the worktree dir.
-    (make-directory (file-name-directory file) t)
-    (with-temp-file file (insert (or output "")))
-    (let ((res (maduin-bd--run
-                (format "bd close %s --reason-file %s" task-id file))))
-      (if (= 0 (car res))
-          t
-        (maduin-bd--log-error
-         (format "bd close %s failed (exit %d): %s"
-                 task-id (car res) (cdr res)))
-        nil))))
+OUTPUT travels through a throwaway temp file so multi-line reasons need no
+shell quoting.  Nothing is written into the seat worktree: what the worker
+did belongs in its commit message, and the reason itself lives in bd.  The
+optional _DIR argument is accepted, and ignored, for call-site compatibility."
+  (let ((file (make-temp-file "maduin-bd-close-" nil ".txt")))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert (or output "")))
+          (let ((res (maduin-bd--run
+                      (format "bd close %s --reason-file %s"
+                              (shell-quote-argument task-id)
+                              (shell-quote-argument file)))))
+            (if (= 0 (car res))
+                t
+              (maduin-bd--log-error
+               (format "bd close %s failed (exit %d): %s"
+                       task-id (car res) (cdr res)))
+              nil)))
+      (when (file-exists-p file)
+        (ignore-errors (delete-file file))))))
 
 (defun maduin-bd-create-epic (title desc)
   "Create epic with TITLE and DESC. Return epic ID string or nil."

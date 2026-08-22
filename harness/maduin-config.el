@@ -266,8 +266,7 @@ call `maduin-config-save' explicitly to request persistence."
     (repairer esper "repairer esper" string nil)
     (repairer max-retries "repairer max retries" integer nil)
     (welfare handoff-timeout "welfare handoff timeout (s)" integer nil)
-    (workspaces path "workspace path" string nil)
-    (workspaces land-on-stop "land workspaces on stop" boolean nil))
+    (workspaces path "workspace path" string nil))
   "Editable scalar options of `maduin-config'.")
 
 (defun maduin-config--option-spec (section key)

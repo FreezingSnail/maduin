@@ -37,6 +37,16 @@
 (require 'maduin-concierge)
 (require 'maduin-backend)
 
+;; Pre-dispatch seat sync runs real git against real seat worktrees.  Neutralise
+;; it for the whole suite: a test that spawns must never rebase or reset a live
+;; seat branch.  Tests that exercise the sync itself let-bind this seam (or call
+;; `maduin-workspace-sync' with mocked git seams) and so shadow this default;
+;; `maduin-test-dispatch-sync-seam-default' guards the production wiring.
+(defconst maduin-test--dispatch-sync-default maduin-dispatch--sync-fn
+  "Shipped value of `maduin-dispatch--sync-fn' before the suite neutralises it.")
+
+(setq maduin-dispatch--sync-fn (lambda (_seat) 'synced))
+
 ;;; Helpers
 
 (defun maduin-test--temp-dir ()
@@ -99,7 +109,7 @@
             (maduin-test--no-io
               (maduin-cockpit-refresh)
               (maduin-cockpit-refresh)
-              (should (= (length (maduin-cockpit--rows)) 5)))))
+              (should (= (length (maduin-cockpit--rows)) 7)))))
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
 (ert-deftest maduin-test-dispatch-tick-io-free ()
@@ -682,44 +692,48 @@
                maduin-bd-epic-children))
     (should (fboundp f))))
 
-(ert-deftest maduin-test-bd-close-path ()
+(ert-deftest maduin-test-bd-close-writes-no-repo-file ()
   :tags '(maduin)
-  (let ((maduin-bd-close-file "out.md"))
-    (should (string= (maduin-bd-close-path "/x/y") "/x/y/out.md"))
-    (should (string= (maduin-bd-close-path nil)
-                     (expand-file-name "out.md" default-directory)))))
-
-(ert-deftest maduin-test-bd-close-writes-to-worktree-not-root ()
-  :tags '(maduin)
+  ;; The close reason travels through a temp file that is deleted afterwards.
+  ;; Nothing may be written into the seat worktree or the repo root: what the
+  ;; worker did is recorded in its commit message, not in a tracked file.
   (let* ((dir (maduin-test--temp-dir))
-         (maduin-bd-close-file (format "ert-close-%d.md" (random)))
-         (root-file (expand-file-name maduin-bd-close-file default-directory)))
+         (seen nil)
+         (reason-file nil))
     (unwind-protect
         (progn
           (cl-letf (((symbol-function 'maduin-bd--run)
-                     (lambda (_cmd) (cons 0 ""))))
-            (should (maduin-bd-close "t1" "out" dir)))
-          ;; Written inside DIR (the worktree), NOT the repo/harness root.
-          (should (string= (with-temp-buffer
-                             (insert-file-contents
-                              (expand-file-name maduin-bd-close-file dir))
-                             (buffer-string))
-                           "out"))
-          (should-not (file-exists-p root-file)))
+                     (lambda (cmd)
+                       (setq seen cmd)
+                       (when (string-match "--reason-file \\(.*\\)\\'" cmd)
+                         (setq reason-file (match-string 1 cmd))
+                         ;; Readable while bd runs, gone afterwards.
+                         (should (file-exists-p reason-file)))
+                       (cons 0 ""))))
+            (should (maduin-bd-close "t1" "landed work" dir)))
+          (should (string-match-p "bd close t1 --reason-file " seen))
+          (should reason-file)
+          (should-not (file-exists-p reason-file))
+          (should (null (directory-files dir nil "\\`[^.]" t)))
+          (should-not (file-exists-p (expand-file-name "output.md" dir)))
+          (should-not (file-exists-p
+                       (expand-file-name "output.md" default-directory))))
       (delete-directory dir t))))
 
-(ert-deftest maduin-test-bd-close-default-dir-fallback ()
+(ert-deftest maduin-test-bd-close-file-symbols-are-gone ()
   :tags '(maduin)
-  (let* ((dir (maduin-test--temp-dir))
-         (maduin-bd-close-file (format "ert-close2-%d.md" (random)))
-         (file (expand-file-name maduin-bd-close-file dir)))
-    (unwind-protect
-        (progn
-          (cl-letf (((symbol-function 'maduin-bd--run) (lambda (_cmd) (cons 0 "")))
-                    (default-directory dir))
-            (should (maduin-bd-close "t2" nil)))
-          (should (file-exists-p file)))
-      (delete-directory dir t))))
+  ;; No md-file substrate remains: the defcustom and its path helper are
+  ;; deliberately removed rather than left as dead aliases.
+  (should-not (boundp 'maduin-bd-close-file))
+  (should-not (fboundp 'maduin-bd-close-path)))
+
+(ert-deftest maduin-test-implement-plan-records-work-in-commit ()
+  :tags '(maduin)
+  (let* ((maduin-dispatch--show-fn
+          (lambda (_task) (list :title "T" :desc "D")))
+         (plan (maduin-dispatch--implement-plan "task-1")))
+    (should (string-match-p "commit message body" plan))
+    (should-not (string-match-p "output\\.md" plan))))
 
 (ert-deftest maduin-test-bd-remember-and-forget ()
   :tags '(maduin)
@@ -2905,10 +2919,14 @@ Return a plist containing the seat path and main's initial commit."
                              1)))))))
       (ignore-errors (delete-directory root t)))))
 
-(ert-deftest maduin-test-config-workspaces-land-on-stop ()
+(ert-deftest maduin-test-config-workspaces-keys ()
   :tags '(maduin)
+  ;; `land-on-stop' was schema and config with no reader anywhere; a config
+  ;; key that nothing honours is a lie, so it is gone rather than wired.
   (let ((ws (cdr (assq 'workspaces maduin-config))))
-    (should (eq (alist-get 'land-on-stop ws) t))))
+    (should (stringp (alist-get 'path ws)))
+    (should-not (assq 'land-on-stop ws))
+    (should-not (maduin-config--option-spec 'workspaces 'land-on-stop))))
 
 ;;; 11. repairer config
 
@@ -4970,6 +4988,43 @@ Return a plist containing the seat path and main's initial commit."
     (should (equal (mapcar #'car (maduin-cockpit--rows))
                    '("alexander" "ramuh" "ifrit" "shiva")))))
 
+(ert-deftest maduin-test-cockpit-surfaces-esper-seats ()
+  "Reviewer and repairer seats are rows, grouped after the implementers."
+  :tags '(maduin)
+  (maduin-pipeline-config-bump)
+  (let ((seats (maduin-cockpit--seats)))
+    (should (equal (assoc "odin" seats) '("odin" . "reviewer")))
+    (should (equal (assoc "phoenix" seats) '("phoenix" . "repairer"))))
+  (cl-letf (((symbol-function 'maduin-cockpit--seat-status)
+             (lambda (_seat) '(:status idle))))
+    (should (equal (last (mapcar #'car (maduin-cockpit--rows)) 2)
+                   '("odin" "phoenix")))))
+
+(ert-deftest maduin-test-cockpit-esper-section-disabled-omits-seats ()
+  "A disabled reviewer or repairer section contributes no cockpit rows."
+  :tags '(maduin)
+  (let ((maduin-config (copy-tree maduin-config)))
+    (setcdr (assq 'enabled (cdr (assq 'reviewer maduin-config))) nil)
+    (maduin-pipeline-config-bump)
+    (should-not (assoc "odin" (maduin-cockpit--seats)))
+    (should (assoc "phoenix" (maduin-cockpit--seats))))
+  (maduin-pipeline-config-bump))
+
+(ert-deftest maduin-test-cockpit-esper-seat-matches-role-entry ()
+  "A repairer session shows on the esper's row though it names another seat."
+  :tags '(maduin)
+  (let ((maduin-dispatch--active
+         (list (list :seat "ifrit" :role 'repairer :status 'repairing
+                     :task "md-1" :model "m" :backend 'opencode))))
+    (cl-letf (((symbol-function 'maduin-cockpit--seats)
+               (lambda () '(("phoenix" . "repairer") ("odin" . "reviewer")))))
+      (let ((phoenix (maduin-cockpit--seat-status "phoenix"))
+            (odin (maduin-cockpit--seat-status "odin")))
+        (should (eq (plist-get phoenix :status) 'repairing))
+        (should (equal (plist-get phoenix :task-id) "md-1"))
+        ;; A repairer session must not light up the reviewer's row.
+        (should-not (plist-get odin :task-id))))))
+
 
 ;;; bd async substrate
 
@@ -5486,3 +5541,272 @@ Return a plist containing the seat path and main's initial commit."
     (should (= calls 0))
     (should (equal (nreverse models)
                    '(("gpt-5.6-terra" nil) ("gpt-5.6-terra" nil))))))
+
+;;; Regression: cockpit + dispatch + land bug fixes
+
+(ert-deftest maduin-test-dispatch-set-status-preserves-other-entries ()
+  :tags '(maduin)
+  ;; A status change on one handle must leave every other active entry
+  ;; intact.  A dropped else branch used to replace them with nil, which
+  ;; broke completion routing, drain detection, and the cockpit idle cue.
+  (let ((maduin-dispatch--active
+         (list (list :handle "s1" :seat "ifrit" :role 'implementer
+                     :task "t1" :status 'working)
+               (list :handle "s2" :seat "shiva" :role 'implementer
+                     :task "t2" :status 'working)
+               (list :handle "s3" :seat "titan" :role 'implementer
+                     :task "t3" :status 'working))))
+    (cl-letf (((symbol-function 'maduin-dispatch--notify) #'ignore))
+      (should (maduin-dispatch--set-status "s3" 'failed)))
+    (should (= (length maduin-dispatch--active) 3))
+    (should-not (memq nil maduin-dispatch--active))
+    (should (equal (mapcar (lambda (e) (plist-get e :handle))
+                          maduin-dispatch--active)
+                   '("s1" "s2" "s3")))
+    (should (eq (plist-get (nth 2 maduin-dispatch--active) :status) 'failed))
+    (should (eq (plist-get (nth 0 maduin-dispatch--active) :status) 'working))))
+
+(ert-deftest maduin-test-dispatch-on-complete-survives-nil-entries ()
+  :tags '(maduin)
+  ;; Defensive: a nil entry in the registry must not signal
+  ;; (wrong-type-argument stringp nil) from the handle lookup.
+  (let* ((completed nil)
+         (maduin-dispatch--active
+          (list nil (list :handle "s2" :seat "shiva" :role 'implementer
+                          :task "t2" :backend 'opencode :status 'working)))
+         (maduin-dispatch--session-delete-fn (lambda (_backend _sid) t))
+         (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
+         (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) nil))
+         (maduin-dispatch--comment-fn (lambda (_id _text) t))
+         (maduin-dispatch--release-fn (lambda (task) (setq completed task) t)))
+    (cl-letf (((symbol-function 'maduin-dispatch--notify) #'ignore))
+      (maduin-dispatch--on-complete "s2" 'completed))
+    (should (equal completed "t2"))))
+
+(ert-deftest maduin-test-cockpit-refresh-never-renders-foreign-buffer ()
+  :tags '(maduin)
+  ;; `tabulated-list-print' erases its buffer.  A stray refresh (e.g. from
+  ;; `maduin-status' in an ordinary buffer) must leave that buffer untouched.
+  (let ((buf (generate-new-buffer " *maduin-cockpit-foreign*"))
+        (maduin-cockpit-buffer-name " *maduin-cockpit-absent*"))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "user content")
+          (maduin-cockpit-refresh)
+          (should (equal (buffer-string) "user content"))
+          (should (null tabulated-list-format)))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-cockpit-window-change-rearms-timer ()
+  :tags '(maduin)
+  ;; The auto-refresh timer self-cancels once the cockpit is hidden.  Any
+  ;; route that re-displays the buffer must arm it again, or derived columns
+  ;; (uptime) freeze at the value last painted.
+  (let* ((buf (generate-new-buffer " *maduin-cockpit-rearm*"))
+         (maduin-cockpit-buffer-name (buffer-name buf))
+         (maduin-cockpit--timer nil)
+         (maduin-cockpit--pending-render nil)
+         (started nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'get-buffer-window)
+                   (lambda (buffer &optional _all)
+                     (and (eq (get-buffer buffer) buf) (selected-window))))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_delay repeat function &rest _args)
+                     (when repeat (setq started function))
+                     'timer))
+                  ((symbol-function 'timerp) (lambda (timer) (eq timer 'timer))))
+          (maduin-cockpit--on-window-change)
+          (should (eq started #'maduin-cockpit--auto-refresh))
+          (should maduin-cockpit--timer))
+      (kill-buffer buf))))
+
+(ert-deftest maduin-test-land-branch-diverged-main-rebases-again ()
+  :tags '(maduin)
+  ;; A concurrent seat landing between our rebase and our fast-forward moves
+  ;; main forward: ff-only is refused with "Diverging branches" although
+  ;; nothing conflicts.  Land must rebase once more and retry the ff.
+  (let* ((merges 0)
+         (rebases 0)
+         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+         (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
+         (maduin-pipeline--git-output-fn
+          (lambda (_dir &rest args)
+            (cond
+             ((member "commit" args) (cons 0 ""))
+             ((member "rev-parse" args) (cons 0 "abc123\n"))
+             ((member "rebase" args) (cl-incf rebases) (cons 0 ""))
+             ((member "merge" args)
+              (cl-incf merges)
+              (if (= merges 1)
+                  (cons 128 "hint: Diverging branches can't be fast-forwarded\nfatal: Not possible to fast-forward, aborting.\n")
+                (cons 0 "")))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") t))
+    (should (= rebases 2))
+    (should (= merges 2))))
+
+(ert-deftest maduin-test-land-branch-diverged-then-conflict ()
+  :tags '(maduin)
+  ;; The re-rebase can hit a real content conflict; that must surface as
+  ;; `conflict' so a repairer is dispatched instead of silently releasing.
+  (let* ((rebases 0)
+         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+         (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
+         (maduin-pipeline--git-output-fn
+          (lambda (_dir &rest args)
+            (cond
+             ((member "commit" args) (cons 0 ""))
+             ((member "rev-parse" args) (cons 0 "abc123\n"))
+             ((member "rebase" args)
+              (cl-incf rebases)
+              (if (= rebases 1)
+                  (cons 0 "")
+                (cons 1 "CONFLICT (content): Merge conflict in Makefile\n")))
+             ((member "merge" args)
+              (cons 128 "fatal: Not possible to fast-forward, aborting.\n"))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") 'conflict))
+    (should (= rebases 2))))
+
+;;; Pre-dispatch worktree sync
+
+(defmacro maduin-test--with-sync-git (state &rest body)
+  "Run BODY with workspace git seams driven by STATE.
+STATE is a plist read by the stubs: :ancestors is an alist of
+\((ANCESTOR . DESCENDANT) . BOOLEAN), :status is porcelain output, :rebase is
+a (STATUS . OUTPUT) cons, :reset is an exit status.  Issued commands
+accumulate in the dynamically bound `calls' list."
+  (declare (indent 1) (debug t))
+  `(let* ((state ,state)
+          (calls nil)
+          (maduin-workspace--main-root-fn (lambda () maduin-test--dir))
+          (maduin-workspace--git-fn
+           (lambda (_dir &rest args)
+             (push args calls)
+             (cond
+              ((member "merge-base" args)
+               (let ((pair (cons (nth 2 args) (nth 3 args))))
+                 (if (cdr (assoc pair (plist-get state :ancestors))) 0 1)))
+              ((member "reset" args) (or (plist-get state :reset) 0))
+              (t 0))))
+          (maduin-workspace--git-output-fn
+           (lambda (_dir &rest args)
+             (push args calls)
+             (cond
+              ((member "status" args)
+               (cons 0 (or (plist-get state :status) "")))
+              ((member "rebase" args)
+               (or (plist-get state :rebase) (cons 0 "")))
+              (t (cons 0 ""))))))
+     (cl-letf (((symbol-function 'maduin-workspace-path)
+                (lambda (_seat) maduin-test--dir)))
+       ,@body)))
+
+(ert-deftest maduin-test-workspace-sync-already-current ()
+  :tags '(maduin)
+  (maduin-test--with-sync-git '(:ancestors ((("main" . "ifrit") . t)))
+    (should (eq (maduin-workspace-sync "ifrit") 'synced))
+    ;; No tree-mutating command may run when the branch already holds main.
+    (should-not (cl-some (lambda (args)
+                           (or (member "reset" args) (member "rebase" args)))
+                         calls))))
+
+(ert-deftest maduin-test-workspace-sync-resets-landed-branch ()
+  :tags '(maduin)
+  ;; Branch fully landed (ancestor of main) and clean → discard the stale
+  ;; baseline: the next task starts from main, not from 50 commits back.
+  (maduin-test--with-sync-git '(:ancestors (((("main" . "ifrit")) . nil)
+                                            (("ifrit" . "main") . t)))
+    (should (eq (maduin-workspace-sync "ifrit") 'synced))
+    (should (cl-some (lambda (args) (equal args '("reset" "--hard" "main")))
+                     calls))
+    (should-not (cl-some (lambda (args) (member "rebase" args)) calls))))
+
+(ert-deftest maduin-test-workspace-sync-rebases-unlanded-work ()
+  :tags '(maduin)
+  ;; Unlanded commits must be rebased, never reset away.
+  (maduin-test--with-sync-git '(:ancestors nil)
+    (should (eq (maduin-workspace-sync "ifrit") 'synced))
+    (should (cl-some (lambda (args) (equal args '("rebase" "main" "ifrit")))
+                     calls))
+    (should-not (cl-some (lambda (args) (member "reset" args)) calls))))
+
+(ert-deftest maduin-test-workspace-sync-conflict-aborts ()
+  :tags '(maduin)
+  (maduin-test--with-sync-git
+      '(:ancestors nil
+        :rebase (1 . "CONFLICT (content): Merge conflict in Makefile\n"))
+    (should (eq (maduin-workspace-sync "ifrit") 'conflict))
+    (should (cl-some (lambda (args) (equal args '("rebase" "--abort"))) calls))))
+
+(ert-deftest maduin-test-workspace-sync-dirty-tree-untouched ()
+  :tags '(maduin)
+  ;; Uncommitted work is never discarded or rebased under the agent's feet.
+  (maduin-test--with-sync-git '(:ancestors nil :status " M harness/foo.el\n")
+    (should (eq (maduin-workspace-sync "ifrit") 'dirty))
+    (should-not (cl-some (lambda (args)
+                           (or (member "reset" args) (member "rebase" args)))
+                         calls))))
+
+(ert-deftest maduin-test-dispatch-syncs-seat-before-claim ()
+  :tags '(maduin)
+  (let* ((order nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--sync-fn (lambda (seat) (push (cons 'sync seat) order) 'synced))
+         (maduin-dispatch--workdir-fn (lambda (_seat) "/work"))
+         (maduin-dispatch--claim-fn (lambda (task) (push (cons 'claim task) order) t))
+         (maduin-dispatch--show-fn (lambda (_task) (list :title "T" :desc "D")))
+         (maduin-dispatch--difficulty-fn (lambda (_task) nil))
+         (maduin-dispatch--session-run-fn
+          (lambda (&rest _args) "sync-session")))
+    (should (equal (maduin-dispatch-implement "t1") "sync-session"))
+    ;; Sync must precede the claim: a seat that cannot take work must not
+    ;; leave a task claimed and stranded.
+    (should (equal (nreverse order) '((sync . "ifrit") (claim . "t1"))))))
+
+(ert-deftest maduin-test-dispatch-refuses-conflicting-seat ()
+  :tags '(maduin)
+  (let* ((claimed nil)
+         (comments nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--sync-fn (lambda (_seat) 'conflict))
+         (maduin-dispatch--workdir-fn (lambda (_seat) "/work"))
+         (maduin-dispatch--claim-fn (lambda (_task) (setq claimed t) t))
+         (maduin-dispatch--comment-fn
+          (lambda (_id text) (push text comments) t))
+         (maduin-dispatch--session-run-fn
+          (lambda (&rest _args) (error "must not spawn"))))
+    (should-not (maduin-dispatch-implement "t1"))
+    (should-not claimed)
+    (should (= (length comments) 1))
+    (should (string-match-p "conflicting with main" (car comments)))))
+
+(ert-deftest maduin-test-dispatch-repairer-skips-sync ()
+  :tags '(maduin)
+  ;; The repairer exists to resolve a diverged seat; syncing it first would
+  ;; rebase or discard the very work it was dispatched to fix.
+  (let* ((synced nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--sync-fn (lambda (_seat) (setq synced t) 'synced))
+         (maduin-dispatch--workdir-fn (lambda (_seat) "/work"))
+         (maduin-dispatch--claim-fn (lambda (_task) t))
+         (maduin-dispatch--session-run-fn (lambda (&rest _args) "repair-session")))
+    (cl-letf (((symbol-function 'maduin-dispatch--notify) #'ignore))
+      (should (equal (maduin-dispatch-repair "shiva" "t1") "repair-session")))
+    (should-not synced)))
+
+(ert-deftest maduin-test-dispatch-sync-seam-default ()
+  :tags '(maduin)
+  ;; The suite neutralises the seam at load time; the shipped default must
+  ;; still be the real sync, or dispatch would silently stop syncing seats.
+  (should (eq maduin-test--dispatch-sync-default #'maduin-workspace-sync)))
+
+(ert-deftest maduin-test-repair-plan-rebases-not-merges ()
+  :tags '(maduin)
+  (let ((plan (maduin-dispatch--repair-plan "shiva" "t1")))
+    (should (string-match-p "git rebase main" plan))
+    (should (string-match-p "rebase --continue" plan))
+    (should-not (string-match-p "git merge main" plan))))
