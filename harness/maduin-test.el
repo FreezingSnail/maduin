@@ -4214,6 +4214,17 @@ Return a plist containing the seat path and main's initial commit."
 
 (ert-deftest maduin-test-install-script-wires-kiro-agents ()
   :tags '(maduin)
+
+(ert-deftest maduin-test-planner-designer-requires-luna-executable-children ()
+  :tags '(maduin)
+  (let ((prompt (maduin-test--agent-prompt-body
+                 (expand-file-name "agents/slugineer-planner-designer.md"
+                                   maduin-test--dir))))
+    (should (string-match-p "Luna is the primary implementer" prompt))
+    (should (string-match-p "small, landing-safe component" prompt))
+    (should (string-match-p "IMPLEMENTATION STEPS.*required" prompt))
+    (should (string-match-p "numbered, ordered list" prompt))
+    (should (string-match-p "exact file(s) and symbol(s)" prompt))))
   (let ((script (expand-file-name "install.sh" maduin-test--dir)))
     (should (zerop (call-process "bash" nil nil nil "-n" script)))
     (with-temp-buffer

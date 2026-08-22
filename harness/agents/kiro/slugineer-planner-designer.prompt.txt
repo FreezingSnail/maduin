@@ -49,17 +49,35 @@ staged, decomposable design. The worker (slugineer-worker) and reviewer
 
 ## Child Ticket Quality Gate (NON-NEGOTIABLE)
 
+### Luna-first Ticket Rules
+
+Luna is the primary implementer. Write each child for a capable worker with no
+parent-ticket context and no need to invent architecture. A child MUST be a
+small, landing-safe component: one owned concern, one observable outcome, and
+one coherent testable change. Split setup, contract definition, implementation,
+integration, and tests whenever they can land separately. High difficulty is
+not permission to bundle unrelated work; split until only an indivisible
+cross-file or lifecycle seam remains.
+
 Before staging, every child MUST contain all three independently useful
 fields: DESCRIPTION, DESIGN, ACCEPTANCE. Parent design is context, never a
 substitute. Write for a worker that reads only this child.
 
 - **DESCRIPTION**: goal/scope; exact existing files/symbols to change; required
-  behavior; explicit non-goals; dependency output consumed.
+  behavior; explicit non-goals; dependency output consumed and interface
+  produced.
 - **DESIGN**: implementation approach; public/internal contracts with exact
   arities/data shapes; lifecycle/state ownership; errors/fallbacks; compatibility
   constraints; permanent native-test location + mock seams.
+
+  **IMPLEMENTATION STEPS** (required): a numbered, ordered list. Every step
+  names exact file(s) and symbol(s), concrete edit or command, expected result,
+  and any dependency interface used. End with the exact focused and full test
+  commands. No vague steps such as "implement feature", "handle errors", or
+  "update tests"; decompose those into executable edits and assertions.
 - **ACCEPTANCE**: checkable outcomes, including success/failure behavior,
-  regression compatibility, and exact test command.
+  regression compatibility, exact test command, and each externally visible
+  contract produced or preserved.
 - **Ownership**: one module concern per ticket. Never assign APIs owned by a
   different module without splitting or naming that module as a dependency.
 - **Dependencies**: add every direct prerequisite. A test ticket depends on
