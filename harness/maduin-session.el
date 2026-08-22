@@ -344,6 +344,14 @@ never included it.  Unusable EFFORT is omitted like the autonomous adapter."
               (list "--prompt" (shell-quote-argument prompt)))
              " "))
 
+(defun maduin-session-output (sid)
+  "Return the raw NDJSON transcript text of session SID, or nil.
+Reads the hidden run buffer, so it must be called before
+`maduin-session-delete' kills it."
+  (let ((buf (maduin-session--run-buffer sid)))
+    (and buf (buffer-live-p buf)
+         (with-current-buffer buf (buffer-string)))))
+
 (maduin-backend-register
  'opencode
  (list :executable (or maduin-opencode-command "opencode")
@@ -351,6 +359,7 @@ never included it.  Unusable EFFORT is omitted like the autonomous adapter."
        :tui-fn #'maduin-session--opencode-tui
        :complete-p-fn #'maduin-session-complete-p
        :diff-fn #'maduin-session-diff
+       :output-fn #'maduin-session-output
        :delete-fn #'maduin-session-delete))
 
 (provide 'maduin-session)

@@ -180,3 +180,10 @@ allowing status consumers to distinguish `[]' from malformed output."
   "Asynchronously call CALLBACK with EPIC's child IDs and success boolean."
   (maduin-bd-async--query
    (list "query" (format "parent=%s" epic) "--json" "--all") callback))
+
+(defun maduin-bd-async-drift-fix-tasks (callback)
+  "Asynchronously call CALLBACK with non-closed drift-fix IDs and success.
+`bd query' hides closed issues without `--all', so the result is exactly
+the review gate's outstanding rework."
+  (maduin-bd-async--query
+   '("query" "label=drift-fix" "--json") callback))

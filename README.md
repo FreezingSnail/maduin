@@ -22,8 +22,8 @@ maduin manages its own development. It dogfoods itself.
 concierge  →  intake & prioritize work
 designer   →  design, decompose into bd tasks (dependencies tracked)
 fleet      →  poll ready tasks → claim → implement → commit (message = record) → close
-reviewer   →  batched drift-review gate (approve/reject)
-repairer   →  drift-fix on rejected review output
+reviewer   →  per-epic drift-review gate after each wave (APPROVED/DRIFT)
+repairer   →  merge-conflict resolution on a diverged seat branch
 ```
 
 - **Demand-driven orchestration.** `maduin-start` activates the
@@ -33,9 +33,14 @@ repairer   →  drift-fix on rejected review output
 - **Ephemeral sessions.** Each session runs one-shot
   `opencode run --format json --dir <worktree>` per task. Each seat
   has an isolated workspace.
-- **Review gate.** The gate blocks auto-close until a batched
-  drift-review passes. Failures route to the repairer, which retries
-  up to `max-retries`.
+- **Review gate after each wave.** When an epic's last child task lands
+  and closes, the reviewer (Odin) runs once for that epic, comparing the
+  wave's full diff against the epic's design/acceptance. `APPROVED`
+  closes the epic. `DRIFT` files a P1 `drift-fix` bead under it. While a
+  review is in flight — or any `drift-fix` bead is still open — the fleet
+  is held: workers dispatch the rework first and consume no other
+  tickets until the gate is clear. `max-retries` bounds re-reviews of a
+  repeatedly drifting epic.
 - **Model welfare.** Seats are persistent identities with history.
   Sessions are one workday (wake → work → hand off → sleep). Agents
   close their own sessions. There is no `SIGTERM`. Agents receive
@@ -173,7 +178,7 @@ tool.
 Single entry point:
 
 ```bash
-harness/check.sh                     # clean + byte-compile + ERT (378 tests)
+harness/check.sh                     # clean + byte-compile + ERT (389 tests)
 harness/check.sh -c                  # compile only
 harness/check.sh -k                  # skip clean
 harness/check.sh probe probes/<f>.el # + exploratory probe test
@@ -235,8 +240,9 @@ harness/
 - **Startup recovery.** The harness detects tasks left `in_progress`
   by a crashed or quit session on start. It re-dispatches them, so
   `bd ready` re-surfaces orphaned work.
-- **Review UI lives in chaplet.** maduin has no approval gate. Use
-  chaplet to approve (undefer) and reject staged work.
+- **The gate is the reviewer, the UI is chaplet.** Auto-close is gated
+  by the per-epic drift review, not by a human click. Use chaplet to
+  browse beads and to approve (undefer) or reject staged work.
 - **Provenance is stamped, not self-reported.** Land records the
   resolved model and effort in commit trailers.
 

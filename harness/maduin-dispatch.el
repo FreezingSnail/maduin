@@ -36,6 +36,7 @@
 (require 'maduin-bd-async)
 (require 'maduin-workspace)
 (require 'maduin-pipeline)
+(require 'maduin-review)
 
 ;;; Injection seams (function-valued defvars; tests let-bind these).
 
@@ -51,6 +52,10 @@
   "Delete opaque session SID through its stored BACKEND."
   (maduin-backend-delete backend sid))
 
+(defun maduin-dispatch--backend-output (backend sid)
+  "Return SID's raw transcript text through its stored BACKEND."
+  (maduin-backend-output backend sid))
+
 (defvar maduin-dispatch--session-run-fn #'maduin-dispatch--backend-run
   "Function `(workdir model agent plan backend &optional effort)' →
 session handle or nil.")
@@ -60,6 +65,10 @@ session handle or nil.")
 
 (defvar maduin-dispatch--diff-fn #'maduin-dispatch--backend-diff
   "Function `(backend sid)' → list of diff alists | nil.")
+
+(defvar maduin-dispatch--output-fn #'maduin-dispatch--backend-output
+  "Function `(backend sid)' → raw session transcript string | nil.
+Read before the session is deleted; the review gate parses its verdict.")
 
 (defvar maduin-dispatch--land-fn #'maduin-pipeline-land-branch
   "Function `(seat &optional stamp)' → t | `conflict' | nil.
@@ -123,6 +132,11 @@ Recovery seam: detects tasks orphaned by an Emacs quit mid-task.")
 (defvar maduin-dispatch--epic-children-async-fn #'maduin-bd-async-epic-children
   "Function `(epic callback)' → async handle; CALLBACK receives IDS and success.")
 
+(defvar maduin-dispatch--drift-fix-async-fn #'maduin-bd-async-drift-fix-tasks
+  "Function `(callback)' → async handle; CALLBACK receives IDS and success.
+Drift-fix beads are the review gate's rework tickets: they are dispatched
+ahead of ordinary ready work and they hold the rest of the fleet.")
+
 (defvar maduin-dispatch--epic-decompose-fn #'maduin-designer-decompose-epic
   "Function `(epic)' → session handle | nil.
 Reuses maduin-designer machinery (Ramuh decomposition session).")
@@ -185,6 +199,12 @@ The run-loop picks up no new work while draining.")
   "Return list of designer seat names."
   (maduin-dispatch--seats 'designer))
 
+(defun maduin-dispatch--reviewer-seat ()
+  "Return the reviewer esper's seat name, defaulting to \"odin\"."
+  (or (car (maduin-dispatch--seats 'reviewer))
+      (maduin-dispatch--config-get 'reviewer 'esper)
+      "odin"))
+
 (defun maduin-dispatch--seat-model (section seat)
   "Return model for SEAT in SECTION, or \"default\"."
   (let* ((seats (maduin-dispatch--config-get section 'seats))
@@ -211,6 +231,7 @@ through `maduin-config-seat-backend', including the crew-wide override."
     ('implementer (maduin-dispatch--config-get 'fleet 'agent))
     ('designer (maduin-dispatch--config-get 'designer 'agent))
     ('repairer (maduin-dispatch--config-get 'repairer 'agent))
+    ('reviewer (maduin-dispatch--config-get 'reviewer 'agent))
     (_ nil)))
 
 (defun maduin-dispatch--seat-fallback (role &optional backend)
@@ -239,6 +260,7 @@ remain available only where that backend has an explicit configured fallback."
     ('implementer (length (maduin-dispatch--fleet-seats)))
     ('designer (length (maduin-dispatch--designer-seats)))
     ('repairer 1)
+    ('reviewer 1)
     (_ 1)))
 
 (defun maduin-dispatch--active-role-count (role)
@@ -263,6 +285,14 @@ Free = a configured seat with no active session of ROLE occupying it."
   "Ensure worktree for SEAT; return its path."
   (or (maduin-workspace-ensure seat)
       (maduin-workspace-path seat)))
+
+(defun maduin-dispatch--workdir-for (role seat)
+  "Return the directory a ROLE session at SEAT runs in.
+The reviewer reads main's merged history, so it runs in the main repo
+root; every other role works inside its seat's isolated worktree."
+  (if (eq role 'reviewer)
+      (funcall maduin-pipeline--main-root-fn)
+    (funcall maduin-dispatch--workdir-fn seat)))
 
 (defun maduin-dispatch--spec (task)
   "Return task spec plist for TASK via show-fn, or nil."
@@ -311,7 +341,15 @@ guessing."
     ('implementer (maduin-dispatch--implement-plan task))
     ('designer (maduin-dispatch--design-plan task))
     ('repairer (maduin-dispatch--repair-plan seat task))
+    ('reviewer (maduin-review-plan-for task))
     (_ (maduin-dispatch--implement-plan task))))
+
+(defun maduin-dispatch--release-claim (role task)
+  "Release TASK's claim unless ROLE never claimed it.
+The reviewer gates an epic it does not claim, so releasing would reopen
+an epic (or clobber its status) on behalf of work it never held."
+  (unless (eq role 'reviewer)
+    (funcall maduin-dispatch--release-fn task)))
 
 ;;; Live-state notifications
 
@@ -443,7 +481,7 @@ at spawn; retries pass the stored tier and effort explicitly."
                             role seat backend difficulty)
                          effort))
                (agent (maduin-dispatch--seat-agent-for role))
-               (workdir (funcall maduin-dispatch--workdir-fn seat))
+               (workdir (maduin-dispatch--workdir-for role seat))
                (plan (or plan (maduin-dispatch--plan-for role task seat)))
                (sid (and backend
                          (funcall maduin-dispatch--session-run-fn
@@ -459,12 +497,12 @@ at spawn; retries pass the stored tier and effort explicitly."
                 sid)
             (funcall maduin-dispatch--comment-fn
                      task "session failed — task left open")
-            (funcall maduin-dispatch--release-fn task)
+            (maduin-dispatch--release-claim role task)
             (maduin-dispatch--notify)
             nil))
       (error
        (funcall maduin-dispatch--comment-fn task "session failed — task left open")
-       (funcall maduin-dispatch--release-fn task)
+       (maduin-dispatch--release-claim role task)
        (maduin-dispatch--notify)
        nil))))
 
@@ -514,44 +552,73 @@ OpenCode returns diff alists; Kiro returns a worktree diff string."
                          (or (cdr (assq 'patch d)) "")))
                diffs "\n\n"))))
 
+(defun maduin-dispatch--complete-review (entry sid)
+  "Finish reviewer session SID for ENTRY: parse its verdict and act on it.
+The reviewer neither lands nor closes: it decides whether the epic's wave
+of work met the goal.  Any failure aborts the review so the fleet hold is
+released instead of stranding the pipeline."
+  (let ((output (condition-case nil
+                    (funcall maduin-dispatch--output-fn
+                             (plist-get entry :backend) sid)
+                  (error nil))))
+    (condition-case nil
+        (maduin-review-complete sid output)
+      (error (maduin-review-abort sid "verdict handling failed (error)")))))
+
+(defun maduin-dispatch--maybe-review (task)
+  "Start the drift-review gate when closing TASK completed its epic's wave.
+Return the reviewer session handle, or nil when no review is due.  Never
+signals: a broken gate must not break the close path."
+  (condition-case nil
+      (let ((epic (maduin-review-due-epic task)))
+        (and epic (maduin-dispatch-review epic)))
+    (error nil)))
+
 (defun maduin-dispatch--complete (entry sid)
   "Handle successful completion of session for ENTRY (plist) with SID.
 Land the branch, then close the task only on a successful land.  On
 conflict dispatch a repairer (unless already repairing); on other land
 failure leave the task open.  Designer (decomposition) sessions never
-close: the epic stays open until its children are implemented."
-  (let* ((seat (plist-get entry :seat))
-         (task (plist-get entry :task))
-         (role (plist-get entry :role))
-         (backend (plist-get entry :backend))
-         (stamp (maduin-dispatch--stamp-for entry))
-         (diffs (funcall maduin-dispatch--diff-fn backend sid))
-         (output (maduin-dispatch--format-diffs diffs))
-         (land (condition-case nil
-                   (funcall maduin-dispatch--land-fn seat stamp)
-                 (error nil))))
-    (cond
-     ((eq land t)
-      (unless (eq role 'designer)
-        (if (funcall maduin-dispatch--landed-fn seat)
-            (funcall maduin-dispatch--close-fn
-                     task
-                     (concat output
-                             (unless (string-suffix-p "\n" output) "\n")
-                             "provenance: "
-                             (maduin-stamp-format (maduin-stamp-trailers stamp))))
-          (funcall maduin-dispatch--comment-fn task
-                   "land reported success but branch not in main — left open")
-          (funcall maduin-dispatch--release-fn task))))
-     ((eq land 'conflict)
-      (funcall maduin-dispatch--comment-fn task "merge conflict — repairer dispatched")
-      (unless (eq role 'repairer)
-        (maduin-dispatch-repair seat task)))
-     (t
-      (funcall maduin-dispatch--comment-fn task "land failed — task left open")
-      ;; Release the claim so the task returns to open (bd ready) instead of
-      ;; staying in_progress forever.
-      (funcall maduin-dispatch--release-fn task)))))
+close: the epic stays open until its children are implemented.  Reviewer
+sessions land nothing — they emit the gate's verdict."
+  (if (eq (plist-get entry :role) 'reviewer)
+      (maduin-dispatch--complete-review entry sid)
+    (let* ((seat (plist-get entry :seat))
+           (task (plist-get entry :task))
+           (role (plist-get entry :role))
+           (backend (plist-get entry :backend))
+           (stamp (maduin-dispatch--stamp-for entry))
+           (diffs (funcall maduin-dispatch--diff-fn backend sid))
+           (output (maduin-dispatch--format-diffs diffs))
+           (land (condition-case nil
+                     (funcall maduin-dispatch--land-fn seat stamp)
+                   (error nil))))
+      (cond
+       ((eq land t)
+        (unless (eq role 'designer)
+          (if (funcall maduin-dispatch--landed-fn seat)
+              (progn
+                (funcall maduin-dispatch--close-fn
+                         task
+                         (concat output
+                                 (unless (string-suffix-p "\n" output) "\n")
+                                 "provenance: "
+                                 (maduin-stamp-format (maduin-stamp-trailers stamp))))
+                ;; The wave is only reviewable once the closing task is
+                ;; recorded closed in bd, so the gate runs after close.
+                (maduin-dispatch--maybe-review task))
+            (funcall maduin-dispatch--comment-fn task
+                     "land reported success but branch not in main — left open")
+            (funcall maduin-dispatch--release-fn task))))
+       ((eq land 'conflict)
+        (funcall maduin-dispatch--comment-fn task "merge conflict — repairer dispatched")
+        (unless (eq role 'repairer)
+          (maduin-dispatch-repair seat task)))
+       (t
+        (funcall maduin-dispatch--comment-fn task "land failed — task left open")
+        ;; Release the claim so the task returns to open (bd ready) instead of
+        ;; staying in_progress forever.
+        (funcall maduin-dispatch--release-fn task))))))
 
 (defun maduin-dispatch--fail (entry sid status)
   "Handle failed STATUS for ENTRY, retrying one limited session on fallback.
@@ -570,12 +637,21 @@ by `:fallback-attempted'.  Every other failure releases the claim."
         (progn
           (funcall maduin-dispatch--comment-fn
                    task "usage limit — retrying with fallback model")
-          (maduin-dispatch--spawn-session
-           task role seat fallback nil t backend
-           (plist-get entry :difficulty) (plist-get entry :effort))
+          (let ((retry (maduin-dispatch--spawn-session
+                        task role seat fallback nil t backend
+                        (plist-get entry :difficulty) (plist-get entry :effort))))
+            ;; A reviewer retry is a new session id: hand the hold over to it,
+            ;; or drop it when the retry never started.
+            (when (eq role 'reviewer)
+              (maduin-review--drop-session sid)
+              (if retry
+                  (maduin-review-note-session retry task)
+                (maduin-review-abort sid "reviewer retry failed to start"))))
           (maduin-dispatch--notify))
-      (funcall maduin-dispatch--comment-fn task "session failed — task left open")
-      (funcall maduin-dispatch--release-fn task)
+      (if (eq role 'reviewer)
+          (maduin-review-abort sid "reviewer session failed")
+        (funcall maduin-dispatch--comment-fn task "session failed — task left open")
+        (maduin-dispatch--release-claim role task))
       (maduin-dispatch--notify))))
 
 (defun maduin-dispatch--on-complete (sid status)
@@ -627,6 +703,23 @@ Return a session handle, or nil when a repairer is already active."
     (when sid (maduin-dispatch--set-status sid 'repairing))
     sid))
 
+(defun maduin-dispatch-review (epic)
+  "Dispatch the drift-review session (Odin) for EPIC.  Return handle or nil.
+EPIC is never claimed: review gates landed work rather than performing it,
+and claiming would flip the epic to in_progress.  While the returned
+session runs, `maduin-review-hold-p' holds the fleet."
+  (unless (>= (maduin-dispatch--active-role-count 'reviewer)
+              (maduin-dispatch--role-cap 'reviewer))
+    (let* ((seat (maduin-dispatch--reviewer-seat))
+           (plan (condition-case nil
+                     (maduin-review-plan-for epic)
+                   (error nil)))
+           (sid (and plan
+                     (maduin-dispatch--spawn-session
+                      epic 'reviewer seat nil plan nil))))
+      (when sid (maduin-review-note-session sid epic))
+      sid)))
+
 ;;; Recovery — orphaned in_progress tasks
 
 (defun maduin-dispatch--orphaned-tasks ()
@@ -668,18 +761,35 @@ no-ops once the designer role is at its cap."
   (dolist (epic (maduin-dispatch--undecomposed-epics))
     (funcall maduin-dispatch--epic-decompose-fn epic)))
 
-(defun maduin-dispatch--recover-tasks (tasks)
+(defun maduin-dispatch--recover-tasks (tasks &optional only)
   "Re-dispatch orphaned TASKS from one async in-progress snapshot.
 Return the count dispatched.  Unlike `maduin-dispatch--recover', this
-never starts another bd query."
+never starts another bd query.  ONLY, when non-nil, restricts recovery to
+that id list: while the review gate holds the fleet, only its drift-fix
+rework may resume."
   (let ((n 0)
         (active (mapcar (lambda (entry) (plist-get entry :task))
                         maduin-dispatch--active)))
     (dolist (task tasks)
       (when (and (not (member task active))
+                 (or (null only) (member task only))
                  (maduin-dispatch-implement task))
         (setq n (1+ n))))
     n))
+
+(defun maduin-dispatch--dispatch-ready (tasks drift-fix)
+  "Dispatch ready TASKS, putting the review gate's DRIFT-FIX rework first.
+DRIFT-FIX is the set of non-closed drift-fix ids.  Those are dispatched
+ahead of everything else; while they exist (or a review is in flight) no
+ordinary ticket is picked up, so the fleet finishes the rework the
+reviewer asked for before consuming new work."
+  (let ((rework (cl-remove-if-not (lambda (task) (member task drift-fix)) tasks))
+        (ordinary (cl-remove-if (lambda (task) (member task drift-fix)) tasks)))
+    (dolist (task rework)
+      (maduin-dispatch-implement task))
+    (unless (maduin-review-hold-with-p drift-fix)
+      (dolist (task ordinary)
+        (maduin-dispatch-implement task)))))
 
 (defun maduin-dispatch--run-loop-error (stage finish)
   "Log failed async polling STAGE and invoke tick FINISH continuation."
@@ -690,10 +800,14 @@ never starts another bd query."
   "Asynchronously poll, recover, dispatch, and decompose for one tick.
 Read-only bd queries yield to Emacs between subprocesses.  Claim, plan
 construction (`bd show'), and session spawning remain synchronous: those are
-ordered dispatch actions, and a plan must exist before `make-process'."
+ordered dispatch actions, and a plan must exist before `make-process'.
+
+The tick starts with the review gate's drift-fix query: its result decides
+both what may be recovered and whether ordinary ready work is held."
   (unless (or maduin-dispatch--draining maduin-dispatch--tick-in-flight)
     (setq maduin-dispatch--tick-in-flight t)
     (let ((notified nil)
+          (drift-fix nil)
           (finish (lambda ()
                     (let ((flush maduin-dispatch--tick-notify-pending))
                       (setq maduin-dispatch--tick-in-flight nil
@@ -767,8 +881,8 @@ ordered dispatch actions, and a plan must exist before `make-process'."
                                     (if ok
                                         (progn
                                           (unless maduin-dispatch--draining
-                                            (dolist (task tasks)
-                                              (maduin-dispatch-implement task)))
+                                            (maduin-dispatch--dispatch-ready
+                                             tasks drift-fix))
                                           (open-epics))
                                       (fail "ready"))
                                   (error
@@ -776,23 +890,47 @@ ordered dispatch actions, and a plan must exist before `make-process'."
                                     (format "dispatch async ready callback failed: %s"
                                             (error-message-string err)))
                                    (funcall finish)))))
-               (fail "ready"))))
-        (unless (funcall maduin-dispatch--in-progress-async-fn
+               (fail "ready")))
+           (in-progress ()
+             (unless (funcall maduin-dispatch--in-progress-async-fn
+                              (lambda (tasks ok)
+                                (condition-case err
+                                    (if ok
+                                        (progn
+                                          (unless maduin-dispatch--draining
+                                            (when (> (maduin-dispatch--recover-tasks
+                                                      tasks
+                                                      (and (maduin-review-hold-with-p
+                                                            drift-fix)
+                                                           drift-fix))
+                                                     0)
+                                              (notify-once)))
+                                          (ready))
+                                      (fail "in-progress"))
+                                  (error
+                                   (maduin-bd--log-error
+                                    (format "dispatch async in-progress callback failed: %s"
+                                            (error-message-string err)))
+                                   (funcall finish)))))
+               (fail "in-progress"))))
+        (unless (funcall maduin-dispatch--drift-fix-async-fn
                          (lambda (tasks ok)
                            (condition-case err
-                               (if ok
-                                   (progn
-                                     (unless maduin-dispatch--draining
-                                       (when (> (maduin-dispatch--recover-tasks tasks) 0)
-                                         (notify-once)))
-                                     (ready))
-                                 (fail "in-progress"))
+                               (progn
+                                 ;; A failed query must not silently unblock the
+                                 ;; fleet: an in-flight review still holds it, and
+                                 ;; the next tick re-reads the drift-fix set.
+                                 (unless ok
+                                   (maduin-bd--log-error
+                                    "dispatch async drift-fix query failed"))
+                                 (setq drift-fix (and ok tasks))
+                                 (in-progress))
                              (error
                               (maduin-bd--log-error
-                               (format "dispatch async in-progress callback failed: %s"
+                               (format "dispatch async drift-fix callback failed: %s"
                                        (error-message-string err)))
                               (funcall finish)))))
-          (fail "in-progress"))))))
+          (fail "drift-fix"))))))
 
 ;;; Lifecycle
 
@@ -812,8 +950,16 @@ ordered dispatch actions, and a plan must exist before `make-process'."
 
 (defun maduin-dispatch--handoff-live ()
   "Delete all in-flight sessions and clear the registry.
-Tasks are left open; their worktree changes persist for the next run."
+Tasks are left open; their worktree changes persist for the next run.  A
+discarded reviewer session also releases the review gate's fleet hold —
+otherwise a hard stop would leave the fleet blocked on a review that can
+never report a verdict."
   (dolist (entry (copy-sequence maduin-dispatch--active))
+    (when (eq (plist-get entry :role) 'reviewer)
+      (condition-case nil
+          (maduin-review-abort (plist-get entry :handle)
+                               "reviewer session discarded on stop")
+        (error nil)))
     (funcall maduin-dispatch--session-delete-fn
              (plist-get entry :backend) (plist-get entry :handle)))
   (setq maduin-dispatch--active nil)

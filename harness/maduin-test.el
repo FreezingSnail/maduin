@@ -118,6 +118,8 @@
         (maduin-dispatch--draining nil)
         (maduin-dispatch--tick-in-flight nil)
         (maduin-dispatch--tick-notify-pending nil)
+        (maduin-dispatch--drift-fix-async-fn
+         (lambda (callback) (funcall callback nil t) (quote drift-fix)))
         (maduin-dispatch--in-progress-async-fn
          (lambda (callback) (funcall callback nil t) 'in-progress))
         (maduin-dispatch--ready-async-fn
@@ -3284,6 +3286,8 @@ Return a plist containing the seat path and main's initial commit."
          (maduin-dispatch--ready-fn (lambda () '("t1" "t2")))
          (maduin-dispatch--in-progress-fn (lambda () nil))
          (maduin-dispatch--open-epics-fn (lambda () nil))
+         (maduin-dispatch--drift-fix-async-fn
+          (lambda (callback) (funcall callback nil t) (quote drift-fix)))
          (maduin-dispatch--in-progress-async-fn
           (lambda (callback) (funcall callback nil t) 'in-progress))
          (maduin-dispatch--ready-async-fn
@@ -3437,6 +3441,8 @@ Return a plist containing the seat path and main's initial commit."
          (maduin-dispatch--epic-decompose-fn
           (lambda (epic) (push epic decomposed)
             (maduin-dispatch-design epic)))
+         (maduin-dispatch--drift-fix-async-fn
+          (lambda (callback) (funcall callback nil t) (quote drift-fix)))
          (maduin-dispatch--in-progress-async-fn
           (lambda (callback) (funcall callback nil t) 'in-progress))
          (maduin-dispatch--ready-async-fn
@@ -3738,6 +3744,8 @@ Return a plist containing the seat path and main's initial commit."
              (maduin-dispatch--ready-fn (lambda () (list task)))
              (maduin-dispatch--in-progress-fn (lambda () nil))
              (maduin-dispatch--open-epics-fn (lambda () nil))
+             (maduin-dispatch--drift-fix-async-fn
+              (lambda (callback) (funcall callback nil t) (quote drift-fix)))
              (maduin-dispatch--in-progress-async-fn
               (lambda (callback) (funcall callback nil t) 'in-progress))
              (maduin-dispatch--ready-async-fn
@@ -3922,6 +3930,230 @@ Return a plist containing the seat path and main's initial commit."
                (lambda (_epic) (setq gate-called t) 'approved)))
       (should (null (maduin-review--maybe-review-epic "orphan")))
       (should-not gate-called))))
+
+;;; Review gate wiring: wave trigger, fleet hold, rework priority
+
+(defmacro maduin-test--with-review-state (&rest body)
+  "Run BODY with review gate runtime state isolated from other tests."
+  `(let ((maduin-review--in-flight nil)
+         (maduin-review--attempts nil)
+         (maduin-review--exhausted nil)
+         (maduin-review--epic-starts nil))
+     ,@body))
+
+(ert-deftest maduin-test-review-due-epic-records-and-limits ()
+  "A completed wave is due once per attempt and stops at max-retries."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (let* ((comments nil)
+          (maduin-review--show-fn
+           (lambda (_id) (list :parent "epic-x" :status "closed")))
+          (maduin-review--epic-children-fn (lambda (_epic) '("t1")))
+          (maduin-review--main-root-fn (lambda () "/repo"))
+          (maduin-review--git-output-fn (lambda (_dir &rest _args) (cons 0 "sha\n")))
+          (maduin-review--comment-fn
+           (lambda (id text) (push (cons id text) comments) t)))
+     (should (equal (maduin-review-due-epic "t1") "epic-x"))
+     (should (equal (cdr (assoc "epic-x" maduin-review--epic-starts)) "sha"))
+     ;; A review already in flight for the epic is not re-triggered.
+     (maduin-review-note-session "sid-1" "epic-x")
+     (should-not (maduin-review-due-epic "t1"))
+     (maduin-review--drop-session "sid-1")
+     (should (equal (maduin-review-due-epic "t1") "epic-x"))
+     ;; Exhausted retries report once and stop reviewing.
+     (setq maduin-review--attempts '(("epic-x" . 3)))
+     (should-not (maduin-review-due-epic "t1"))
+     (should (= (length comments) 1))
+     (should (string-match-p "exhausted" (cdr (car comments))))
+     (should-not (maduin-review-due-epic "t1"))
+     (should (= (length comments) 1)))))
+
+(ert-deftest maduin-test-review-hold-covers-flight-and-rework ()
+  "The fleet holds while a review runs and while drift-fix work is open."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (should-not (maduin-review-hold-with-p nil))
+   (should (maduin-review-hold-with-p '("drift-1")))
+   (maduin-review-note-session "sid-1" "epic-x")
+   (should (maduin-review-hold-with-p nil))
+   (should (maduin-review-in-flight-p))
+   (maduin-review--drop-session "sid-1")
+   (should-not (maduin-review-hold-with-p nil))
+   ;; A disabled gate never holds the fleet.
+   (let ((maduin-config '((reviewer (enabled . nil)))))
+     (should-not (maduin-review-hold-with-p '("drift-1"))))))
+
+(ert-deftest maduin-test-review-complete-clears-hold ()
+  "Verdict handling drops the in-flight session, so a hold cannot outlive it."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (let* ((cmds nil)
+          (maduin-review--run-fn (lambda (cmd) (push cmd cmds) (cons 0 "")))
+          (maduin-review--comment-fn (lambda (_id _text) t)))
+     (maduin-review-note-session "sid-1" "epic-x")
+     (should (eq (maduin-review-complete "sid-1" "REVIEW: APPROVED\n") 'approved))
+     (should-not (maduin-review-in-flight-p))
+     (should (cl-find-if (lambda (c) (string-match-p "bd close epic-x" c)) cmds))
+     ;; Approval clears the attempt budget for the epic.
+     (should-not (assoc "epic-x" maduin-review--attempts))
+     ;; An untracked session id is a no-op, never a stray verdict.
+     (should-not (maduin-review-complete "sid-unknown" "REVIEW: APPROVED\n")))))
+
+(ert-deftest maduin-test-review-abort-releases-hold ()
+  "A failed reviewer session comments on its epic and clears the hold."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (let* ((comments nil)
+          (maduin-review--comment-fn
+           (lambda (id text) (push (cons id text) comments) t)))
+     (maduin-review-note-session "sid-1" "epic-x")
+     (should (equal (maduin-review-abort "sid-1" "reviewer session failed")
+                    "epic-x"))
+     (should-not (maduin-review-in-flight-p))
+     (should (string-match-p "reviewer session failed" (cdr (car comments)))))))
+
+(ert-deftest maduin-test-dispatch-review-spawns-unclaimed-session ()
+  "Review runs in the main root on the reviewer seat and claims nothing."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (let* ((claimed nil)
+          (received nil)
+          (maduin-dispatch--active nil)
+          (maduin-dispatch--claim-fn (lambda (task) (push task claimed) t))
+          (maduin-pipeline--main-root-fn (lambda () "/main-root"))
+          (maduin-dispatch--session-run-fn
+           (lambda (workdir model agent plan backend &optional effort)
+             (setq received (list workdir model agent plan backend effort))
+             "review-sid")))
+     (cl-letf (((symbol-function 'maduin-review-plan-for)
+                (lambda (epic) (format "review %s" epic))))
+       (should (equal (maduin-dispatch-review "epic-x") "review-sid"))
+       (should-not claimed)
+       (should (equal (nth 0 received) "/main-root"))
+       (should (equal (nth 2 received) "slugineer-reviewer"))
+       (should (equal (nth 3 received) "review epic-x"))
+       (let ((entry (car maduin-dispatch--active)))
+         (should (eq (plist-get entry :role) 'reviewer))
+         (should (equal (plist-get entry :seat) "odin"))
+         (should (equal (plist-get entry :task) "epic-x")))
+       (should (equal (cdr (assoc "review-sid" maduin-review--in-flight))
+                      "epic-x"))
+       ;; Cap is one reviewer: a second request no-ops.
+       (should-not (maduin-dispatch-review "epic-x"))))))
+
+(ert-deftest maduin-test-dispatch-complete-triggers-review-after-close ()
+  "Closing the wave's last task starts the gate; the gate runs after close."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (let* ((order nil)
+          (maduin-dispatch--active nil)
+          (maduin-dispatch--diff-fn (lambda (_backend _sid) nil))
+          (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) t))
+          (maduin-dispatch--landed-fn (lambda (_seat) t))
+          (maduin-dispatch--close-fn
+           (lambda (task _output) (push (list 'close task) order) t))
+          (maduin-dispatch--comment-fn (lambda (_id _text) t))
+          (entry (list :handle "sid-1" :seat "ifrit" :role 'implementer
+                       :task "t1" :backend 'opencode)))
+     (cl-letf (((symbol-function 'maduin-review-due-epic)
+                (lambda (task) (and (equal task "t1") "epic-x")))
+               ((symbol-function 'maduin-dispatch-review)
+                (lambda (epic) (push (list 'review epic) order) "review-sid")))
+       (maduin-dispatch--complete entry "sid-1")
+       (should (equal (nreverse order) '((close "t1") (review "epic-x"))))))))
+
+(ert-deftest maduin-test-dispatch-complete-reviewer-parses-verdict ()
+  "A reviewer session never lands or closes; its transcript becomes a verdict."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (let* ((landed nil)
+          (closed nil)
+          (maduin-dispatch--land-fn (lambda (_seat &optional _stamp) (setq landed t) t))
+          (maduin-dispatch--close-fn (lambda (_task _output) (setq closed t) t))
+          (maduin-dispatch--output-fn
+           (lambda (_backend _sid) "REVIEW: DRIFT widget is wrong\n"))
+          (verdict nil)
+          (entry (list :handle "review-sid" :seat "odin" :role 'reviewer
+                       :task "epic-x" :backend 'opencode)))
+     (cl-letf (((symbol-function 'maduin-review-complete)
+                (lambda (sid output)
+                  (setq verdict (list sid output))
+                  'drift)))
+       (maduin-dispatch--complete entry "review-sid")
+       (should-not landed)
+       (should-not closed)
+       (should (equal (car verdict) "review-sid"))
+       (should (string-match-p "DRIFT" (cadr verdict)))))))
+
+(ert-deftest maduin-test-dispatch-fail-reviewer-aborts-without-release ()
+  "A failed reviewer session releases the hold, not an epic claim."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (let* ((released nil)
+          (maduin-dispatch--active nil)
+          (maduin-dispatch--release-fn (lambda (task) (push task released) t))
+          (maduin-dispatch--comment-fn (lambda (_id _text) t))
+          (entry (list :handle "review-sid" :seat "odin" :role 'reviewer
+                       :task "epic-x" :backend 'opencode)))
+     (maduin-review-note-session "review-sid" "epic-x")
+     (maduin-dispatch--fail entry "review-sid" 'failed)
+     (should-not released)
+     (should-not (maduin-review-in-flight-p)))))
+
+(ert-deftest maduin-test-dispatch-ready-holds-fleet-for-rework ()
+  "Drift-fix beads dispatch first and hold every ordinary ticket."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (let ((dispatched nil))
+     (cl-letf (((symbol-function 'maduin-dispatch-implement)
+                (lambda (task) (push task dispatched) task)))
+       ;; Rework outstanding: only the drift-fix bead is picked up.
+       (maduin-dispatch--dispatch-ready '("t1" "drift-1" "t2") '("drift-1"))
+       (should (equal (nreverse dispatched) '("drift-1")))
+       ;; Review in flight, no rework yet: nothing is consumed.
+       (setq dispatched nil)
+       (maduin-review-note-session "review-sid" "epic-x")
+       (maduin-dispatch--dispatch-ready '("t1" "t2") nil)
+       (should-not dispatched)
+       ;; Gate clear: ordinary work resumes.
+       (maduin-review--drop-session "review-sid")
+       (setq dispatched nil)
+       (maduin-dispatch--dispatch-ready '("t1" "t2") nil)
+       (should (equal (nreverse dispatched) '("t1" "t2")))))))
+
+(ert-deftest maduin-test-dispatch-recover-restricted-while-held ()
+  "While the gate holds, only drift-fix orphans are recovered."
+  :tags '(maduin)
+  (let ((dispatched nil)
+        (maduin-dispatch--active nil))
+    (cl-letf (((symbol-function 'maduin-dispatch-implement)
+               (lambda (task) (push task dispatched) task)))
+      (should (= (maduin-dispatch--recover-tasks '("t1" "drift-1") '("drift-1")) 1))
+      (should (equal dispatched '("drift-1")))
+      (setq dispatched nil)
+      (should (= (maduin-dispatch--recover-tasks '("t1" "drift-1") nil) 2)))))
+
+(ert-deftest maduin-test-dispatch-run-loop-holds-on-drift-fix ()
+  "The tick reads drift-fix work first and dispatches only it while held."
+  :tags '(maduin)
+  (maduin-test--with-review-state
+   (let ((dispatched nil)
+         (maduin-dispatch--active nil)
+         (maduin-dispatch--draining nil)
+         (maduin-dispatch--tick-in-flight nil)
+         (maduin-dispatch--drift-fix-async-fn
+          (lambda (callback) (funcall callback '("drift-1") t) 'drift-fix))
+         (maduin-dispatch--in-progress-async-fn
+          (lambda (callback) (funcall callback '("orphan") t) 'in-progress))
+         (maduin-dispatch--ready-async-fn
+          (lambda (callback) (funcall callback '("t1" "drift-1") t) 'ready))
+         (maduin-dispatch--open-epics-async-fn
+          (lambda (callback) (funcall callback nil t) 'epics)))
+     (cl-letf (((symbol-function 'maduin-dispatch-implement)
+                (lambda (task) (push task dispatched) task)))
+       (maduin-dispatch-run-loop)
+       (should (equal dispatched '("drift-1")))
+       (should-not maduin-dispatch--tick-in-flight)))))
 
 ;;; 21. Kiro agent definitions and installer contract
 
@@ -5266,6 +5498,8 @@ Return a plist containing the seat path and main's initial commit."
         (maduin-dispatch--active nil)
         (maduin-dispatch--draining nil)
         (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--drift-fix-async-fn
+         (lambda (callback) (funcall callback nil t) (quote drift-fix)))
         (maduin-dispatch--in-progress-async-fn
          (lambda (callback) (funcall callback '("orphan") t) 'in-progress))
         (maduin-dispatch--ready-async-fn
@@ -5293,6 +5527,8 @@ Return a plist containing the seat path and main's initial commit."
   (let ((maduin-dispatch--active nil)
         (maduin-dispatch--draining nil)
         (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--drift-fix-async-fn
+         (lambda (callback) (funcall callback nil t) (quote drift-fix)))
         (maduin-dispatch--in-progress-async-fn
          (lambda (callback) (funcall callback nil t) 'in-progress))
         (maduin-dispatch--ready-async-fn
@@ -5312,6 +5548,8 @@ Return a plist containing the seat path and main's initial commit."
         (maduin-dispatch--active nil)
         (maduin-dispatch--draining nil)
         (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--drift-fix-async-fn
+         (lambda (callback) (funcall callback nil t) (quote drift-fix)))
         (maduin-dispatch--in-progress-async-fn
          (lambda (continuation) (setq queries (1+ queries) callback continuation) 'in-progress))
         (maduin-dispatch--ready-async-fn
@@ -5333,6 +5571,8 @@ Return a plist containing the seat path and main's initial commit."
         (maduin-dispatch--active nil)
         (maduin-dispatch--draining nil)
         (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--drift-fix-async-fn
+         (lambda (callback) (funcall callback nil t) (quote drift-fix)))
         (maduin-dispatch--in-progress-async-fn
          (lambda (callback) (funcall callback nil t) 'in-progress))
         (maduin-dispatch--ready-async-fn
@@ -5353,6 +5593,8 @@ Return a plist containing the seat path and main's initial commit."
         (maduin-dispatch--active nil)
         (maduin-dispatch--draining nil)
         (maduin-dispatch--tick-in-flight nil)
+        (maduin-dispatch--drift-fix-async-fn
+         (lambda (callback) (funcall callback nil t) (quote drift-fix)))
         (maduin-dispatch--in-progress-async-fn
          (lambda (callback)
            (setq queries (1+ queries))
@@ -5396,6 +5638,8 @@ Return a plist containing the seat path and main's initial commit."
          (maduin-dispatch--draining nil)
          (maduin-dispatch--tick-in-flight nil)
          (maduin-dispatch--tick-notify-pending nil)
+         (maduin-dispatch--drift-fix-async-fn
+          (lambda (callback) (funcall callback nil t) (quote drift-fix)))
          (maduin-dispatch--in-progress-async-fn
           (lambda (callback) (funcall callback '("orphan") t) 'in-progress))
          (maduin-dispatch--ready-async-fn

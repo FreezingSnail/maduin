@@ -113,6 +113,14 @@ backend never silently changes to another backend."
   "Delete BACKEND opaque session handle SID."
   (maduin-backend--call backend :delete-fn sid))
 
+(defun maduin-backend-output (backend sid)
+  "Return SID's raw session transcript text for BACKEND, or nil.
+`:output-fn' is optional so older adapters keep validating; a backend
+without one simply yields no transcript."
+  (let ((adapter (maduin-backend-get backend)))
+    (when (functionp (plist-get adapter :output-fn))
+      (maduin-backend--call backend :output-fn sid))))
+
 (provide 'maduin-backend)
 
 ;;; maduin-backend.el ends here

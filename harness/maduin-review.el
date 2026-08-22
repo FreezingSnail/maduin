@@ -12,9 +12,21 @@
 ;;     REVIEW: APPROVED        (goal met)
 ;;     REVIEW: DRIFT <feedback> (goal not met)
 ;;
-;; APPROVED → the epic is closed (goal met).  DRIFT → a drift-fix task
-;; is created under the epic and the epic stays open; the fleet blocks
-;; on open drift-fix tasks until repaired.
+;; APPROVED → the epic is closed (goal met).  DRIFT → a P1 drift-fix task
+;; is created under the epic and the epic stays open.
+;;
+;; The gate is wired into the dispatcher, not run inline:
+;;
+;;   dispatch closes wave's last task → `maduin-review-due-epic'
+;;     → `maduin-dispatch-review' spawns a `reviewer' role session
+;;     → `maduin-review-complete' parses its verdict on completion
+;;
+;; While a review is in flight, and while any drift-fix bead is still
+;; open, `maduin-review-hold-with-p' holds the fleet: workers dispatch
+;; the drift-fix rework first and pick up no other ticket until the gate
+;; is clear.  `max-retries' bounds re-reviews of a repeatedly drifting
+;; epic.  `maduin-review-gate' remains the synchronous single-call form
+;; (spawn, wait, verdict) for direct/manual use.
 ;;
 ;; Deterministic gating (per-epic start, diff, blocking, verdict
 ;; parsing) stays in elisp here.  The reviewer only supplies the
@@ -215,6 +227,49 @@ REVIEW: DRIFT FEEDBACK (FEEDBACK = text after the marker on that line);
 
 ;;; Blocking gate
 
+(defvar maduin-review--in-flight nil
+  "Alist ((SID . EPIC-ID) ...) of reviewer sessions currently running.
+Populated by the dispatcher (`maduin-review-note-session') so the fleet
+hold and the verdict handler share one source of truth.")
+
+(defvar maduin-review--attempts nil
+  "Alist ((EPIC-ID . COUNT) ...) of review attempts started per epic.
+Bounded by the reviewer section's `max-retries': an epic that keeps
+drifting stops re-reviewing instead of looping forever.")
+
+(defvar maduin-review--exhausted nil
+  "Epic IDs already reported as having exhausted their review retries.")
+
+(defun maduin-review-max-retries ()
+  "Return the reviewer's configured retry budget (default 3)."
+  (let ((value (maduin-review--config-get 'max-retries 3)))
+    (if (and (integerp value) (> value 0)) value 3)))
+
+(defun maduin-review-in-flight-p ()
+  "Return non-nil while any reviewer session is running."
+  (not (null maduin-review--in-flight)))
+
+(defun maduin-review-drift-fix-tasks ()
+  "Return non-closed drift-fix task IDs, or nil.
+`bd query' excludes closed issues by default, so an open or in-progress
+drift-fix bead is exactly what holds the fleet."
+  (and (maduin-review--enabled-p)
+       (funcall maduin-review--query-fn "label=drift-fix")))
+
+(defun maduin-review-hold-with-p (drift-fix-tasks)
+  "Return non-nil when the fleet must not consume ordinary tickets.
+The fleet is held while a review is in flight and while any drift-fix
+bead is still open: the rework the reviewer asked for comes first.
+DRIFT-FIX-TASKS is an already-fetched id list (nil means none), keeping
+this predicate free of bd I/O on the run-loop's hot path."
+  (and (maduin-review--enabled-p)
+       (or (maduin-review-in-flight-p)
+           (not (null drift-fix-tasks)))))
+
+(defun maduin-review-hold-p ()
+  "Return non-nil when the fleet must hold, querying bd for drift-fix work."
+  (maduin-review-hold-with-p (maduin-review-drift-fix-tasks)))
+
 (defun maduin-review--blocked-p ()
   "Return t when an open drift-fix task exists (fleet blocked)."
   (and (maduin-review--enabled-p)
@@ -284,6 +339,88 @@ CONTEXT is the epic's goal (its --design/--acceptance section)."
     "Epic goal (design/acceptance):\n```\n%s\n```\n")
    (or diff "") (or context "")))
 
+(defun maduin-review-plan-for (epic-id)
+  "Return the reviewer plan string for EPIC-ID (diff + goal context)."
+  (maduin-review--plan (maduin-review--epic-diff epic-id)
+                       (or (maduin-review--design-acceptance epic-id) "")))
+
+(defun maduin-review--attempt-count (epic-id)
+  "Return the number of reviews already started for EPIC-ID."
+  (or (cdr (assoc epic-id maduin-review--attempts)) 0))
+
+(defun maduin-review--retries-exhausted (epic-id)
+  "Report EPIC-ID's exhausted review budget once, then return nil.
+Returning nil lets callers use this in a conditional tail position: a
+drifting epic stops re-reviewing and waits for a human instead."
+  (unless (member epic-id maduin-review--exhausted)
+    (push epic-id maduin-review--exhausted)
+    (funcall maduin-review--comment-fn
+             epic-id
+             (format "review gate: %d review attempts exhausted — needs human attention"
+                     (maduin-review-max-retries))))
+  nil)
+
+(defun maduin-review-due-epic (task-id)
+  "Return TASK-ID's parent epic when it is now due for review, else nil.
+Due = review enabled, the task has a parent epic, every child of that
+epic is closed, no review is already in flight for it, and the epic has
+review attempts left.  Records the epic's diff start as a side effect so
+the reviewer sees the group's full change set."
+  (when (maduin-review--enabled-p)
+    (let* ((spec (condition-case nil
+                     (funcall maduin-review--show-fn task-id)
+                   (error nil)))
+           (epic (and spec (plist-get spec :parent))))
+      (when (and epic
+                 (not (rassoc epic maduin-review--in-flight))
+                 (maduin-review--epic-children-closed-p epic))
+        (if (>= (maduin-review--attempt-count epic) (maduin-review-max-retries))
+            (maduin-review--retries-exhausted epic)
+          (maduin-review--note-epic-land epic)
+          epic)))))
+
+(defun maduin-review-note-session (sid epic-id)
+  "Record reviewer session SID as reviewing EPIC-ID and count the attempt."
+  (push (cons sid epic-id) maduin-review--in-flight)
+  (let ((cell (assoc epic-id maduin-review--attempts)))
+    (if cell
+        (setcdr cell (1+ (cdr cell)))
+      (push (cons epic-id 1) maduin-review--attempts)))
+  epic-id)
+
+(defun maduin-review--drop-session (sid)
+  "Forget reviewer session SID and return the epic it was reviewing, or nil."
+  (let ((epic (cdr (assoc sid maduin-review--in-flight))))
+    (setq maduin-review--in-flight
+          (cl-remove-if (lambda (entry) (equal (car entry) sid))
+                        maduin-review--in-flight))
+    epic))
+
+(defun maduin-review-complete (sid output)
+  "Finish reviewer session SID by parsing OUTPUT and acting on its verdict.
+Return the verdict symbol from `maduin-review--dispatch-verdict', or nil
+when SID was not a tracked reviewer session.  The session is always
+dropped from the in-flight set, so a hold can never outlive its review."
+  (let ((epic (maduin-review--drop-session sid)))
+    (when epic
+      (maduin-review--dispatch-verdict (maduin-review--verdict output) epic))))
+
+(defun maduin-review-abort (sid reason)
+  "Drop reviewer session SID after a failure and comment REASON on its epic.
+Return the epic id, or nil when SID was not tracked."
+  (let ((epic (maduin-review--drop-session sid)))
+    (when epic
+      (funcall maduin-review--comment-fn
+               epic (format "review gate: %s" reason))
+      epic)))
+
+(defun maduin-review-reset ()
+  "Clear all review gate runtime state (in-flight, attempts, epic starts)."
+  (setq maduin-review--in-flight nil
+        maduin-review--attempts nil
+        maduin-review--exhausted nil
+        maduin-review--epic-starts nil))
+
 (defun maduin-review--wait (sid)
   "Block until reviewer session SID reaches a terminal state.
 Return the terminal status (`completed' or `failed')."
@@ -322,6 +459,11 @@ comments, epic stays open) or `error' (comment; never silent-fail)."
     ('approved
      (maduin-review--close-epic epic-id)
      (maduin-review--drop-epic-start epic-id)
+     (setq maduin-review--attempts
+           (cl-remove-if (lambda (entry) (equal (car entry) epic-id))
+                         maduin-review--attempts)
+           maduin-review--exhausted
+           (delete epic-id maduin-review--exhausted))
      'approved)
     (`(drift . ,feedback)
      (let ((task (maduin-review--create-drift-fix feedback epic-id)))
@@ -356,9 +498,7 @@ Return:
   (if (not (maduin-review--enabled-p))
       nil
     (let* ((root (funcall maduin-review--main-root-fn))
-           (diff (maduin-review--epic-diff epic-id))
-           (context (or (maduin-review--design-acceptance epic-id) ""))
-           (plan (maduin-review--plan diff context))
+           (plan (maduin-review-plan-for epic-id))
            (model (or (maduin-review--config-get
                        'model "opencode-go/deepseek-v4-pro")
                       "opencode-go/deepseek-v4-pro"))

@@ -218,6 +218,18 @@ Kiro has no export or session-delete CLI; this function never invokes one."
           (kill-buffer buffer)))
       t)))
 
+(defun maduin-kiro-output (handle)
+  "Return HANDLE's captured transcript text, or nil.
+Prefer the sentinel's stored `:output'; fall back to the live buffer for a
+session still running."
+  (let ((entry (maduin-kiro--entry handle)))
+    (when entry
+      (or (plist-get entry :output)
+          (let ((buffer (plist-get entry :buffer)))
+            (and (buffer-live-p buffer)
+                 (maduin-kiro--strip-ansi
+                  (with-current-buffer buffer (buffer-string)))))))))
+
 (maduin-backend-register
  'kiro
  (list :executable maduin-kiro-command
@@ -225,6 +237,7 @@ Kiro has no export or session-delete CLI; this function never invokes one."
        :tui-fn #'maduin-kiro-tui
        :complete-p-fn #'maduin-kiro-complete-p
        :diff-fn #'maduin-kiro-diff
+       :output-fn #'maduin-kiro-output
        :delete-fn #'maduin-kiro-delete))
 
 (provide 'maduin-kiro)

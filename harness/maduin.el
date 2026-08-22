@@ -170,7 +170,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
 ;;; Dev reload — edit-then-reload loop for developing the harness itself.
 
 (defvar maduin--feature-list
-  '(maduin-designer maduin-dispatch
+  '(maduin-designer maduin-dispatch maduin-review
     maduin-cockpit-config maduin-cockpit-face maduin-cockpit-bar
     maduin-cockpit maduin-terminal maduin-concierge maduin-pipeline
     maduin-stamp maduin-state maduin-session maduin-kiro
