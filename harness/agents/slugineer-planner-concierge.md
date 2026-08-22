@@ -21,6 +21,9 @@ permission:
     "cpan*": deny
     "rm -rf *": ask
     "git push*": ask
+    "git merge*": deny
+    "git pull*": deny
+    "git reset --hard*": ask
     "DROP *": ask
 ---
 

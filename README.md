@@ -207,7 +207,7 @@ tool.
 Single entry point:
 
 ```bash
-harness/check.sh                     # clean + byte-compile + ERT (400 tests)
+harness/check.sh                     # clean + byte-compile + ERT (407 tests)
 harness/check.sh -c                  # compile only
 harness/check.sh -k                  # skip clean
 harness/check.sh probe probes/<f>.el # + exploratory probe test
@@ -266,6 +266,20 @@ harness/
   fast-forward (a concurrent land) is re-rebased and retried. Real
   conflicts go to the repairer, which rebases too — merging `main` into
   a seat branch would be replayed away by land.
+- **History stays linear, enforced three ways.** `maduin-start` and
+  `maduin-bootstrap` harden the shared repo config
+  (`merge.ff=only`, `pull.rebase=true`, `commit.cleanup=strip`), which
+  backfills onto existing projects since all seat worktrees share one
+  `.git`. Agent permissions deny `git merge` / `git pull`. Land then
+  asserts `main..<branch>` holds no merge commit before touching `main`;
+  a non-linear branch (or an unreadable count) is refused as `conflict`
+  and handed to the repairer.
+- **One commit per task, not two.** Land no longer adds a contentless
+  `task complete (<seat>)` commit on top of the worker's own. A dirty
+  tree is folded into the worker's unlanded commit with
+  `git commit --amend`; only a branch with nothing unlanded gets a
+  fresh commit. Amending is safe — the tip is unlanded and land's
+  stamped rebase rewrites it anyway.
 - **Startup recovery.** The harness detects tasks left `in_progress`
   by a crashed or quit session on start. It re-dispatches them, so
   `bd ready` re-surfaces orphaned work.

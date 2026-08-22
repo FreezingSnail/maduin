@@ -62,6 +62,45 @@ Prefer the directory containing maduin.el, else
       (maduin-log 'warn msg)
     (message "[maduin-workspace] WARN: %s" msg)))
 
+(defconst maduin-workspace-harden-config
+  '(("merge.ff" . "only")
+    ("pull.rebase" . "true")
+    ("commit.cleanup" . "strip"))
+  "Repo config enforced by `maduin-workspace-harden-repo'.
+
+`merge.ff=only' is the load-bearing entry: an agent inside a seat worktree
+has shell access, and a plain `git merge main' there produced merge commits
+that land could not flatten.  Refusing non-fast-forward merges at the git
+level makes that failure impossible instead of merely discouraged.
+`pull.rebase' covers `git pull'; `commit.cleanup=strip' drops the
+`# Conflicts:' comment block that `commit -m' would otherwise preserve.")
+
+(defun maduin-workspace-harden-repo ()
+  "Enforce `maduin-workspace-harden-config' on the shared repo config.
+
+Seat worktrees share one `.git', so repo-level config covers every existing
+and future seat: no per-worktree backfill step, and old projects pick this up
+on the next `maduin-start' or `maduin-bootstrap'.  Idempotent — writing the
+same value twice is a no-op.
+
+Return t when every key is set, nil when any write failed.  Never signals."
+  (condition-case err
+      (let ((main (funcall maduin-workspace--main-root-fn))
+            (ok t))
+        (dolist (kv maduin-workspace-harden-config)
+          (let ((res (funcall maduin-workspace--git-output-fn
+                              main "config" (car kv) (cdr kv))))
+            (unless (= 0 (car res))
+              (setq ok nil)
+              (maduin-workspace--log-warning
+               (format "harden-repo: git config %s %s failed (exit %d): %s"
+                       (car kv) (cdr kv) (car res) (cdr res))))))
+        ok)
+    (error
+     (maduin-workspace--log-warning
+      (format "harden-repo: unexpected error: %s" err))
+     nil)))
+
 (defun maduin-workspace-path (seat-name)
   "Return worktree path for SEAT-NAME under workspaces root. No creation."
   (expand-file-name seat-name (maduin-workspace--root)))
@@ -91,6 +130,7 @@ but cannot be safely removed (non-empty)."
   "Create a REAL git worktree for SEAT-NAME at TARGET.
 Return worktree path on success, nil otherwise."
   (make-directory (maduin-workspace--root) t)
+  (maduin-workspace-harden-repo)
   (let ((created (maduin-bd-worktree-create
                   target (maduin-workspace-branch seat-name))))
     (if (and created (maduin-bd-worktree-real-p created))

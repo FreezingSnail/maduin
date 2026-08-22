@@ -2576,6 +2576,7 @@
             (push args calls)
            (cond
             ((member "commit" args) (cons 0 ""))
+            ((member "rev-list" args) (cons 0 "0\n"))
             ((member "rev-parse" args) (cons 0 "abc123\n"))
             ((member "rebase" args) (cons 0 ""))
             ((member "merge" args) (cons 0 ""))))))
@@ -2602,6 +2603,7 @@
            (cond
             ((member "commit" args)
              (cons 1 "nothing to commit, working tree clean\n"))
+            ((member "rev-list" args) (cons 0 "0\n"))
             ((member "rev-parse" args) (cons 0 "abc123\n"))
             ((member "rebase" args) (cons 0 ""))
             ((member "merge" args) (cons 0 ""))))))
@@ -2622,6 +2624,7 @@
           (lambda (_dir &rest args)
             (cond
              ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
              ((member "rev-parse" args) (cons 0 "abc123\n"))
              ((member "rebase" args)
               (cons 1 "CONFLICT (content): Merge conflict in foo.el\n"))))))
@@ -2642,6 +2645,7 @@
          (lambda (_dir &rest args)
            (cond
             ((member "commit" args) (cons 0 ""))
+            ((member "rev-list" args) (cons 0 "0\n"))
             ((member "rev-parse" args) (cons 0 "abc123\n"))
             ((member "rebase" args)
              (cons 128 "fatal: update_ref failed\n"))))))
@@ -2650,6 +2654,103 @@
       (should (null (maduin-pipeline-land-branch "test-seat")))
       (should (stringp logged))
       (should (string-match-p "rebase" logged)))))
+
+(ert-deftest maduin-test-land-branch-folds-dirty-tree-into-worker-commit ()
+  :tags '(maduin)
+  ;; Branch holds unlanded work (merge-base --is-ancestor branch main ≠ 0) and
+  ;; the tree is dirty → the stray changes are amended into the worker's own
+  ;; commit.  No second `task complete (SEAT)' commit may be created: the
+  ;; commit message is the record.
+  (let* ((calls nil)
+         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+         (maduin-pipeline--git-fn
+          (lambda (_dir &rest args)
+            (push args calls)
+            (if (member "merge-base" args) 1 0)))
+         (maduin-pipeline--git-output-fn
+          (lambda (_dir &rest args)
+            (push args calls)
+            (cond
+             ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
+             ((member "rev-parse" args) (cons 0 "abc123\n"))
+             ((member "rebase" args) (cons 0 ""))
+             ((member "merge" args) (cons 0 ""))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") t))
+    (should (cl-some (lambda (a) (equal a '("commit" "--amend" "--no-edit")))
+                     calls))
+    (should-not (cl-some (lambda (a) (member "-m" a)) calls))))
+
+(ert-deftest maduin-test-land-branch-fresh-commit-when-nothing-unlanded ()
+  :tags '(maduin)
+  ;; Branch fully landed (no worker commit to amend) → a fresh commit carries
+  ;; the work rather than amending an already-landed commit.
+  (let* ((calls nil)
+         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+         (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
+         (maduin-pipeline--git-output-fn
+          (lambda (_dir &rest args)
+            (push args calls)
+            (cond
+             ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
+             ((member "rev-parse" args) (cons 0 "abc123\n"))
+             ((member "rebase" args) (cons 0 ""))
+             ((member "merge" args) (cons 0 ""))))))
+    (should (eq (maduin-pipeline-land-branch "test-seat") t))
+    (should (cl-some (lambda (a) (equal a '("commit" "-m" "task complete (test-seat)")))
+                     calls))
+    (should-not (cl-some (lambda (a) (member "--amend" a)) calls))))
+
+(ert-deftest maduin-test-land-branch-refuses-merge-commits ()
+  :tags '(maduin)
+  ;; A seat agent merged inside its worktree, so main..branch still holds a
+  ;; merge commit after the rebase → land refuses (→ repairer) instead of
+  ;; fast-forwarding a merge commit onto main.
+  (let* ((calls nil)
+         (logged nil)
+         (maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+         (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+         (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+         (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
+         (maduin-pipeline--git-output-fn
+          (lambda (_dir &rest args)
+            (push args calls)
+            (cond
+             ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "1\n"))
+             ((member "rev-parse" args) (cons 0 "abc123\n"))
+             ((member "rebase" args) (cons 0 ""))
+             ((member "merge" args) (cons 0 ""))))))
+    (cl-letf (((symbol-function 'maduin-workspace--log-warning)
+               (lambda (msg) (setq logged msg))))
+      (should (eq (maduin-pipeline-land-branch "test-seat") 'conflict))
+      (should (string-match-p "merge commits" (or logged "")))
+      ;; main must never be touched.
+      (should-not (cl-some (lambda (a) (member "--ff-only" a)) calls)))))
+
+(ert-deftest maduin-test-land-branch-refuses-unreadable-merge-count ()
+  :tags '(maduin)
+  ;; rev-list itself fails → unknown linearity reads as non-linear.
+  (let ((maduin-pipeline--worktree-path-fn (lambda (_s) maduin-test--dir))
+        (maduin-pipeline--branch-fn (lambda (_s) "seat-branch-xyz"))
+        (maduin-pipeline--main-root-fn (lambda () maduin-test--dir))
+        (maduin-pipeline--git-fn (lambda (_dir &rest _args) 0))
+        (maduin-pipeline--git-output-fn
+         (lambda (_dir &rest args)
+           (cond
+            ((member "commit" args) (cons 0 ""))
+            ((member "rev-list" args) (cons 128 "fatal: bad revision\n"))
+            ((member "rev-parse" args) (cons 0 "abc123\n"))
+            ((member "rebase" args) (cons 0 ""))
+            ((member "merge" args) (cons 0 ""))))))
+    (cl-letf (((symbol-function 'maduin-workspace--log-warning)
+               (lambda (_msg) nil)))
+      (should (eq (maduin-pipeline-land-branch "test-seat") 'conflict)))))
 
 (ert-deftest maduin-test-land-branch-ff-only-fail ()
   :tags '(maduin)
@@ -2664,6 +2765,7 @@
          (lambda (_dir &rest args)
            (cond
             ((member "commit" args) (cons 0 ""))
+            ((member "rev-list" args) (cons 0 "0\n"))
             ((member "rev-parse" args) (cons 0 "abc123\n"))
             ((member "rebase" args) (cons 0 ""))
             ((member "merge" args)
@@ -2687,6 +2789,7 @@
          (lambda (_dir &rest args)
            (cond
             ((member "commit" args) (cons 0 ""))
+            ((member "rev-list" args) (cons 0 "0\n"))
             ((member "rev-parse" args)
              (cons 128 "fatal: needed a single revision\n"))))))
     (cl-letf (((symbol-function 'maduin-workspace--log-warning)
@@ -2707,6 +2810,7 @@
             (push args calls)
             (cond
              ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
              ((member "rev-parse" args) (cons 0 "abc123\n"))
              ((member "rebase" args) (cons 0 ""))
              ((member "merge" args) (cons 0 ""))))))
@@ -2727,6 +2831,7 @@
             (push args calls)
             (cond
              ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
              ((member "rev-parse" args) (cons 0 "abc123\n"))
              ((member "rebase" args) (cons 0 ""))
              ((member "merge" args) (cons 0 ""))))))
@@ -2753,6 +2858,7 @@
             (push args calls)
             (cond
              ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
              ((member "rev-parse" args) (cons 0 "abc123\n"))
              ((member "rebase" args)
               (cl-incf rebases)
@@ -2784,6 +2890,7 @@
             (push args calls)
             (cond
              ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
              ((member "rev-parse" args) (cons 0 "abc123\n"))
              ((member "rebase" args) (cons 1 "fatal: rebase failed\n"))))))
     (should-not (maduin-pipeline-land-branch "ifrit" stamp))
@@ -2803,6 +2910,7 @@
             (push args calls)
             (cond
              ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
              ((member "rev-parse" args) (cons 0 "abc123\n"))
              ((member "rebase" args) (cons 1 "CONFLICT (content): foo.el\n"))))))
     (should (eq (maduin-pipeline-land-branch "ifrit" stamp) 'conflict))
@@ -5891,6 +5999,7 @@ Return a plist containing the seat path and main's initial commit."
           (lambda (_dir &rest args)
             (cond
              ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
              ((member "rev-parse" args) (cons 0 "abc123\n"))
              ((member "rebase" args) (cl-incf rebases) (cons 0 ""))
              ((member "merge" args)
@@ -5915,6 +6024,7 @@ Return a plist containing the seat path and main's initial commit."
           (lambda (_dir &rest args)
             (cond
              ((member "commit" args) (cons 0 ""))
+             ((member "rev-list" args) (cons 0 "0\n"))
              ((member "rev-parse" args) (cons 0 "abc123\n"))
              ((member "rebase" args)
               (cl-incf rebases)
@@ -5959,6 +6069,47 @@ accumulate in the dynamically bound `calls' list."
      (cl-letf (((symbol-function 'maduin-workspace-path)
                 (lambda (_seat) maduin-test--dir)))
        ,@body)))
+
+(ert-deftest maduin-test-workspace-harden-repo-sets-merge-ff-only ()
+  :tags '(maduin)
+  ;; Repo-level config, run from the main root: seat worktrees share one .git,
+  ;; so this is the backfill path for projects created before hardening.
+  (let* ((calls nil)
+         (maduin-workspace--main-root-fn (lambda () maduin-test--dir))
+         (maduin-workspace--git-output-fn
+          (lambda (dir &rest args) (push (cons dir args) calls) (cons 0 ""))))
+    (should (eq (maduin-workspace-harden-repo) t))
+    (should (equal (list maduin-test--dir "config" "merge.ff" "only")
+                   (cons (car (car (last calls))) (cdr (car (last calls))))))
+    (dolist (kv maduin-workspace-harden-config)
+      (should (cl-some (lambda (c)
+                         (equal (cdr c) (list "config" (car kv) (cdr kv))))
+                       calls)))))
+
+(ert-deftest maduin-test-workspace-harden-repo-idempotent ()
+  :tags '(maduin)
+  ;; Writing the same values twice is a no-op for git; the second run must
+  ;; still report success and issue the same argv.
+  (let* ((n 0)
+         (maduin-workspace--main-root-fn (lambda () maduin-test--dir))
+         (maduin-workspace--git-output-fn
+          (lambda (_dir &rest _args) (setq n (1+ n)) (cons 0 ""))))
+    (should (eq (maduin-workspace-harden-repo) t))
+    (should (eq (maduin-workspace-harden-repo) t))
+    (should (= n (* 2 (length maduin-workspace-harden-config))))))
+
+(ert-deftest maduin-test-workspace-harden-repo-failure-warns ()
+  :tags '(maduin)
+  ;; A failed config write warns and returns nil; it never signals, so a
+  ;; hardening failure cannot abort start or bootstrap.
+  (let ((logged nil)
+        (maduin-workspace--main-root-fn (lambda () maduin-test--dir))
+        (maduin-workspace--git-output-fn
+         (lambda (_dir &rest _args) (cons 1 "error: could not lock config file\n"))))
+    (cl-letf (((symbol-function 'maduin-workspace--log-warning)
+               (lambda (msg) (setq logged msg))))
+      (should (null (maduin-workspace-harden-repo)))
+      (should (string-match-p "harden-repo" (or logged ""))))))
 
 (ert-deftest maduin-test-workspace-sync-already-current ()
   :tags '(maduin)

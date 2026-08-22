@@ -226,6 +226,49 @@ safe: the trailer amend uses `trailer.ifexists=replaceIfDifferent'."
                branch (car ff) (cdr ff)))
       nil))))
 
+(defun maduin-pipeline--linear-p (wt branch)
+  "Return non-nil when BRANCH carries no merge commits beyond main.
+
+Land flattens history by rebasing, but a seat agent has shell access and can
+merge inside its own worktree.  Checking `main..BRANCH' for merge commits
+turns that into a refusal (→ repairer) instead of a merge commit on main.
+An unreadable count reads as non-linear: refusing costs a repairer pass,
+while trusting it costs a merge commit on main."
+  (let ((res (funcall maduin-pipeline--git-output-fn
+                      wt "rev-list" "--count" "--merges"
+                      (format "main..%s" branch))))
+    (and (consp res)
+         (= 0 (car res))
+         (equal "0" (string-trim (or (cdr res) ""))))))
+
+(defun maduin-pipeline--commit-worktree (wt branch main seat-name)
+  "Stage and record WT's uncommitted changes on BRANCH; return t or nil.
+
+Dirty work is folded into the worker's own unlanded commit with `--amend'
+rather than added as a second, contentless commit: the commit message is the
+record, and `task complete (SEAT)' records nothing.  Amending is safe — the
+tip is unlanded and land's stamped rebase rewrites it anyway.  Only a branch
+with nothing unlanded (worker committed nothing) gets a fresh commit.
+`nothing to commit' is not a failure."
+  (funcall maduin-pipeline--git-fn wt "add" "-A")
+  (let* ((landed (= 0 (funcall maduin-pipeline--git-fn
+                               main "merge-base" "--is-ancestor"
+                               branch "main")))
+         (res (if landed
+                  (funcall maduin-pipeline--git-output-fn
+                           wt "commit" "-m"
+                           (format "task complete (%s)" seat-name))
+                (funcall maduin-pipeline--git-output-fn
+                         wt "commit" "--amend" "--no-edit"))))
+    (if (and (/= 0 (car res))
+             (not (string-match-p "nothing to commit" (cdr res))))
+        (progn
+          (maduin-workspace--log-warning
+           (format "land-branch: commit failed (exit %d): %s"
+                   (car res) (cdr res)))
+          nil)
+      t)))
+
 (defun maduin-pipeline-land-branch (seat-name &optional stamp)
   "Commit SEAT-NAME worktree changes, rebase its branch onto main, then land it.
 STAMP is a provenance plist consumed by `maduin-stamp-trailers'.  A nil or
@@ -242,34 +285,31 @@ failure aborts and retries once unstamped; conflicts return `conflict'."
           (maduin-workspace--log-warning
            (format "land-branch: worktree %s missing for seat %s" wt seat-name))
           nil)
-      (funcall maduin-pipeline--git-fn wt "add" "-A")
-      (let ((res (funcall maduin-pipeline--git-output-fn
-                          wt "commit" "-m"
-                          (format "task complete (%s)" seat-name))))
-        (if (and (/= 0 (car res))
-                 (not (string-match-p "nothing to commit" (cdr res))))
-            (progn
-              (maduin-workspace--log-warning
-               (format "land-branch: commit failed (exit %d): %s"
-                       (car res) (cdr res)))
-              nil)
-          (let ((verify (funcall maduin-pipeline--git-output-fn
-                                 main "rev-parse" "--verify" branch)))
-            (if (/= 0 (car verify))
-                (progn
+      (if (not (maduin-pipeline--commit-worktree wt branch main seat-name))
+          nil
+        (let ((verify (funcall maduin-pipeline--git-output-fn
+                               main "rev-parse" "--verify" branch)))
+          (if (/= 0 (car verify))
+              (progn
+                (maduin-workspace--log-warning
+                 (format "land-branch: seat branch %s not found (exit %d): %s"
+                         branch (car verify) (cdr verify)))
+                nil)
+            (let ((rebase (maduin-pipeline--rebase-branch
+                           wt branch exec-command)))
+              (when (eq rebase 'retry)
+                (setq rebase (maduin-pipeline--rebase-branch wt branch)))
+              (cond
+               ((eq rebase t)
+                (if (maduin-pipeline--linear-p wt branch)
+                    (maduin-pipeline--land-rebased wt branch main exec-command)
                   (maduin-workspace--log-warning
-                   (format "land-branch: seat branch %s not found (exit %d): %s"
-                           branch (car verify) (cdr verify)))
-                  nil)
-              (let ((rebase (maduin-pipeline--rebase-branch
-                             wt branch exec-command)))
-                (when (eq rebase 'retry)
-                  (setq rebase (maduin-pipeline--rebase-branch wt branch)))
-                (cond
-                 ((eq rebase t)
-                  (maduin-pipeline--land-rebased wt branch main exec-command))
-                 ((eq rebase 'conflict) 'conflict)
-                 (t nil))))))))))
+                   (format "land-branch: %s still holds merge commits after rebase; refusing land"
+                           branch))
+                  'conflict))
+               ((eq rebase 'conflict) 'conflict)
+               (t nil)))))))))
+
 (defun maduin-pipeline-landed-p (seat-name)
   "Return non-nil when SEAT-NAME's branch tip is an ancestor of main.
 Uses `git merge-base --is-ancestor <branch> main` from the main repo."

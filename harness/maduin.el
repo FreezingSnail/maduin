@@ -108,6 +108,8 @@ Demand-driven orchestration: the run-loop polls ready bd tasks and
 spawns an ephemeral implementer session per task (up to the fleet
 concurrency cap).  Idle = zero sessions."
   (interactive)
+  ;; Backfill git hardening on projects created before it existed; idempotent.
+  (maduin-workspace-harden-repo)
   (maduin-dispatch-start)
   (message "maduin started (dispatchers active, 0 sessions)"))
 
@@ -154,6 +156,7 @@ workspace dirs.  Hints to run `bd init' when .beads is absent."
     (make-directory dir t))
   (dolist (pair (maduin--seats))
     (make-directory (maduin--seat-workdir (car pair)) t))
+  (maduin-workspace-harden-repo)
   ;; Ensure per-seat git worktrees; never abort on failure (logged, nil).
   (dolist (pair (maduin--seats))
     (condition-case err

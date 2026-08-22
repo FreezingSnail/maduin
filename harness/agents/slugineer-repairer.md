@@ -20,6 +20,9 @@ permission:
     "cpan*": deny
     "rm -rf *": ask
     "git push*": ask
+    "git merge*": deny
+    "git pull*": deny
+    "git reset --hard*": ask
     "DROP *": ask
 ---
 
@@ -57,6 +60,15 @@ blocking gate, land/merge) stays in elisp; you fix what's flagged.
    Testing Rules).
 4. **Emit `RESOLVED_DONE`** as the final line on success, followed by one-line
    summary of what changed.
+
+## Git Rules (inviolable — MUST NOT violate)
+
+- **MUST** resolve conflicts by rebase: fix files, `git add`, `git rebase --continue`.
+- **MUST NOT** run `git merge` or `git pull`. Merging main into a seat branch is
+  replayed away by land, and a merge commit on a seat branch makes land refuse.
+  Repo config sets `merge.ff=only`; agent perms deny both.
+- **MUST NOT** rewrite landed history (`reset --hard` on landed commits, force ops).
+- **MUST** leave the seat branch linear on top of `main`.
 
 ## Testing Rules (inviolable — MUST NOT violate)
 

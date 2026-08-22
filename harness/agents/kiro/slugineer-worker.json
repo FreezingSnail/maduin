@@ -8,7 +8,7 @@
   "allowedTools": ["fs_read", "fs_write", "execute_bash", "grep", "glob", "@builtin/code"],
   "resources": ["skill://tooling/skills/CONCH_TASK/SKILL.md"],
   "hooks": {},
-  "toolsSettings": {"execute_bash": {"deniedCommands": ["^(python|python3|perl|ruby|lua|php|Rscript|pip|gem|cpan)(?:\\s|$)", "^rm\\s+-rf(?:\\s|$)", "^git\\s+push(?:\\s|$)", "^DROP(?:\\s|$)"]}},
+  "toolsSettings": {"execute_bash": {"deniedCommands": ["^(python|python3|perl|ruby|lua|php|Rscript|pip|gem|cpan)(?:\\s|$)", "^rm\\s+-rf(?:\\s|$)", "^git\\s+push(?:\\s|$)", "^git\\s+merge(?:\\s|$)", "^git\\s+pull(?:\\s|$)", "^DROP(?:\\s|$)"]}},
   "includeMcpJson": true,
   "model": "gpt-5.6-terra"
 }
